@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE compression_stats \n              SET total_files_pending = total_files_pending + 1,\n                  updated_at = ?\n              WHERE id = 'global'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2e53b16846cef899f7c00c5cbc1342fd70aff34d7ff4f9b72cf6116ef75ea88c"
+}

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT \n                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,\n                 SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing_count,\n                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,\n                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,\n                 SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_count\n              FROM compression_queue",
+  "describe": {
+    "columns": [
+      {
+        "name": "pending_count",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "processing_count",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "completed_count",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "failed_count",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "skipped_count",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "5890fe50d5e5cb453f60fa249cfcb07ba19eec3d9b4de743b4ae47fac6f31597"
+}

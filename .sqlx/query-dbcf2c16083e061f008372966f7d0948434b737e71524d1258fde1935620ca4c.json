@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE compression_queue SET \n                  priority = ?, \n                  updated_at = ? \n                  WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "dbcf2c16083e061f008372966f7d0948434b737e71524d1258fde1935620ca4c"
+}

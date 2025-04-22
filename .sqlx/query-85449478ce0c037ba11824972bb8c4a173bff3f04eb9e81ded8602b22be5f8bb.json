@@ -1,0 +1,92 @@
+{
+  "db_name": "SQLite",
+  "query": "\n             SELECT \n                 operation_id, entity_table, entity_id, operation_type, \n                 field_name, old_value, new_value, timestamp, user_id, \n                 device_id, sync_batch_id, processed_at, sync_error\n             FROM change_log\n             WHERE entity_table = ? AND entity_id = ?\n             ORDER BY timestamp ASC\n             ",
+  "describe": {
+    "columns": [
+      {
+        "name": "operation_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "entity_table",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "entity_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "operation_type",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "field_name",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "old_value",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "new_value",
+        "ordinal": 6,
+        "type_info": "Text"
+      },
+      {
+        "name": "timestamp",
+        "ordinal": 7,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "device_id",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "sync_batch_id",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "processed_at",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "sync_error",
+        "ordinal": 12,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "85449478ce0c037ba11824972bb8c4a173bff3f04eb9e81ded8602b22be5f8bb"
+}

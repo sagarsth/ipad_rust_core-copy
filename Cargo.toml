@@ -1,0 +1,77 @@
+[package]
+name = "ipad_rust_core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+
+# Compression libraries
+image = "0.24.6"
+zip = "0.6.6"
+tempfile = "3.7.0"
+
+# Optional WebP support
+webp = { version = "0.2.5", optional = true }
+
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Database
+sqlx = { version = "0.8.3", features = ["runtime-tokio-rustls", "macros", "sqlite"] }
+refinery = { version = "0.8.16", features = ["rusqlite"] }
+
+# Async runtime
+tokio = { version = "1.44.1", features = ["full"] }
+async-trait = "0.1.88"
+
+# UUID and time
+uuid = { version = "1.16.0", features = ["serde", "v4"] }
+chrono = { version = "0.4.40", features = ["serde"] }
+
+# Error handling
+thiserror = "2.0.12"
+
+# Logging
+log = "0.4"
+env_logger = "0.11.7"
+
+# Security
+argon2 = "0.5.3"
+jsonwebtoken = "9.0.0"
+# Add explicit dependency on rand_core 0.6.x for argon2 compatibility
+rand_core = { version = "0.6.4", features = ["std"] }
+
+# File handling and compression
+flate2 = "1.1.0"
+zstd = "0.13.3"
+infer = "0.19.0"
+csv = "1.3.1"
+
+# Validation and parsing
+jsonschema = "0.29.0"
+regex = "1.11.1"
+
+# Utilities
+once_cell = "1.21.1"
+lazy_static = "1.4"
+rand = { version = "0.9.0", features = ["std"] }
+dotenv = "0.15.0"
+base64 = "0.22.1"
+
+# HTTP client
+reqwest = { version = "0.12.15", features = ["json"] }
+
+
+rust_decimal = { version = "1.35", features = ["serde-str"] }
+rust_decimal_macros = "1.35"
+
+mime = "0.3.16"
+
+
+
+[features]
+default = []
+webp = ["dep:webp"]

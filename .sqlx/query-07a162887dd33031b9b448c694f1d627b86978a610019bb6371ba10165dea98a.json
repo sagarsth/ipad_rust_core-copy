@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT id, entity_id, entity_type, deleted_by, deleted_at, operation_id \n            FROM tombstones\n            WHERE entity_type = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "entity_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "entity_type",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_by",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "deleted_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "operation_id",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "07a162887dd33031b9b448c694f1d627b86978a610019bb6371ba10165dea98a"
+}
