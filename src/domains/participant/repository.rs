@@ -1,5 +1,5 @@
 use crate::auth::AuthContext;
-use sqlx::{Executor, Pool, Row, Sqlite, Transaction, SqlitePool};
+use sqlx::{Executor, Row, Sqlite, Transaction, SqlitePool};
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::participant::types::{NewParticipant, Participant, ParticipantRow, UpdateParticipant};

@@ -1,9 +1,9 @@
 use crate::errors::{DomainResult, DomainError, DbError};
 use crate::auth::AuthContext;
-use crate::types::{UserRole, PaginationParams};
+use crate::types::UserRole;
 use crate::domains::sync::types::{Tombstone, ChangeLogEntry, ChangeOperationType};
 use crate::domains::sync::repository::{TombstoneRepository, ChangeLogRepository};
-use crate::domains::core::dependency_checker::{DependencyChecker, Dependency};
+use crate::domains::core::dependency_checker::DependencyChecker;
 use crate::domains::core::repository::{DeleteResult, HardDeletable, SoftDeletable, FindById};
 use crate::domains::document::repository::MediaDocumentRepository;
 use uuid::Uuid;
@@ -13,6 +13,7 @@ use sqlx::{SqlitePool, Transaction, Sqlite};
 use std::sync::Arc;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
+use serde_json; // Added for JSON manipulation
 use sqlx::Row;
 
 /// Delete options for controlling deletion behavior
@@ -189,81 +190,178 @@ where
         }
     }
 
-    /// Helper function to handle cascading document deletion within a transaction
-    async fn cascade_delete_documents<'t>(
+    /// Enhanced helper function to handle document deletion with physical file cleanup
+    async fn cascade_delete_documents<'t, T>(
         &self,
         parent_table_name: &str,
         parent_id: Uuid,
         hard_delete: bool, // Indicates if the parent was hard deleted
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
-    ) -> DomainResult<()> {
+    ) -> DomainResult<()> 
+    where 
+        T: Send + Sync + Clone + 'static // Changed generic E to T to avoid conflict
+    {
         if let Some(media_repo) = &self.media_doc_repo {
-            // Find all related documents. Use default pagination for now, might need loop for large numbers.
-            // IMPORTANT: This assumes find_by_related_entity doesn't start its own transaction!
-            // If it does, we need a find_by_related_entity_with_tx variant.
-            // Let's assume it uses the pool directly for now, or fetch IDs first.
-
-            // Fetch just the IDs first to avoid borrowing issues with the transaction
-             // Introduce longer-lived bindings
-             let parent_table_name_owned = parent_table_name.to_string();
-             let parent_id_str = parent_id.to_string(); 
-             
-             // Use sqlx::query and bind instead of query! macro
-             let doc_ids_result = sqlx::query(
-                 "SELECT id FROM media_documents WHERE related_table = ? AND related_id = ? AND deleted_at IS NULL"
-             )
-             .bind(parent_table_name_owned) // Bind the owned string
-             .bind(parent_id_str)         // Bind the owned string
-             .fetch_all(&mut **tx) // Use the transaction
-             .await;
-             
-             let doc_ids: Vec<Uuid> = match doc_ids_result {
-                 Ok(rows) => rows.into_iter().filter_map(|row| {
-                     // Use try_get to access the column by name
-                     row.try_get::<String, _>("id").ok().map(|id_str| Uuid::parse_str(&id_str).ok()).flatten()
-                 }).collect(),
-                 Err(sqlx::Error::RowNotFound) => Vec::new(), // No documents found is ok
-                 Err(e) => return Err(DbError::from(e).into()), // Propagate other DB errors
-             };
-
-
-            for doc_id in doc_ids {
+            // Fetch just the document IDs and paths for the related entity
+            // using a direct query to avoid borrowing issues with the transaction
+            let parent_id_str = parent_id.to_string(); // Store the string in a variable
+            let document_data_result = sqlx::query!(
+                r#"
+                SELECT 
+                    id, 
+                    file_path, 
+                    compressed_file_path
+                FROM 
+                    media_documents 
+                WHERE 
+                    related_table = ? AND 
+                    related_id = ? AND 
+                    deleted_at IS NULL
+                "#,
+                parent_table_name,
+                parent_id_str // Use the variable here
+            )
+            .fetch_all(&mut **tx) // Use the transaction
+            .await;
+    
+            let document_data = match document_data_result {
+                Ok(data) => data,
+                Err(sqlx::Error::RowNotFound) => Vec::new(), // No documents found is ok
+                Err(e) => return Err(DbError::from(e).into()), // Propagate other DB errors
+            };
+    
+            // Process each document
+            for doc in document_data {
+                // Parse the ID string to UUID
+                let doc_id = match Uuid::parse_str(&doc.id) {
+                    Ok(id) => id,
+                    Err(_) => continue, // Skip if invalid UUID (shouldn't happen)
+                };
+    
                 if hard_delete {
-                    // --- Cascade Hard Delete ---
-                    // 1. Create Tombstone for the document
-                    let tombstone = Tombstone::new(doc_id, media_repo.entity_name(), auth.user_id);
-                    let operation_id = tombstone.operation_id; // Capture for consistency if needed
+                    // --- HARD DELETE PATH ---
+                    
+                    // 1. Create tombstone for the document
+                    let mut tombstone = Tombstone::new(doc_id, media_repo.entity_name(), auth.user_id);
+                    
+                    // 2. Add additional metadata for sync/cleanup tracking
+                    let metadata = serde_json::json!({
+                        "file_path": doc.file_path,
+                        "compressed_file_path": doc.compressed_file_path,
+                        "parent_table": parent_table_name,
+                        "parent_id": parent_id.to_string(),
+                        "deletion_type": "cascade",
+                        "timestamp": Utc::now().to_rfc3339()
+                    });
+                    
+                    tombstone.additional_metadata = Some(metadata.to_string());
+                    let operation_id = tombstone.operation_id; // Capture for consistency
+                    
+                    // 3. Create the tombstone record
                     self.tombstone_repo.create_tombstone_with_tx(&tombstone, tx).await?;
-
-                    // 2. Create Change Log for the document's hard delete
-                     let change_log = ChangeLogEntry {
+    
+                    // 4. Create change log entry for the document's hard delete
+                    let change_log = ChangeLogEntry {
                         operation_id, // Use tombstone's ID
                         entity_table: media_repo.entity_name().to_string(),
                         entity_id: doc_id,
                         operation_type: ChangeOperationType::HardDelete,
-                        field_name: None, old_value: None, new_value: None,
+                        field_name: None, 
+                        old_value: None, 
+                        new_value: None,
+                        document_metadata: Some(metadata.to_string()), // Add the same metadata
                         timestamp: Utc::now(),
                         user_id: auth.user_id,
                         device_id: auth.device_id.parse().ok(),
-                        sync_batch_id: None, processed_at: None, sync_error: None,
+                        sync_batch_id: None, 
+                        processed_at: None, 
+                        sync_error: None,
                     };
+                    
                     self.change_log_repo.create_change_log_with_tx(&change_log, tx).await?;
-
-                    // 3. Perform the actual hard delete of the document
+    
+                    // 5. Queue file for deletion
+                    let queue_id_str = Uuid::new_v4().to_string();
+                    let doc_id_str = doc_id.to_string();
+                    let now_str = Utc::now().to_rfc3339();
+                    let user_id_str = auth.user_id.to_string();
+                    let file_queue_entry = sqlx::query!(
+                        r#"
+                        INSERT INTO file_deletion_queue (
+                            id, 
+                            document_id,
+                            file_path, 
+                            compressed_file_path, 
+                            requested_at, 
+                            requested_by, 
+                            grace_period_seconds
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        "#,
+                        queue_id_str, // Use variable
+                        doc_id_str,   // Use variable
+                        doc.file_path,
+                        doc.compressed_file_path,
+                        now_str,      // Use variable
+                        user_id_str,  // Use variable
+                        86400 // 24 hour grace period
+                    )
+                    .execute(&mut **tx)
+                    .await;
+                    
+                    // Log but don't fail if queuing fails
+                    if let Err(e) = file_queue_entry {
+                        eprintln!("Failed to queue file for deletion: {}", e);
+                    }
+    
+                    // 6. Perform the actual hard delete of the document record
                     media_repo.hard_delete_with_tx(doc_id, auth, tx).await?;
-                     // ON DELETE CASCADE in DB handles versions/logs implicitly here
-
+                    
+                    // DB ON DELETE CASCADE will handle document versions and access logs automatically
+    
                 } else {
-                    // --- Cascade Soft Delete ---
+                    // --- SOFT DELETE PATH ---
+                    
+                    // Only soft delete the document record - don't queue for file deletion yet
+                    // since the document should still exist but be marked as deleted
                     media_repo.soft_delete_with_tx(doc_id, auth, tx).await?;
-                    // NOTE: Decide if soft-deleting a parent should HARD delete versions/logs
-                    // associated with the document. If so, add calls here:
-                    // self.doc_ver_repo.hard_delete_by_document_id_with_tx(doc_id, tx).await?;
-                    // self.doc_log_repo.hard_delete_by_document_id_with_tx(doc_id, tx).await?;
+                    
+                    // Log access for the soft delete
+                    let log_id_str = Uuid::new_v4().to_string();
+                    let log_doc_id_str = doc_id.to_string();
+                    let log_user_id_str = auth.user_id.to_string();
+                    let log_timestamp_str = Utc::now().to_rfc3339();
+                    let log_details_str = format!("Cascade soft delete from parent: {}/{}", parent_table_name, parent_id);
+                    let access_log_query = sqlx::query!(
+                        r#"
+                        INSERT INTO document_access_logs (
+                            id,
+                            document_id,
+                            user_id,
+                            access_type,
+                            access_date,
+                            details
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        "#,
+                        log_id_str,      // Use variable
+                        log_doc_id_str,  // Use variable
+                        log_user_id_str, // Use variable
+                        "delete", // soft delete
+                        log_timestamp_str, // Use variable
+                        log_details_str    // Use variable
+                    )
+                    .execute(&mut **tx);
+                    
+                    // Log but don't fail if access logging fails
+                    if let Err(e) = access_log_query.await {
+                        eprintln!("Failed to log document soft delete: {}", e);
+                    }
                 }
             }
         }
+        
         Ok(())
     }
 }
@@ -303,16 +401,10 @@ where
             return Err(DomainError::AuthorizationFailed("Only admins can force delete operations".to_string()));
         }
 
-        // Check if entity exists (optional, depends if soft/hard delete check this)
-        // Let's assume delete methods handle non-existent IDs gracefully or error appropriately.
-        // self.repo.find_by_id(id).await?; 
-
         // 2. Dependency Check
         let table_name = self.repo.entity_name();
         let all_dependencies = self.dependency_checker.check_dependencies(table_name, id).await?;
         
-        // Filter out cascadable dependencies, as they are handled by the DB or subsequent logic
-        // We only care about non-cascadable dependencies preventing a *hard* delete
         let blocking_dependencies: Vec<String> = all_dependencies
             .iter()
             .filter(|dep| !dep.is_cascadable && dep.count > 0)
@@ -343,6 +435,7 @@ where
                     field_name: None,
                     old_value: None, // Maybe store serialized entity before delete?
                     new_value: None,
+                    document_metadata: None, // Not a document deletion itself
                     timestamp: Utc::now(),
                     user_id: auth.user_id,
                     device_id: auth.device_id.parse::<Uuid>().ok(),
@@ -356,7 +449,8 @@ where
                 self.repo.hard_delete_with_tx(id, auth, &mut tx).await?;
 
                 // *** Cascade Delete Documents ***
-                self.cascade_delete_documents(table_name, id, true, auth, &mut tx).await?;
+                // Explicitly type the cascade function call if necessary
+                self.cascade_delete_documents::<E>(table_name, id, true, auth, &mut tx).await?;
 
                 Ok::<_, DomainError>(())
             }.await;
@@ -367,42 +461,40 @@ where
                     Ok(DeleteResult::HardDeleted)
                 },
                 Err(e @ DomainError::EntityNotFound(_, _)) => {
-                    // Rollback if not found during the transaction operations
                     let _ = tx.rollback().await;
-                    Err(e) // Propagate NotFound specifically
+                    Err(e) 
                 },
                 Err(e) => {
                     let _ = tx.rollback().await; 
-                    Err(e) // Propagate other errors
+                    Err(e) 
                 }
             }
 
         } else {
             // --- Soft Delete or Prevent Path --- 
             if !blocking_dependencies.is_empty() && !options.fallback_to_soft_delete {
-                // Dependencies exist, and we are not falling back to soft delete
                 return Ok(DeleteResult::DependenciesPrevented { dependencies: blocking_dependencies });
             }
 
-            // Proceed with soft delete (either requested or fallback)
-            let mut tx = self.pool.begin().await.map_err(DbError::from)?; // Start transaction
+            let mut tx = self.pool.begin().await.map_err(DbError::from)?; 
 
             let soft_delete_result = self.repo.soft_delete_with_tx(id, auth, &mut tx).await;
 
             match soft_delete_result {
                 Ok(_) => {
-                    tx.commit().await.map_err(DbError::from)?; // Commit on success
-                    // Return dependencies that *would have* blocked hard delete
+                     // *** Cascade Soft Delete Documents ***
+                     self.cascade_delete_documents::<E>(table_name, id, false, auth, &mut tx).await?;
+
+                    tx.commit().await.map_err(DbError::from)?; 
                     Ok(DeleteResult::SoftDeleted { dependencies: blocking_dependencies })
                 },
                 Err(e @ DomainError::EntityNotFound(_, _)) => {
-                    // Rollback if not found during soft delete
                     let _ = tx.rollback().await;
-                    Err(e) // Propagate NotFound
+                    Err(e) 
                 },
                 Err(e) => {
                     let _ = tx.rollback().await; 
-                    Err(e) // Propagate other errors
+                    Err(e) 
                 }
             }
         }

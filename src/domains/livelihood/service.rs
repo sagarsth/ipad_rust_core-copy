@@ -3,7 +3,7 @@ use crate::domains::core::delete_service::{BaseDeleteService, DeleteOptions, Del
 use crate::domains::core::repository::{DeleteResult, FindById};
 use crate::domains::core::dependency_checker::DependencyChecker;
 use crate::domains::livelihood::repository::{LivehoodRepository, SubsequentGrantRepository, SqliteLivelihoodRepository, SqliteSubsequentGrantRepository};
-use crate::domains::livelihood::types::{Livelihood, LivelihoodInclude, LivelihoodResponse, NewLivelihood, NewSubsequentGrant, ParticipantSummary, ProjectSummary, SubsequentGrant, SubsequentGrantResponse, SubsequentGrantSummary, UpdateLivelihood, UpdateSubsequentGrant};
+use crate::domains::livelihood::types::{Livelihood, LivelihoodInclude, LivelihoodResponse, NewLivelihood, NewSubsequentGrant, ParticipantSummary, ProjectSummary, SubsequentGrantResponse, SubsequentGrantSummary, UpdateLivelihood, UpdateSubsequentGrant};
 use crate::domains::participant::repository::ParticipantRepository;
 use crate::domains::permission::Permission;
 use crate::domains::project::repository::ProjectRepository;
@@ -12,7 +12,7 @@ use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult};
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::validation::Validate;
 use async_trait::async_trait;
-use sqlx::{Pool, Sqlite, Transaction};
+use sqlx::{Pool, Sqlite};
 use std::sync::Arc;
 use uuid::Uuid;
 

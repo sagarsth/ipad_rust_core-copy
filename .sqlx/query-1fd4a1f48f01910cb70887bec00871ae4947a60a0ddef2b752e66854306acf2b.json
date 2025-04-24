@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE compression_stats SET\n                total_original_size = total_original_size + ?,\n                total_compressed_size = total_compressed_size + ?,\n                space_saved = space_saved + ?,\n                compression_ratio = CASE \n                    WHEN total_original_size + ? > 0 THEN \n                        ((space_saved + ?) * 100.0) / (total_original_size + ?)\n                    ELSE 0 END,\n                total_files_compressed = total_files_compressed + 1,\n                total_files_pending = total_files_pending - 1,\n                last_compression_date = ?,\n                updated_at = ?\n            WHERE id = 'global'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "1fd4a1f48f01910cb70887bec00871ae4947a60a0ddef2b752e66854306acf2b"
+}

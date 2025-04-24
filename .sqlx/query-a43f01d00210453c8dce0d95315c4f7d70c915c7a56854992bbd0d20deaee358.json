@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "\n             SELECT \n                 operation_id, entity_table, entity_id, operation_type, \n                 field_name, old_value, new_value, timestamp, user_id, \n                 device_id, sync_batch_id, processed_at, sync_error\n             FROM change_log\n             WHERE entity_table = ? AND entity_id = ?\n             ORDER BY timestamp ASC\n             ",
+  "query": "\n             SELECT \n                 operation_id, entity_table, entity_id, operation_type, \n                 field_name, old_value, new_value, timestamp, user_id, \n                 device_id, sync_batch_id, processed_at, sync_error,\n                 document_metadata\n             FROM change_log\n             WHERE entity_table = ? AND entity_id = ?\n             ORDER BY timestamp ASC\n             ",
   "describe": {
     "columns": [
       {
@@ -67,6 +67,11 @@
         "name": "sync_error",
         "ordinal": 12,
         "type_info": "Text"
+      },
+      {
+        "name": "document_metadata",
+        "ordinal": 13,
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -85,8 +90,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "85449478ce0c037ba11824972bb8c4a173bff3f04eb9e81ded8602b22be5f8bb"
+  "hash": "a43f01d00210453c8dce0d95315c4f7d70c915c7a56854992bbd0d20deaee358"
 }

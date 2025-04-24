@@ -8,7 +8,6 @@ use crate::types::PaginationParams;
 use chrono::{DateTime, Utc};
 use sqlx::{Pool, Sqlite, Transaction, query_as, query, Row};
 use uuid::Uuid;
-use std::collections::HashSet;
 use crate::validation::Validate;
 use async_trait::async_trait;
 

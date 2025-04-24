@@ -7,7 +7,7 @@ use crate::domains::permission::Permission;
 use crate::domains::participant::repository::ParticipantRepository;
 use crate::domains::participant::types::{NewParticipant, Participant, ParticipantResponse, UpdateParticipant};
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
-use crate::errors::{DomainResult, ServiceError, ServiceResult, ValidationError};
+use crate::errors::{DomainResult, ServiceError, ServiceResult};
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::validation::Validate;
 use async_trait::async_trait;

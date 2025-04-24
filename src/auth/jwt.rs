@@ -1,5 +1,3 @@
-use jsonwebtoken::errors::ErrorKind;
-use jsonwebtoken::TokenData;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use uuid::Uuid;

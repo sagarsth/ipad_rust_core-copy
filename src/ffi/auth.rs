@@ -1,5 +1,4 @@
 // Remove the unused imports
-use crate::auth::{AuthService, AuthContext, LoginResult};
 use crate::ffi::error::{FFIError, FFIResult};
 use std::ffi::{c_char, CStr, CString};
 use std::os::raw::c_int;

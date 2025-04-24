@@ -1,5 +1,5 @@
 use crate::errors::{DomainError, DomainResult};
-use crate::validation::{Validate, ValidationBuilder, Email};
+use crate::validation::{Validate, ValidationBuilder};
 use uuid::Uuid;
 use chrono::{DateTime, Utc, NaiveDate};
 use serde::{Serialize, Deserialize};

@@ -1,4 +1,4 @@
-use crate::errors::{DomainResult, DomainError};
+use crate::errors::DomainResult;
 use crate::auth::AuthContext;
 use uuid::Uuid;
 use async_trait::async_trait;

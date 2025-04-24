@@ -834,61 +834,33 @@ CREATE INDEX IF NOT EXISTS idx_document_types_updated_by ON document_types(updat
 
 -- ----------- Media/Documents Table (Needs Field Timestamps & Authors for mutable metadata) -----------
 CREATE TABLE IF NOT EXISTS media_documents (
-    id TEXT PRIMARY KEY, -- UUID
-    related_table TEXT NOT NULL, -- e.g., 'projects', 'participants'
-    related_id TEXT NOT NULL,    -- ID of the related record
-
-    title TEXT,
-    title_updated_at TEXT,
-    title_updated_by TEXT,
-
-    type TEXT NOT NULL,          -- Link to document_types
-
-    file_path TEXT NOT NULL,     -- Local path (may not need sync metadata itself)
-    compressed_path TEXT,        -- Local path
-
-    description TEXT,
-    description_updated_at TEXT,
-    description_updated_by TEXT,
-
-    file_size INTEGER,           -- Original size
-    compressed_size INTEGER,     -- Compressed size
-
-    mime_type TEXT,
-
-    upload_date TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), -- When file added locally
-
-    compression_status TEXT DEFAULT 'pending' CHECK(compression_status IN ('pending', 'compressed', 'failed', 'not_needed')),
-    compression_date TEXT,
-
-    -- sync_status, sync_priority: Can be removed, handled by change_log / sync batches
-    -- Let's keep a simplified status for the file blob itself
-    blob_sync_status TEXT NOT NULL DEFAULT 'pending' CHECK(blob_sync_status IN ('pending', 'in_progress', 'synced', 'failed')),
-    blob_last_sync_attempt TEXT,
-
-    cloud_url TEXT,              -- URL on cloud storage after blob sync
-    cloud_url_updated_at TEXT,   -- If URL can change
-    cloud_url_updated_by TEXT,
-
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), -- Metadata record created
-    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), -- Metadata record updated
-    created_by_user_id TEXT,
-    updated_by_user_id TEXT,
-
-    deleted_at TEXT DEFAULT NULL,
-    deleted_by_user_id TEXT DEFAULT NULL,
-
-    FOREIGN KEY (type) REFERENCES document_types(id) ON DELETE RESTRICT,
+    id TEXT PRIMARY KEY NOT NULL,
+    related_table TEXT NOT NULL,
+    related_id TEXT NOT NULL,
+    type_id TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    title TEXT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    field_identifier TEXT NULL,
+    compression_status TEXT NOT NULL DEFAULT 'pending',
+    compressed_file_path TEXT NULL,
+    blob_sync_status TEXT NOT NULL DEFAULT 'pending',
+    blob_storage_key TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT NULL,
+    updated_by_user_id TEXT NULL,
+    deleted_at TEXT NULL,
+    deleted_by_user_id TEXT NULL,
     FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
-    -- Add FKs for _updated_by fields...
-    FOREIGN KEY (title_updated_by) REFERENCES users(id) ON DELETE SET NULL,
-    FOREIGN KEY (description_updated_by) REFERENCES users(id) ON DELETE SET NULL,
-    FOREIGN KEY (cloud_url_updated_by) REFERENCES users(id) ON DELETE SET NULL
+    FOREIGN KEY (type_id) REFERENCES document_types(id) ON DELETE RESTRICT
 );
 CREATE INDEX IF NOT EXISTS idx_media_documents_related ON media_documents(related_table, related_id);
-CREATE INDEX IF NOT EXISTS idx_media_documents_type ON media_documents(type);
+CREATE INDEX IF NOT EXISTS idx_media_documents_type ON media_documents(type_id);
 CREATE INDEX IF NOT EXISTS idx_media_documents_user ON media_documents(created_by_user_id);
 CREATE INDEX IF NOT EXISTS idx_media_documents_compression ON media_documents(compression_status);
 CREATE INDEX IF NOT EXISTS idx_media_documents_blob_sync ON media_documents(blob_sync_status);
@@ -2247,10 +2219,481 @@ PRAGMA foreign_keys=off; -- Recommended for schema changes
 ALTER TABLE change_log ADD COLUMN priority INTEGER DEFAULT 5; -- Add priority, default to normal (e.g., 5)
 
 -- Add compressed file path and linked field name to media_documents table
-ALTER TABLE media_documents ADD COLUMN compressed_file_path TEXT NULL;
+-- ALTER TABLE media_documents ADD COLUMN compressed_file_path TEXT NULL; -- Commented out: Column now created in basic.sql
 ALTER TABLE media_documents ADD COLUMN linked_field_name TEXT NULL;
 
 -- No need to recreate indexes specifically for these added nullable columns usually
 -- SQLite handles indexes on NULL values appropriately.
 
-PRAGMA foreign_keys=on; 
+PRAGMA foreign_keys=on; -- Add sync_priority column to media_documents
+ALTER TABLE media_documents ADD COLUMN sync_priority INTEGER NOT NULL DEFAULT 1; -- Default to Normal
+
+-- Add sync_priority column to strategic_goals
+ALTER TABLE strategic_goals ADD COLUMN sync_priority INTEGER NOT NULL DEFAULT 1; -- Default to Normal
+
+-- Add sync_priority column to projects
+ALTER TABLE projects ADD COLUMN sync_priority INTEGER NOT NULL DEFAULT 1; -- Default to Normal
+
+-- Add sync_priority column to workshops
+ALTER TABLE workshops ADD COLUMN sync_priority INTEGER NOT NULL DEFAULT 1; -- Default to Normal
+
+-- Add sync_priority column to participants
+ALTER TABLE participants ADD COLUMN sync_priority INTEGER NOT NULL DEFAULT 1; -- Default to Normal
+
+-- Add sync_priority column to livelihoods
+ALTER TABLE livelihoods ADD COLUMN sync_priority INTEGER NOT NULL DEFAULT 1; -- Default to Normal
+
+-- Add sync_priority column to subsequent_grants
+ALTER TABLE subsequent_grants ADD COLUMN sync_priority INTEGER NOT NULL DEFAULT 1; -- Default to Normal
+
+-- NOTE: Add to other relevant tables if necessary (e.g., activities, donors) -- SQLite does not directly support ALTER COLUMN to remove NOT NULL.
+-- We need to recreate the table.
+
+-- 1. Rename the existing table
+ALTER TABLE media_documents RENAME TO media_documents_old;
+
+-- 2. Create the new table with related_id as nullable and add temp_related_id
+CREATE TABLE media_documents (
+    id TEXT PRIMARY KEY NOT NULL,
+    related_table TEXT NOT NULL,
+    related_id TEXT NULL, -- Made nullable
+    type_id TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    title TEXT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    field_identifier TEXT NULL,
+    compression_status TEXT NOT NULL DEFAULT 'pending',
+    compressed_file_path TEXT NULL,
+    blob_sync_status TEXT NOT NULL DEFAULT 'pending',
+    sync_priority INTEGER NOT NULL DEFAULT 1,
+    temp_related_id TEXT NULL, -- New column
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by_user_id TEXT NULL,
+    updated_by_user_id TEXT NULL,
+    deleted_at TEXT NULL,
+    deleted_by_user_id TEXT NULL,
+    FOREIGN KEY (type_id) REFERENCES document_types(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Add index for temp_related_id for faster lookups
+CREATE INDEX idx_media_documents_temp_related_id ON media_documents(temp_related_id) WHERE temp_related_id IS NOT NULL;
+-- Add index for related_id
+CREATE INDEX idx_media_documents_related_id ON media_documents(related_id) WHERE related_id IS NOT NULL;
+
+
+-- 3. Copy data from the old table to the new table
+INSERT INTO media_documents (
+    id, related_table, related_id, type_id, file_path, original_filename,
+    title, mime_type, size_bytes, field_identifier,
+    compression_status, compressed_file_path, blob_sync_status,
+    sync_priority, temp_related_id, -- temp_related_id will be NULL initially
+    created_at, updated_at, created_by_user_id, updated_by_user_id,
+    deleted_at, deleted_by_user_id
+)
+SELECT
+    id, related_table, related_id, type_id, file_path, original_filename,
+    title, mime_type, size_bytes, field_identifier,
+    compression_status, compressed_file_path, blob_sync_status,
+    sync_priority, NULL, -- Set temp_related_id to NULL
+    created_at, updated_at, created_by_user_id, updated_by_user_id,
+    deleted_at, deleted_by_user_id
+FROM media_documents_old;
+
+-- 4. Drop the old table
+DROP TABLE media_documents_old; -- Add migration script here
+    -- Add total_files_skipped column to compression_stats table
+    ALTER TABLE compression_stats
+    ADD COLUMN total_files_skipped INTEGER NOT NULL DEFAULT 0;-- Add migration script here
+
+-- SQLite does not support ALTER TABLE ADD CONSTRAINT CHECK directly.
+-- We must recreate the table with the new constraint.
+
+-- Step 1: Disable foreign keys (Necessary because we drop/recreate the table)
+PRAGMA foreign_keys=off;
+
+-- Step 2: Start transaction -- REMOVED (sqlx-cli handles the transaction)
+-- BEGIN TRANSACTION; -- REMOVED
+
+-- Step 3: Create the new table with the desired schema including the CHECK constraint
+CREATE TABLE document_types_new (
+    id TEXT PRIMARY KEY, -- User-defined key
+    name TEXT NOT NULL,
+    name_updated_at TEXT,
+    name_updated_by TEXT,
+    allowed_extensions TEXT NOT NULL,
+    allowed_extensions_updated_at TEXT,
+    allowed_extensions_updated_by TEXT,
+    max_size INTEGER NOT NULL,
+    max_size_updated_at TEXT,
+    max_size_updated_by TEXT,
+    compression_level INTEGER NOT NULL DEFAULT 6,
+    compression_level_updated_at TEXT,
+    compression_level_updated_by TEXT,
+    -- Apply the new CHECK constraint
+    compression_method TEXT DEFAULT 'lossless' 
+        CHECK(compression_method IN ('lossless', 'lossy', 'pdf_optimize', 'office_optimize', 'none')),
+    compression_method_updated_at TEXT,
+    compression_method_updated_by TEXT,
+    min_size_for_compression INTEGER DEFAULT 10240,
+    min_size_for_compression_updated_at TEXT,
+    min_size_for_compression_updated_by TEXT,
+    description TEXT,
+    description_updated_at TEXT,
+    description_updated_by TEXT,
+    default_priority TEXT NOT NULL DEFAULT 'normal' CHECK(default_priority IN ('high', 'normal', 'low', 'never')),
+    default_priority_updated_at TEXT,
+    default_priority_updated_by TEXT,
+    icon TEXT,
+    icon_updated_at TEXT,
+    icon_updated_by TEXT,
+    related_tables TEXT,
+    related_tables_updated_at TEXT,
+    related_tables_updated_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (name_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (allowed_extensions_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (max_size_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (compression_level_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (compression_method_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (min_size_for_compression_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (description_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (default_priority_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (icon_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (related_tables_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Step 4: Copy data from the old table to the new table
+-- Ensure all columns from the original table are included here
+INSERT INTO document_types_new (
+    id, name, name_updated_at, name_updated_by, 
+    allowed_extensions, allowed_extensions_updated_at, allowed_extensions_updated_by,
+    max_size, max_size_updated_at, max_size_updated_by,
+    compression_level, compression_level_updated_at, compression_level_updated_by,
+    compression_method, compression_method_updated_at, compression_method_updated_by,
+    min_size_for_compression, min_size_for_compression_updated_at, min_size_for_compression_updated_by,
+    description, description_updated_at, description_updated_by,
+    default_priority, default_priority_updated_at, default_priority_updated_by,
+    icon, icon_updated_at, icon_updated_by,
+    related_tables, related_tables_updated_at, related_tables_updated_by,
+    created_at, updated_at, created_by_user_id, updated_by_user_id,
+    deleted_at, deleted_by_user_id
+)
+SELECT 
+    id, name, name_updated_at, name_updated_by, 
+    allowed_extensions, allowed_extensions_updated_at, allowed_extensions_updated_by,
+    max_size, max_size_updated_at, max_size_updated_by,
+    compression_level, compression_level_updated_at, compression_level_updated_by,
+    compression_method, compression_method_updated_at, compression_method_updated_by,
+    min_size_for_compression, min_size_for_compression_updated_at, min_size_for_compression_updated_by,
+    description, description_updated_at, description_updated_by,
+    default_priority, default_priority_updated_at, default_priority_updated_by,
+    icon, icon_updated_at, icon_updated_by,
+    related_tables, related_tables_updated_at, related_tables_updated_by,
+    created_at, updated_at, created_by_user_id, updated_by_user_id,
+    deleted_at, deleted_by_user_id
+FROM document_types;
+
+-- Step 5: Drop the old table
+DROP TABLE document_types;
+
+-- Step 6: Rename the new table to the original name
+ALTER TABLE document_types_new RENAME TO document_types;
+
+-- Step 7: Recreate indexes that were on the original table
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_types_name ON document_types(name) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_document_types_updated_at ON document_types(updated_at);
+CREATE INDEX IF NOT EXISTS idx_document_types_deleted_at ON document_types(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_document_types_created_by ON document_types(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_document_types_updated_by ON document_types(updated_by_user_id);
+
+-- Step 8: Commit the transaction -- REMOVED (sqlx-cli handles the transaction)
+-- COMMIT; -- REMOVED
+
+-- Step 9: Re-enable foreign keys
+PRAGMA foreign_keys=on;
+-- Begin transaction for restructuring media_documents
+
+-- Create the new media_documents table with the updated schema
+CREATE TABLE media_documents_new (
+    id TEXT PRIMARY KEY NOT NULL,
+    related_table TEXT NOT NULL,
+    related_id TEXT NULL,
+    type_id TEXT NOT NULL,
+    original_filename TEXT NOT NULL, -- RENAMED from file_name
+    file_path TEXT NOT NULL,
+    compressed_file_path TEXT NULL,
+    compressed_size_bytes INTEGER NULL, -- ADDED
+    field_identifier TEXT NULL, -- RENAMED from linked_field_name
+    title TEXT NULL,
+    description TEXT NULL,
+    mime_type TEXT NOT NULL, -- Made NOT NULL
+    size_bytes INTEGER NOT NULL, -- RENAMED from file_size, Made NOT NULL
+    compression_status TEXT NOT NULL DEFAULT 'PENDING', -- Added default
+    blob_storage_key TEXT NULL,
+    blob_sync_status TEXT NOT NULL DEFAULT 'PENDING', -- Added default
+    sync_priority INTEGER NOT NULL DEFAULT 1, -- Added default (matches SyncPriority::Normal)
+    temp_related_id TEXT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by_user_id TEXT NULL,
+    updated_by_user_id TEXT NULL,
+    deleted_at TEXT NULL,
+    deleted_by_user_id TEXT NULL,
+    FOREIGN KEY (type_id) REFERENCES document_types(id) ON DELETE CASCADE
+);
+
+-- Copy data from the old table to the new table, handling renamed columns and NULLs
+INSERT INTO media_documents_new (
+    id, related_table, related_id, type_id, original_filename, file_path,
+    compressed_file_path, compressed_size_bytes, field_identifier, title, description,
+    mime_type, size_bytes, compression_status, blob_storage_key, blob_sync_status,
+    sync_priority, temp_related_id, created_at, updated_at, created_by_user_id,
+    updated_by_user_id, deleted_at, deleted_by_user_id
+)
+SELECT
+    id, related_table, related_id, type_id, original_filename, file_path, -- FIXED: Use original_filename
+    compressed_file_path, NULL, field_identifier, title, NULL, -- FIXED: Use field_identifier, Select NULL for description
+    COALESCE(mime_type, 'application/octet-stream'), -- Handle potential NULL mime_type
+    COALESCE(size_bytes, 0), -- FIXED: Use size_bytes
+    compression_status, NULL, blob_sync_status, -- FIXED: Select NULL for blob_storage_key
+    sync_priority, temp_related_id, created_at, updated_at, created_by_user_id,
+    updated_by_user_id, deleted_at, deleted_by_user_id
+FROM media_documents; -- Select from the original table
+
+-- Drop the old table
+DROP TABLE media_documents;
+
+-- Rename the new table to the original name
+ALTER TABLE media_documents_new RENAME TO media_documents;
+
+-- Recreate indices that existed on the old table
+CREATE INDEX idx_media_documents_related ON media_documents (related_table, related_id);
+CREATE INDEX idx_media_documents_type ON media_documents (type_id);
+CREATE INDEX idx_media_documents_temp_related_id ON media_documents (temp_related_id); 
+
+
+=========================new migration===================================================
+
+-- Document Handling System Enhancement Migration
+-- Created: April 24, 2025
+-- Description: Enhances document tracking, deletion, and error handling capabilities
+-- Compatible with SQLite limitations
+
+-- Disable foreign keys during migration
+PRAGMA foreign_keys=off;
+
+-- ========================================================================
+-- 1. Enhance the tombstones table with additional metadata
+-- ========================================================================
+
+-- Add additional_metadata column to tombstones
+ALTER TABLE tombstones ADD COLUMN additional_metadata TEXT NULL;
+
+-- ========================================================================
+-- 2. Enhance media_documents table with error handling fields
+-- ========================================================================
+
+-- First check what columns exist in the current table
+PRAGMA table_info(media_documents);
+
+-- Create a new media_documents table with enhanced error fields and cleanup
+CREATE TABLE media_documents_new (
+    id TEXT PRIMARY KEY NOT NULL,
+    related_table TEXT NOT NULL,
+    related_id TEXT NULL,           -- Nullable to support temporary documents
+    temp_related_id TEXT NULL,      -- For documents uploaded before entity creation
+    type_id TEXT NOT NULL,
+    original_filename TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    compressed_file_path TEXT NULL,
+    compressed_size_bytes INTEGER NULL,
+    field_identifier TEXT NULL,     -- For linking to specific form fields
+    title TEXT NULL,
+    description TEXT NULL,
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    
+    -- Error handling fields
+    has_error INTEGER NOT NULL DEFAULT 0,       -- Boolean flag for error state
+    error_message TEXT NULL,                    -- Error details
+    error_type TEXT NULL CHECK(error_type IS NULL OR error_type IN (
+        'storage_failure',          -- File system errors
+        'conversion_failure',       -- Format conversion errors
+        'compression_failure',      -- Compression errors
+        'sync_failure',             -- Sync-related errors
+        'permission_failure',       -- Access permission issues
+        'upload_failure',           -- Initial upload failures
+        'other'                     -- Miscellaneous errors
+    )),
+    
+    -- Status fields
+    compression_status TEXT NOT NULL DEFAULT 'pending',
+    blob_status TEXT NOT NULL DEFAULT 'pending',
+    blob_key TEXT NULL,
+    sync_priority TEXT NOT NULL DEFAULT 'normal' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    
+    -- Sync tracking
+    last_sync_attempt_at TEXT NULL,
+    sync_attempt_count INTEGER NOT NULL DEFAULT 0,
+    
+    -- Standard tracking fields
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by_user_id TEXT NULL,
+    updated_by_user_id TEXT NULL,
+    deleted_at TEXT NULL,
+    deleted_by_user_id TEXT NULL,
+    
+    FOREIGN KEY (type_id) REFERENCES document_types(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Copy existing data to the new table, handling missing columns
+INSERT INTO media_documents_new (
+    id, related_table, related_id, temp_related_id, type_id, original_filename,
+    file_path, compressed_file_path, compressed_size_bytes, field_identifier, 
+    title, description, mime_type, size_bytes, 
+    -- Error fields with derived values
+    has_error, error_message, error_type,
+    -- Status fields
+    compression_status, blob_status, blob_key, sync_priority,
+    -- Sync tracking (new fields)
+    last_sync_attempt_at, sync_attempt_count,
+    -- Standard tracking
+    created_at, updated_at, created_by_user_id, updated_by_user_id, deleted_at, deleted_by_user_id
+)
+SELECT 
+    id, related_table, related_id, temp_related_id, type_id, original_filename,
+    file_path, compressed_file_path, compressed_size_bytes, field_identifier,
+    title, description, mime_type, size_bytes,
+    -- Derive error state from file_path
+    CASE WHEN file_path = 'ERROR' THEN 1 ELSE 0 END as has_error,
+    -- Use description as error_message for existing error records
+    CASE WHEN file_path = 'ERROR' THEN description ELSE NULL END as error_message,
+    -- Default error type for existing errors
+    CASE WHEN file_path = 'ERROR' THEN 'upload_failure' ELSE NULL END as error_type,
+    -- Status fields
+    compression_status, 
+    'pending' as blob_status, -- Default value since column doesn't exist
+    NULL as blob_key, 
+    'normal' as sync_priority, -- Default value
+    -- New sync tracking fields
+    NULL as last_sync_attempt_at, 0 as sync_attempt_count,
+    -- Standard tracking
+    created_at, updated_at, created_by_user_id, updated_by_user_id, deleted_at, deleted_by_user_id
+FROM media_documents;
+
+-- Drop old table and rename new one
+DROP TABLE media_documents;
+ALTER TABLE media_documents_new RENAME TO media_documents;
+
+-- Recreate indices for media_documents
+CREATE INDEX idx_media_documents_related ON media_documents(related_table, related_id);
+CREATE INDEX idx_media_documents_temp_related_id ON media_documents(temp_related_id) 
+    WHERE temp_related_id IS NOT NULL;
+CREATE INDEX idx_media_documents_type ON media_documents(type_id);
+CREATE INDEX idx_media_documents_compression ON media_documents(compression_status);
+CREATE INDEX idx_media_documents_blob_sync ON media_documents(blob_status);
+CREATE INDEX idx_media_documents_updated_at ON media_documents(updated_at);
+CREATE INDEX idx_media_documents_deleted_at ON media_documents(deleted_at);
+CREATE INDEX idx_media_documents_sync_priority ON media_documents(sync_priority);
+CREATE INDEX idx_media_documents_has_error ON media_documents(has_error);
+
+-- ========================================================================
+-- 3. Enhance document_access_logs to support more access types
+-- ========================================================================
+
+-- Update document_access_logs check constraint to support more access types
+CREATE TABLE document_access_logs_new (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    access_type TEXT NOT NULL,
+    access_date TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    details TEXT,
+    FOREIGN KEY (document_id) REFERENCES media_documents(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Copy existing data
+INSERT INTO document_access_logs_new SELECT * FROM document_access_logs;
+
+-- Drop old table and rename new one
+DROP TABLE document_access_logs;
+ALTER TABLE document_access_logs_new RENAME TO document_access_logs;
+
+-- Recreate indices
+CREATE INDEX idx_document_access_logs_document ON document_access_logs(document_id);
+CREATE INDEX idx_document_access_logs_user ON document_access_logs(user_id);
+CREATE INDEX idx_document_access_logs_date ON document_access_logs(access_date);
+CREATE INDEX idx_document_access_logs_type ON document_access_logs(access_type);
+
+-- ========================================================================
+-- 4. Create active_file_usage table for tracking files in use
+-- ========================================================================
+
+CREATE TABLE active_file_usage (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    device_id TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    last_active_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    use_type TEXT NOT NULL DEFAULT 'view',
+    FOREIGN KEY (document_id) REFERENCES media_documents(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(document_id, user_id, device_id)
+);
+
+CREATE INDEX idx_active_file_usage_document ON active_file_usage(document_id);
+CREATE INDEX idx_active_file_usage_user ON active_file_usage(user_id);
+CREATE INDEX idx_active_file_usage_active ON active_file_usage(last_active_at);
+
+-- ========================================================================
+-- 5. Create file_deletion_queue for deferred file cleanup
+-- ========================================================================
+
+CREATE TABLE file_deletion_queue (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,        -- For reference, even after document record deleted
+    file_path TEXT NOT NULL,          -- Original file to delete
+    compressed_file_path TEXT NULL,   -- Compressed version if it exists
+    requested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    requested_by TEXT NOT NULL,
+    grace_period_seconds INTEGER DEFAULT 86400,  -- 24 hours by default
+    attempts INTEGER DEFAULT 0,
+    last_attempt_at TEXT NULL,
+    completed_at TEXT NULL,
+    error_message TEXT NULL,
+    FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_file_deletion_queue_pending ON file_deletion_queue(requested_at)
+    WHERE completed_at IS NULL;
+CREATE INDEX idx_file_deletion_queue_document ON file_deletion_queue(document_id);
+
+-- ========================================================================
+-- 6. Update change_log to support extra document information
+-- ========================================================================
+
+-- Add document_metadata to change_log
+ALTER TABLE change_log ADD COLUMN document_metadata TEXT NULL;
+
+-- Re-enable foreign keys
+PRAGMA foreign_keys=on;

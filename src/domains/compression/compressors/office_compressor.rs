@@ -3,7 +3,6 @@
 use async_trait::async_trait;
 use std::io::{Cursor, Read, Write};
 use tokio::task;
-use tempfile::NamedTempFile;
 use zip::{ZipArchive, ZipWriter, write::FileOptions};
 use std::collections::HashSet;
 
@@ -65,7 +64,7 @@ impl Compressor for OfficeCompressor {
             // Process each file in the archive
             let mut file_names = Vec::with_capacity(archive.len());
             for i in 0..archive.len() {
-                let mut file = archive.by_index(i)
+                let file = archive.by_index(i)
                     .map_err(|e| DomainError::Internal(format!("Failed to read file in ZIP: {}", e)))?;
                 
                 let name = file.name().to_owned();

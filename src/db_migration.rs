@@ -1,5 +1,5 @@
 use crate::ffi::error::{FFIError, FFIResult};
-use sqlx::{migrate, SqlitePool};
+use sqlx::SqlitePool;
 use crate::globals;
 use std::path::Path;
 use std::fs;

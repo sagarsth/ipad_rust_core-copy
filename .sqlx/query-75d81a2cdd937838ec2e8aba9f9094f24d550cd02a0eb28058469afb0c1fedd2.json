@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM active_file_usage WHERE document_id = ? AND user_id = ? AND device_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "75d81a2cdd937838ec2e8aba9f9094f24d550cd02a0eb28058469afb0c1fedd2"
+}

@@ -1,23 +1,27 @@
 use crate::auth::AuthContext;
-use sqlx::{SqlitePool, Transaction, Sqlite};
 use crate::domains::core::dependency_checker::DependencyChecker;
 use crate::domains::core::delete_service::{BaseDeleteService, DeleteOptions, DeleteService, DeleteServiceRepository};
 use crate::domains::core::repository::{DeleteResult, FindById, HardDeletable, SoftDeletable};
-use crate::domains::permission::{Permission, UserRole};
-use crate::domains::strategic_goal::repository::{SqliteStrategicGoalRepository, StrategicGoalRepository};
+use crate::domains::document::service::DocumentService;
+use crate::domains::document::types::{NewMediaDocument, MediaDocumentResponse};
+use crate::domains::permission::Permission;
+use crate::domains::strategic_goal::repository::StrategicGoalRepository;
 use crate::domains::strategic_goal::types::{
     NewStrategicGoal, StrategicGoal, StrategicGoalResponse, UpdateStrategicGoal, StrategicGoalInclude,
 };
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
-use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult};
+use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, ValidationError, DbError};
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::validation::Validate;
 use async_trait::async_trait;
+use sqlx::{SqlitePool, Transaction, Sqlite};
 use std::sync::Arc;
 use uuid::Uuid;
-use crate::domains::document::repository::MediaDocumentRepository;
-use crate::domains::document::service::DocumentService;
-use crate::domains::document::types::MediaDocumentResponse;
+use std::str::FromStr;
+
+// Add correct imports
+use crate::domains::sync::types::SyncPriority;
+use crate::domains::compression::types::CompressionPriority;
 
 /// Trait defining strategic goal service operations
 #[async_trait]
@@ -27,6 +31,17 @@ pub trait StrategicGoalService: DeleteService<StrategicGoal> + Send + Sync {
         new_goal: NewStrategicGoal,
         auth: &AuthContext,
     ) -> ServiceResult<StrategicGoalResponse>;
+
+    /// Creates a strategic goal with associated documents in a single operation
+    /// Documents are attached to the created goal using temporary IDs
+    /// Returns both the created goal and the results of document uploads (which may include errors)
+    async fn create_strategic_goal_with_documents(
+        &self,
+        new_goal: NewStrategicGoal,
+        documents: Vec<(Vec<u8>, String, Option<String>)>, // (file_data, filename, linked_field)
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(StrategicGoalResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)>;
 
     async fn get_strategic_goal_by_id(
         &self,
@@ -55,11 +70,48 @@ pub trait StrategicGoalService: DeleteService<StrategicGoal> + Send + Sync {
         hard_delete: bool,
         auth: &AuthContext,
     ) -> ServiceResult<DeleteResult>;
+
+    // Document integration methods
+    async fn upload_document_for_goal(
+        &self,
+        goal_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse>;
+
+    async fn bulk_upload_documents_for_goal(
+        &self,
+        goal_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>>;
+    
+    /// Helper method to upload documents for a strategic goal and handle errors individually
+    async fn upload_documents_for_entity(
+        &self,
+        entity_id: Uuid,
+        entity_type: &str,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> Vec<Result<MediaDocumentResponse, ServiceError>>;
 }
 
 /// Implementation of the strategic goal service
-#[derive(Clone)] // Clone needed if you store this service in another struct
 pub struct StrategicGoalServiceImpl {
+    pool: SqlitePool,
     repo: Arc<dyn StrategicGoalRepository + Send + Sync>,
     delete_service: Arc<BaseDeleteService<StrategicGoal>>,
     document_service: Arc<dyn DocumentService>,
@@ -72,7 +124,6 @@ impl StrategicGoalServiceImpl {
         tombstone_repo: Arc<dyn TombstoneRepository + Send + Sync>,
         change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
-        media_doc_repo: Arc<dyn MediaDocumentRepository>,
         document_service: Arc<dyn DocumentService>,
     ) -> Self {
         // Define a local wrapper struct that implements DeleteServiceRepository
@@ -126,43 +177,20 @@ impl StrategicGoalServiceImpl {
             Arc::new(RepoAdapter(strategic_goal_repo.clone()));
 
         let delete_service = Arc::new(BaseDeleteService::new(
-            pool,
+            pool.clone(),
             adapted_repo, // Pass the adapted repo
             tombstone_repo,
             change_log_repo,
             dependency_checker,
-            Some(media_doc_repo),
+            None,
         ));
         
         Self {
+            pool,
             repo: strategic_goal_repo, // Keep the original repo for other methods
             delete_service,
             document_service,
         }
-    }
-
-    /// Helper to enrich response with included data
-    async fn enrich_response(
-        &self, 
-        mut response: StrategicGoalResponse, 
-        include: Option<&[StrategicGoalInclude]>,
-        auth: &AuthContext,
-    ) -> ServiceResult<StrategicGoalResponse> {
-        if let Some(includes) = include {
-            if includes.contains(&StrategicGoalInclude::Documents) {
-                let doc_params = PaginationParams::default(); 
-                let docs_result = self.document_service
-                    .list_media_documents_by_related_entity(
-                        auth,
-                        "strategic_goals",
-                        response.id,
-                        doc_params,
-                        None,
-                    ).await?;
-                response.documents = Some(docs_result.items);
-            }
-        }
-        Ok(response)
     }
 }
 
@@ -220,7 +248,6 @@ impl DeleteService<StrategicGoal> for StrategicGoalServiceImpl {
     }
 }
 
-
 #[async_trait]
 impl StrategicGoalService for StrategicGoalServiceImpl {
     async fn create_strategic_goal(
@@ -243,8 +270,69 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
 
         // 4. Convert to Response DTO
         let response = StrategicGoalResponse::from(created_goal);
-        // No enrichment needed on create
         Ok(response)
+    }
+    
+    /// Creates a strategic goal with associated documents in a single operation
+    async fn create_strategic_goal_with_documents(
+        &self,
+        new_goal: NewStrategicGoal,
+        documents: Vec<(Vec<u8>, String, Option<String>)>, // (file_data, filename, linked_field)
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(StrategicGoalResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)> {
+        // 1. Check Permissions
+        if !auth.has_permission(Permission::CreateStrategicGoals) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to create strategic goals".to_string(),
+            ));
+        }
+        
+        if !documents.is_empty() && !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 2. Validate Input DTO
+        new_goal.validate()?;
+        
+        // 3. Begin transaction
+        let mut tx = self.pool.begin().await
+            .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+        
+        // 4. Create the strategic goal first (within transaction)
+        let created_goal = match self.repo.create_with_tx(&new_goal, auth, &mut tx).await {
+            Ok(goal) => goal,
+            Err(e) => {
+                // Rollback transaction on error
+                let _ = tx.rollback().await;
+                return Err(ServiceError::Domain(e));
+            }
+        };
+        
+        // 5. Commit transaction to ensure goal is created
+        tx.commit().await
+            .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+        
+        // 6. Now that we have a goal ID, upload documents (outside transaction)
+        let document_results = if !documents.is_empty() {
+            self.upload_documents_for_entity(
+                created_goal.id,
+                "strategic_goals",
+                documents,
+                document_type_id,
+                SyncPriority::Normal,
+                None, // Use default compression priority
+                auth,
+            ).await
+        } else {
+            Vec::new()
+        };
+        
+        // 7. Convert to Response DTO and return with document results
+        let response = StrategicGoalResponse::from(created_goal);
+        Ok((response, document_results))
     }
 
     async fn get_strategic_goal_by_id(
@@ -254,7 +342,7 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         auth: &AuthContext,
     ) -> ServiceResult<StrategicGoalResponse> {
         // 1. Check Permissions
-        if !auth.has_permission(Permission::ViewStrategicGoals) { // Assumes ViewStrategicGoals permission
+        if !auth.has_permission(Permission::ViewStrategicGoals) {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to view strategic goals".to_string(),
             ));
@@ -265,9 +353,7 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
 
         // 3. Convert to Response DTO
         let response = StrategicGoalResponse::from(goal);
-        
-        // Pass auth to enrich_response
-        self.enrich_response(response, include, auth).await
+        Ok(response)
     }
 
     async fn list_strategic_goals(
@@ -277,7 +363,7 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<StrategicGoalResponse>> {
         // 1. Check Permissions
-        if !auth.has_permission(Permission::ViewStrategicGoals) { // Assumes ViewStrategicGoals permission
+        if !auth.has_permission(Permission::ViewStrategicGoals) {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to list strategic goals".to_string(),
             ));
@@ -290,16 +376,14 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         let mut enriched_items = Vec::new();
         for item in paginated_result.items {
             let response = StrategicGoalResponse::from(item);
-            // Pass auth to enrich_response
-            let enriched = self.enrich_response(response, include, auth).await?;
-            enriched_items.push(enriched);
+            enriched_items.push(response);
         }
 
-        // 4. Create Paginated Response - Fix arguments
+        // 4. Create Paginated Response
         Ok(PaginatedResult::new(
             enriched_items,
             paginated_result.total,
-            params, // Pass the original params struct
+            params,
         ))
     }
 
@@ -310,35 +394,23 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         auth: &AuthContext,
     ) -> ServiceResult<StrategicGoalResponse> {
         // 1. Check Permissions
-        if !auth.has_permission(Permission::EditStrategicGoals) { // Assumes EditStrategicGoals permission
+        if !auth.has_permission(Permission::EditStrategicGoals) {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to edit strategic goals".to_string(),
             ));
         }
 
-        // Ensure the updater's ID is set (already required by DTO)
+        // Ensure the updater's ID is set
         update_data.updated_by_user_id = auth.user_id; 
 
         // 2. Validate Input DTO
         update_data.validate()?;
         
-        // Check if objective_code is being updated and if it's unique (if required)
-        // if let Some(code) = &update_data.objective_code {
-        //     let existing = self.repo.find_by_objective_code(code).await?;
-        //     if let Some(goal) = existing {
-        //         if goal.id != id {
-        //             return Err(DomainError::Validation(ValidationError::unique("objective_code")).into());
-        //         }
-        //     }
-        // }
-
         // 3. Perform Update
         let updated_goal = self.repo.update(id, &update_data, auth).await?;
 
         // 4. Convert to Response DTO
         let response = StrategicGoalResponse::from(updated_goal);
-        // Enrich response after update, maybe only if requested?
-        // For simplicity, let's not enrich on update by default.
         Ok(response)
     }
     
@@ -352,7 +424,7 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         let required_permission = if hard_delete {
             Permission::HardDeleteRecord
         } else {
-            Permission::DeleteStrategicGoals // Or Permission::DeleteRecord
+            Permission::DeleteStrategicGoals
         };
 
         if !auth.has_permission(required_permission) {
@@ -365,13 +437,127 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         // Configure delete options
         let options = DeleteOptions {
             allow_hard_delete: hard_delete,
-            fallback_to_soft_delete: !hard_delete, // Only fallback if initial request was NOT for hard delete
-            force: false, // Default to no force delete, admin might use delete_with_dependencies
+            fallback_to_soft_delete: !hard_delete,
+            force: false,
         };
         
         // Delegate to the core delete method
         let result = self.delete(id, auth, options).await?;
         
         Ok(result)
+    }
+
+    // Helper method to upload documents for any entity and handle errors individually
+    async fn upload_documents_for_entity(
+        &self,
+        entity_id: Uuid,
+        entity_type: &str,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> Vec<Result<MediaDocumentResponse, ServiceError>> {
+        let mut results = Vec::new();
+        
+        for (file_data, filename, linked_field) in documents {
+            let upload_result = self.document_service.upload_document(
+                auth,
+                file_data,
+                filename,
+                None, // No title, will use filename as default
+                document_type_id,
+                entity_id,
+                entity_type.to_string(),
+                linked_field,
+                sync_priority,
+                compression_priority,
+                None, // No temp ID needed since entity exists
+            ).await;
+            
+            // Store the result (success or error) without failing the whole operation
+            results.push(upload_result);
+        }
+        
+        results
+    }
+
+    // Document integration methods
+    async fn upload_document_for_goal(
+        &self,
+        goal_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse> {
+        // 1. Verify goal exists
+        let goal = self.repo.find_by_id(goal_id).await
+            .map_err(|e| ServiceError::Domain(e))?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Delegate to document service
+        let document = self.document_service.upload_document(
+            auth,
+            file_data,
+            original_filename,
+            title,
+            document_type_id,
+            goal_id,
+            "strategic_goals".to_string(),
+            linked_field,
+            sync_priority,
+            compression_priority,
+            None, // No temp ID for direct uploads
+        ).await?;
+
+        Ok(document)
+    }
+
+    async fn bulk_upload_documents_for_goal(
+        &self,
+        goal_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>> {
+        // 1. Verify goal exists
+        let goal = self.repo.find_by_id(goal_id).await
+            .map_err(|e| ServiceError::Domain(e))?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Delegate to document service
+        let documents = self.document_service.bulk_upload_documents(
+            auth,
+            files,
+            title,
+            document_type_id,
+            goal_id,
+            "strategic_goals".to_string(),
+            sync_priority,
+            compression_priority,
+            None, // No temp ID for direct uploads
+        ).await?;
+
+        Ok(documents)
     }
 }

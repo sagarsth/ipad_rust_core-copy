@@ -2,11 +2,10 @@
 
 use async_trait::async_trait;
 use image::{ImageFormat, GenericImageView, DynamicImage, ImageEncoder};
-use std::io::Cursor;
 use tokio::task;
 
 use crate::errors::{DomainError, DomainResult};
-use super::{Compressor, get_extension};
+use super::Compressor;
 use crate::domains::compression::types::CompressionMethod;
 
 /// Image compressor using the `image` crate for lossy/lossless compression

@@ -22,6 +22,9 @@ pub trait StrategicGoalRepository:
         new_goal: &NewStrategicGoal,
         auth: &AuthContext,
     ) -> DomainResult<StrategicGoal>;
+
+    /// Create strategic goal within an existing transaction
+    /// Used for operations that need to manage document linking
     async fn create_with_tx<'t>(
         &self,
         new_goal: &NewStrategicGoal,
@@ -35,6 +38,7 @@ pub trait StrategicGoalRepository:
         update_data: &UpdateStrategicGoal,
         auth: &AuthContext,
     ) -> DomainResult<StrategicGoal>;
+
     async fn update_with_tx<'t>(
         &self,
         id: Uuid,
@@ -227,7 +231,7 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<StrategicGoal> {
-        let id = Uuid::new_v4();
+        let id = new_goal.id.unwrap_or_else(Uuid::new_v4);
         let now = Utc::now();
         let now_str = now.to_rfc3339();
         let user_id_str = auth.user_id.to_string();
@@ -249,7 +253,7 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
                 ?, -- for sync_priority
-                ?, ?, ?, ?, ?, NULL, NULL
+                ?, ?, ?, ?, NULL, NULL
             )
             "#,
         )
@@ -438,5 +442,3 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
         Ok(result.rows_affected())
     }
 }
-
-

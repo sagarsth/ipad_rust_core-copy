@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE media_documents\n            SET \n                has_error = 1,\n                error_type = ?,\n                error_message = ?,\n                compression_status = 'error',\n                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')\n            WHERE id = ?\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "966b880138d4dcd37bd5ce6fc6ac35f07bfdb320dd22d4d66ee3bef07457bb3d"
+}

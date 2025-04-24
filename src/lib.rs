@@ -1,4 +1,3 @@
-use std::sync::Arc;
 
 // Public modules
 pub mod auth;

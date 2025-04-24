@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                    UPDATE file_deletion_queue\n                    SET \n                        last_attempt_at = ?,\n                        attempts = attempts + 1,\n                        error_message = ?\n                    WHERE id = ?\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "4fdf17c767681503696d718e3b89312bbc7d8611155fad225ecc8e5f2ac3a8c8"
+}

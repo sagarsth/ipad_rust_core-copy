@@ -1,10 +1,8 @@
-use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
+use crate::errors::{DbError, DomainError, ValidationError};
 use chrono::{DateTime, Utc};
 use chrono::Timelike;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
-use uuid::Uuid;
-use sqlx::FromRow;
 
 /// Enum for compression timing options
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

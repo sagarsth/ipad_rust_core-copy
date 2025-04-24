@@ -2,8 +2,8 @@
 use std::fmt;
 use serde::{Deserialize, Serialize};
 // Use the re-exported path for SyncConflict
-use crate::errors::{DomainError, DbError, ServiceError, SyncError, ValidationError, SyncConflict};
-use sqlx; // Make sure sqlx is imported if used in DbError::Sqlx details
+use crate::errors::{DomainError, DbError, ServiceError, SyncError, ValidationError};
+ // Make sure sqlx is imported if used in DbError::Sqlx details
 
 /// Error codes for FFI boundary
 #[repr(i32)]

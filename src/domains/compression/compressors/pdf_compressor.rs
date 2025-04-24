@@ -1,14 +1,13 @@
  //! PDF compression implementation
 
 use async_trait::async_trait;
-use std::io::Cursor;
 use std::process::{Command, Stdio};
 use tokio::task;
 use tempfile::NamedTempFile;
 use std::io::Write;
 
 use crate::errors::{DomainError, DomainResult};
-use super::{Compressor, get_extension};
+use super::Compressor;
 use crate::domains::compression::types::CompressionMethod;
 
 /// PDF compressor using external tools (gs)

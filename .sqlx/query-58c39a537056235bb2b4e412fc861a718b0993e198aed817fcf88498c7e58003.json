@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT \n                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,\n                 SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing_count,\n                 SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,\n                 SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,\n                 SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_count\n              FROM compression_queue",
+  "query": "SELECT \n                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,\n                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing_count,\n                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,\n                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,\n                SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_count\n             FROM compression_queue",
   "describe": {
     "columns": [
       {
@@ -40,5 +40,5 @@
       true
     ]
   },
-  "hash": "5890fe50d5e5cb453f60fa249cfcb07ba19eec3d9b4de743b4ae47fac6f31597"
+  "hash": "58c39a537056235bb2b4e412fc861a718b0993e198aed817fcf88498c7e58003"
 }

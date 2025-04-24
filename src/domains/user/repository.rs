@@ -1,10 +1,9 @@
-use crate::errors::{DbError, DbResult, DomainError, DomainResult};
+use crate::errors::{DbError, DomainError, DomainResult};
 use crate::domains::user::types::{User, NewUser, UpdateUser, UserRow};
-use crate::domains::core::repository::Repository;
 use crate::auth::AuthContext;
 use crate::types::ChangeLogOperationType;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use sqlx::{SqlitePool, query, query_as, query_scalar};
 use async_trait::async_trait;
 

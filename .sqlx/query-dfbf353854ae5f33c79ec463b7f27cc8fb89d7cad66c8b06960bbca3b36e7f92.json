@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO file_deletion_queue (\n                id, \n                document_id,\n                file_path, \n                compressed_file_path, \n                requested_at, \n                requested_by, \n                grace_period_seconds\n            )\n            VALUES (?, ?, ?, ?, ?, ?, ?)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "dfbf353854ae5f33c79ec463b7f27cc8fb89d7cad66c8b06960bbca3b36e7f92"
+}

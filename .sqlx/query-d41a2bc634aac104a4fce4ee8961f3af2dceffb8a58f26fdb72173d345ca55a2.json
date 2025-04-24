@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, document_id, priority, attempts, status, created_at, updated_at, error_message\n              FROM compression_queue\n              WHERE document_id = ?",
+  "query": "SELECT id, document_id, priority, attempts, status, created_at, updated_at, error_message\n             FROM compression_queue\n             WHERE id = ?",
   "describe": {
     "columns": [
       {
@@ -58,5 +58,5 @@
       true
     ]
   },
-  "hash": "a523aee2f8d49dd4daa4a4b801e1f65f93ca553b6d4954ca1d7a9522405c2a04"
+  "hash": "d41a2bc634aac104a4fce4ee8961f3af2dceffb8a58f26fdb72173d345ca55a2"
 }

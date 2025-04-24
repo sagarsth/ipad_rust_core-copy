@@ -1,5 +1,5 @@
-use crate::errors::{DomainError, DomainResult, ValidationError};
-use crate::validation::{Validate, ValidationBuilder, Email};
+use crate::errors::{DomainError, DomainResult};
+use crate::validation::{Validate, ValidationBuilder};
 use crate::types::UserRole;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};

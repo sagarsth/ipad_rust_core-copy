@@ -1,4 +1,4 @@
- //! Type definitions for the compression domain.
+//! Type definitions for the compression domain.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -40,7 +40,7 @@ impl CompressionMethod {
 impl FromStr for CompressionMethod {
     type Err = DomainError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.to_lowercase().as_str() {
             "lossless" => Ok(CompressionMethod::Lossless),
             "lossy" => Ok(CompressionMethod::Lossy),
             "pdf_optimize" => Ok(CompressionMethod::PdfOptimize),
@@ -60,12 +60,33 @@ impl From<CompressionMethod> for String {
 }
 
 /// Priority for compression operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub enum CompressionPriority {
     High = 10,
     Normal = 5,
     Low = 1,
     Background = 0,
+}
+
+impl CompressionPriority {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CompressionPriority::High => "HIGH",
+            CompressionPriority::Normal => "NORMAL",
+            CompressionPriority::Low => "LOW",
+            CompressionPriority::Background => "BACKGROUND",
+        }
+    }
+    
+    pub fn from_i64(value: i64) -> Option<Self> {
+        match value {
+            10 => Some(CompressionPriority::High),
+            5 => Some(CompressionPriority::Normal),
+            1 => Some(CompressionPriority::Low),
+            0 => Some(CompressionPriority::Background),
+            _ => None,
+        }
+    }
 }
 
 impl From<i32> for CompressionPriority {
@@ -86,6 +107,32 @@ impl From<CompressionPriority> for i32 {
             CompressionPriority::Normal => 5,
             CompressionPriority::Low => 1,
             CompressionPriority::Background => 0,
+        }
+    }
+}
+
+impl From<CompressionPriority> for i64 {
+    fn from(priority: CompressionPriority) -> Self {
+        match priority {
+            CompressionPriority::High => 10,
+            CompressionPriority::Normal => 5,
+            CompressionPriority::Low => 1,
+            CompressionPriority::Background => 0,
+        }
+    }
+}
+
+impl FromStr for CompressionPriority {
+    type Err = DomainError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "HIGH" => Ok(CompressionPriority::High),
+            "NORMAL" => Ok(CompressionPriority::Normal),
+            "LOW" => Ok(CompressionPriority::Low),
+            "BACKGROUND" | "BG" => Ok(CompressionPriority::Background),
+            _ => Err(DomainError::Validation(ValidationError::custom(
+                &format!("Invalid compression priority string: {}", s)
+            )))
         }
     }
 }

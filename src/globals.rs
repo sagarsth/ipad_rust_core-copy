@@ -1,7 +1,6 @@
-use crate::auth::{AuthService, jwt};
+use crate::auth::AuthService;
 use crate::domains::user::{UserRepository, UserService};
 use crate::domains::user::repository::SqliteUserRepository;
-use crate::errors::ServiceError;
 use crate::ffi::error::{FFIError, FFIResult};
 use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex, Once};

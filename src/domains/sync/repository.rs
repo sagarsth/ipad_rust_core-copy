@@ -77,12 +77,13 @@ impl TombstoneRepository for SqliteTombstoneRepository {
     ) -> DomainResult<()> {
         sqlx::query(
             r#"
-            INSERT INTO tombstones (id, entity_id, entity_type, deleted_by, deleted_at, operation_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO tombstones (id, entity_id, entity_type, deleted_by, deleted_at, operation_id, additional_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(entity_id) DO UPDATE SET
                 deleted_by = excluded.deleted_by,
                 deleted_at = excluded.deleted_at,
-                operation_id = excluded.operation_id
+                operation_id = excluded.operation_id,
+                additional_metadata = excluded.additional_metadata
                 WHERE excluded.deleted_at > tombstones.deleted_at
             "#,
         )
@@ -92,6 +93,7 @@ impl TombstoneRepository for SqliteTombstoneRepository {
         .bind(tombstone.deleted_by.to_string())
         .bind(tombstone.deleted_at.to_rfc3339())
         .bind(tombstone.operation_id.to_string())
+        .bind(&tombstone.additional_metadata)
         .execute(&mut **tx)
         .await
         .map_err(|e| DomainError::Database(DbError::from(e)))?;
@@ -111,7 +113,7 @@ impl TombstoneRepository for SqliteTombstoneRepository {
     async fn find_tombstones_by_entity_type(&self, entity_type: &str) -> DomainResult<Vec<Tombstone>> {
         let rows = sqlx::query!(
             r#"
-            SELECT id, entity_id, entity_type, deleted_by, deleted_at, operation_id 
+            SELECT id, entity_id, entity_type, deleted_by, deleted_at, operation_id, additional_metadata
             FROM tombstones
             WHERE entity_type = ?
             "#,
@@ -143,6 +145,7 @@ impl TombstoneRepository for SqliteTombstoneRepository {
                     deleted_by,
                     deleted_at,
                     operation_id,
+                    additional_metadata: row.additional_metadata,
                 })
             })
             .collect::<DomainResult<Vec<Tombstone>>>()
@@ -152,7 +155,7 @@ impl TombstoneRepository for SqliteTombstoneRepository {
         let entity_id_str = entity_id.to_string();
         let row = sqlx::query!(
             r#"
-            SELECT id, entity_id, entity_type, deleted_by, deleted_at, operation_id 
+            SELECT id, entity_id, entity_type, deleted_by, deleted_at, operation_id, additional_metadata
             FROM tombstones
             WHERE entity_id = ?
             "#,
@@ -179,6 +182,7 @@ impl TombstoneRepository for SqliteTombstoneRepository {
                          deleted_by,
                          deleted_at,
                          operation_id,
+                         additional_metadata: r.additional_metadata,
                      })
                  })();
                  
@@ -279,7 +283,8 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
              SELECT 
                  operation_id, entity_table, entity_id, operation_type, 
                  field_name, old_value, new_value, timestamp, user_id, 
-                 device_id, sync_batch_id, processed_at, sync_error
+                 device_id, sync_batch_id, processed_at, sync_error,
+                 document_metadata
              FROM change_log
              WHERE entity_table = ? AND entity_id = ?
              ORDER BY timestamp ASC
@@ -325,6 +330,7 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
                      sync_batch_id: row.sync_batch_id.clone(),
                      processed_at,
                      sync_error: row.sync_error,
+                     document_metadata: row.document_metadata,
                  })
              })();
              result.map_err(|e: Box<dyn std::error::Error + Send + Sync>| DomainError::Internal(format!("ChangeLog parsing failed: {}", e)))

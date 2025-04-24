@@ -174,6 +174,19 @@ pub enum SyncPriority {
     Background = 1,   // Sync only when resources available
 }
 
+impl SyncPriority {
+    // Add as_str method for consistent string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SyncPriority::Critical => "critical",
+            SyncPriority::High => "high",
+            SyncPriority::Normal => "normal",
+            SyncPriority::Low => "low",
+            SyncPriority::Background => "background",
+        }
+    }
+}
+
 impl From<i32> for SyncPriority {
     fn from(value: i32) -> Self {
         match value {
@@ -194,6 +207,23 @@ impl From<SyncPriority> for i32 {
             SyncPriority::Normal => 5,
             SyncPriority::Low => 3,
             SyncPriority::Background => 1,
+        }
+    }
+}
+
+// Add FromStr implementation based on as_str values
+impl FromStr for SyncPriority {
+    type Err = DomainError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "critical" => Ok(SyncPriority::Critical),
+            "high" => Ok(SyncPriority::High),
+            "normal" => Ok(SyncPriority::Normal),
+            "low" => Ok(SyncPriority::Low),
+            "background" => Ok(SyncPriority::Background),
+            _ => Err(DomainError::Validation(ValidationError::custom(
+                &format!("Invalid SyncPriority string: {}", s)
+            )))
         }
     }
 }
@@ -273,7 +303,7 @@ pub struct DeviceMetadata {
 }
 
 /// Represents a change in the change log
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ChangeLogEntry {
     pub operation_id: Uuid,
     pub entity_table: String,
@@ -282,6 +312,7 @@ pub struct ChangeLogEntry {
     pub field_name: Option<String>,
     pub old_value: Option<String>,
     pub new_value: Option<String>,
+    pub document_metadata: Option<String>,
     pub timestamp: DateTime<Utc>,
     pub user_id: Uuid,
     pub device_id: Option<Uuid>,
@@ -291,7 +322,7 @@ pub struct ChangeLogEntry {
 }
 
 /// Represents a tombstone record for a hard-deleted entity
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Tombstone {
     /// Unique ID for the tombstone
     pub id: Uuid,
@@ -310,6 +341,9 @@ pub struct Tombstone {
     
     /// Operation ID for batch operations
     pub operation_id: Uuid,
+    
+    /// Additional metadata for the tombstone
+    pub additional_metadata: Option<String>,
 }
 
 impl Tombstone {
@@ -326,6 +360,7 @@ impl Tombstone {
             deleted_by,
             deleted_at: Utc::now(),
             operation_id: Uuid::new_v4(),
+            additional_metadata: None,
         }
     }
     
@@ -343,6 +378,7 @@ impl Tombstone {
             deleted_by,
             deleted_at: Utc::now(),
             operation_id,
+            additional_metadata: None,
         }
     }
 }
@@ -639,6 +675,7 @@ pub struct ChangeLogEntryRow {
     pub field_name: Option<String>,
     pub old_value: Option<String>,
     pub new_value: Option<String>,
+    pub document_metadata: Option<String>,
     pub timestamp: String,
     pub user_id: String,
     pub device_id: Option<String>,
@@ -655,6 +692,7 @@ pub struct TombstoneRow {
     pub deleted_by: String,
     pub deleted_at: String,
     pub operation_id: String,
+    pub additional_metadata: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -753,6 +791,7 @@ impl TryFrom<ChangeLogEntryRow> for ChangeLogEntry {
             field_name: row.field_name,
             old_value: row.old_value,
             new_value: row.new_value,
+            document_metadata: row.document_metadata,
             timestamp: parse_datetime(&row.timestamp, "change_log.timestamp")?,
             user_id: parse_uuid(&row.user_id, "change_log.user_id")?,
             device_id: parse_optional_uuid(row.device_id, "change_log.device_id")?,
@@ -773,6 +812,7 @@ impl TryFrom<TombstoneRow> for Tombstone {
             deleted_by: parse_uuid(&row.deleted_by, "tombstone.deleted_by")?,
             deleted_at: parse_datetime(&row.deleted_at, "tombstone.deleted_at")?,
             operation_id: parse_uuid(&row.operation_id, "tombstone.operation_id")?,
+            additional_metadata: row.additional_metadata,
         })
     }
 }

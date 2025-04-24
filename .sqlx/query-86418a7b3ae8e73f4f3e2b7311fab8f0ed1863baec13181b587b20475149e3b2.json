@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE media_documents\n            SET file_path = REPLACE(file_path, ?, ?)\n            WHERE temp_related_id IS NULL -- Only update already linked docs in this TX\n              AND related_id = ? \n              AND related_table = ?\n              AND file_path LIKE ('%' || ? || '%') -- Ensure we only replace if temp segment exists\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "86418a7b3ae8e73f4f3e2b7311fab8f0ed1863baec13181b587b20475149e3b2"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT \n                 total_original_size, total_compressed_size, space_saved,\n                 compression_ratio, total_files_compressed, total_files_pending,\n                 total_files_failed, total_files_skipped, last_compression_date, updated_at\n              FROM compression_stats\n              WHERE id = 'global'",
+  "query": "SELECT \n                total_original_size, total_compressed_size, space_saved,\n                compression_ratio, total_files_compressed, total_files_pending,\n                total_files_failed, total_files_skipped, last_compression_date, updated_at\n             FROM compression_stats\n             WHERE id = 'global'",
   "describe": {
     "columns": [
       {
@@ -70,5 +70,5 @@
       false
     ]
   },
-  "hash": "743cdc3a47484a91fbd0353fe88ebb60ddd636f146fa2ee61921355ddfeb5ec4"
+  "hash": "e0cde3194df7a3cf54dd78e26a935f3c1d862cce20c04dcbd7a7d74a06ea0616"
 }

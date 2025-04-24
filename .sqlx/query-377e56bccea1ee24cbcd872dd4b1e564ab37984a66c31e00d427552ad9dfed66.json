@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE media_documents\n            SET compressed_file_path = REPLACE(compressed_file_path, ?, ?)\n            WHERE temp_related_id IS NULL -- Only update already linked docs in this TX\n              AND related_id = ? \n              AND related_table = ? \n              AND compressed_file_path IS NOT NULL\n              AND compressed_file_path LIKE ('%' || ? || '%') -- Ensure we only replace if temp segment exists\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "377e56bccea1ee24cbcd872dd4b1e564ab37984a66c31e00d427552ad9dfed66"
+}

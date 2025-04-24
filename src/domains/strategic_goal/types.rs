@@ -1,5 +1,5 @@
 use crate::errors::{DomainError, DomainResult};
-use crate::validation::{Validate, ValidationBuilder, NonEmptyString};
+use crate::validation::{Validate, ValidationBuilder};
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::types::SyncPriority;
 use uuid::Uuid;
@@ -68,6 +68,8 @@ impl StrategicGoal {
 /// NewStrategicGoal DTO - used when creating a new strategic goal
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewStrategicGoal {
+    // Added optional ID for cases where we need to pre-assign an ID for document linking
+    pub id: Option<Uuid>,
     pub objective_code: String,
     pub outcome: Option<String>,
     pub kpi: Option<String>,
@@ -273,6 +275,9 @@ pub struct StrategicGoalResponse {
     pub sync_priority: SyncPriority,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Vec<MediaDocumentResponse>>,
+    // Add any document error states if needed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_upload_errors: Option<Vec<String>>,
 }
 
 impl From<StrategicGoal> for StrategicGoalResponse {
@@ -291,7 +296,30 @@ impl From<StrategicGoal> for StrategicGoalResponse {
             created_at: goal.created_at.to_rfc3339(),
             updated_at: goal.updated_at.to_rfc3339(),
             sync_priority: goal.sync_priority,
-            documents: None, 
+            documents: None,
+            document_upload_errors: None,
+        }
+    }
+}
+
+// Optional: Add a new response type for the create_with_documents operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategicGoalWithDocumentsResponse {
+    pub strategic_goal: StrategicGoalResponse,
+    pub successful_uploads: Vec<MediaDocumentResponse>,
+    pub failed_uploads: Vec<String>,
+}
+
+impl StrategicGoalWithDocumentsResponse {
+    pub fn new(
+        goal: StrategicGoalResponse, 
+        successful: Vec<MediaDocumentResponse>,
+        failed: Vec<String>
+    ) -> Self {
+        Self {
+            strategic_goal: goal,
+            successful_uploads: successful,
+            failed_uploads: failed,
         }
     }
 }
