@@ -29,3 +29,6 @@ Thumbs.db
 *.bak
 *.backup
 *~
+
+# Database files
+dev.db
