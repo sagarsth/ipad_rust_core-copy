@@ -1,6 +1,6 @@
- // Adjust imports based on your actual error structure
+// Adjust imports based on your actual error structure
 use serde::{Deserialize, Serialize};
- // Required for AuditLogger example
+// Required for AuditLogger example
 
 // --- User Role Definition ---
 
@@ -20,7 +20,7 @@ pub enum Permission {
     // User management
     ManageUsers,
 
-    // Strategic Goal permissions (NEW)
+    // Strategic Goal permissions
     ViewStrategicGoals,
     EditStrategicGoals,
     CreateStrategicGoals,
@@ -64,9 +64,15 @@ pub enum Permission {
 
     // Donor permissions
     ViewDonors,
-    EditDonors,
     CreateDonors,
+    EditDonors,
     DeleteDonors,
+    
+    // Funding permissions (NEW)
+    ViewFunding,
+    CreateFunding,
+    EditFunding,
+    DeleteFunding,
 
     // System permissions
     ViewAuditLogs,
@@ -118,7 +124,16 @@ impl UserRole {
                     | Permission::ConfigureSystem
                     | Permission::HardDeleteRecord
                     | Permission::HardDeleteRecordWithDependencies
-                    | Permission::ManageGlobalSync => false,
+                    | Permission::ManageGlobalSync
+                    // Deny Donor and Funding Management
+                    | Permission::ViewDonors
+                    | Permission::CreateDonors
+                    | Permission::EditDonors
+                    | Permission::DeleteDonors
+                    | Permission::ViewFunding
+                    | Permission::CreateFunding
+                    | Permission::EditFunding
+                    | Permission::DeleteFunding => false,
 
                     // Personal sync config & basic sync allowed
                     Permission::SyncData
@@ -157,9 +172,11 @@ impl UserRole {
                     | Permission::UploadDocuments | Permission::DeleteDocuments
                     | Permission::DeleteRecord => true, // General soft delete
 
-                    // Access to donor data and admin functions - deny FieldOfficer
-                    Permission::ViewDonors | Permission::EditDonors
-                    | Permission::CreateDonors | Permission::DeleteDonors
+                    // Access to donor data, funding data, and admin functions - deny FieldOfficer
+                    Permission::ViewDonors | Permission::CreateDonors
+                    | Permission::EditDonors | Permission::DeleteDonors
+                    | Permission::ViewFunding | Permission::CreateFunding
+                    | Permission::EditFunding | Permission::DeleteFunding
                     | Permission::ManageUsers
                     | Permission::ViewAuditLogs
                     | Permission::ConfigureSystem
@@ -193,7 +210,7 @@ impl Permission {
         match self {
             // User management
             Permission::ManageUsers => "manage_users",
-            // Strategic Goal permissions (NEW)
+            // Strategic Goal permissions
             Permission::ViewStrategicGoals => "view_strategic_goals",
             Permission::EditStrategicGoals => "edit_strategic_goals",
             Permission::CreateStrategicGoals => "create_strategic_goals",
@@ -230,9 +247,14 @@ impl Permission {
             Permission::DeleteDocuments => "delete_documents",
             // Donor permissions
             Permission::ViewDonors => "view_donors",
-            Permission::EditDonors => "edit_donors",
             Permission::CreateDonors => "create_donors",
+            Permission::EditDonors => "edit_donors",
             Permission::DeleteDonors => "delete_donors",
+            // Funding permissions
+            Permission::ViewFunding => "view_funding",
+            Permission::CreateFunding => "create_funding",
+            Permission::EditFunding => "edit_funding",
+            Permission::DeleteFunding => "delete_funding",
             // System permissions
             Permission::ViewAuditLogs => "view_audit_logs",
             Permission::ConfigureSystem => "configure_system",
@@ -254,7 +276,7 @@ impl Permission {
         match s {
             // User management
             "manage_users" => Some(Permission::ManageUsers),
-            // Strategic Goal permissions (NEW)
+            // Strategic Goal permissions
             "view_strategic_goals" => Some(Permission::ViewStrategicGoals),
             "edit_strategic_goals" => Some(Permission::EditStrategicGoals),
             "create_strategic_goals" => Some(Permission::CreateStrategicGoals),
@@ -291,9 +313,14 @@ impl Permission {
             "delete_documents" => Some(Permission::DeleteDocuments),
             // Donor permissions
             "view_donors" => Some(Permission::ViewDonors),
-            "edit_donors" => Some(Permission::EditDonors),
             "create_donors" => Some(Permission::CreateDonors),
+            "edit_donors" => Some(Permission::EditDonors),
             "delete_donors" => Some(Permission::DeleteDonors),
+            // Funding permissions
+            "view_funding" => Some(Permission::ViewFunding),
+            "create_funding" => Some(Permission::CreateFunding),
+            "edit_funding" => Some(Permission::EditFunding),
+            "delete_funding" => Some(Permission::DeleteFunding),
             // System permissions
             "view_audit_logs" => Some(Permission::ViewAuditLogs),
             "configure_system" => Some(Permission::ConfigureSystem),
@@ -318,7 +345,7 @@ impl Permission {
         vec![
             // User management
             Permission::ManageUsers,
-            // Strategic Goal permissions (NEW)
+            // Strategic Goal permissions
             Permission::ViewStrategicGoals, Permission::EditStrategicGoals, Permission::CreateStrategicGoals, Permission::DeleteStrategicGoals,
             // Project permissions
             Permission::ViewProjects, Permission::EditProjects, Permission::CreateProjects, Permission::DeleteProjects,
@@ -333,7 +360,9 @@ impl Permission {
             // Document permissions
             Permission::ViewDocuments, Permission::EditDocuments, Permission::UploadDocuments, Permission::DeleteDocuments,
             // Donor permissions
-            Permission::ViewDonors, Permission::EditDonors, Permission::CreateDonors, Permission::DeleteDonors,
+            Permission::ViewDonors, Permission::CreateDonors, Permission::EditDonors, Permission::DeleteDonors,
+            // Funding permissions
+            Permission::ViewFunding, Permission::CreateFunding, Permission::EditFunding, Permission::DeleteFunding,
             // System permissions
             Permission::ViewAuditLogs, Permission::ConfigureSystem, Permission::ExportData, Permission::ImportData,
             // Sync permissions

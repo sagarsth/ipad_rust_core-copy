@@ -199,19 +199,24 @@ impl From<i32> for SyncPriority {
     }
 }
 
-impl From<SyncPriority> for i32 {
-    fn from(priority: SyncPriority) -> Self {
-        match priority {
-            SyncPriority::Critical => 10,
-            SyncPriority::High => 8,
-            SyncPriority::Normal => 5,
-            SyncPriority::Low => 3,
-            SyncPriority::Background => 1,
-        }
+impl From<i64> for SyncPriority {
+    fn from(value: i64) -> Self {
+        Self::from(value as i32)
     }
 }
 
-// Add FromStr implementation based on as_str values
+impl From<SyncPriority> for i32 {
+    fn from(priority: SyncPriority) -> Self {
+        priority as i32
+    }
+}
+
+impl From<SyncPriority> for i64 {
+    fn from(priority: SyncPriority) -> Self {
+        i32::from(priority) as i64
+    }
+}
+
 impl FromStr for SyncPriority {
     type Err = DomainError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -221,9 +226,11 @@ impl FromStr for SyncPriority {
             "normal" => Ok(SyncPriority::Normal),
             "low" => Ok(SyncPriority::Low),
             "background" => Ok(SyncPriority::Background),
-            _ => Err(DomainError::Validation(ValidationError::custom(
-                &format!("Invalid SyncPriority string: {}", s)
-            )))
+            _ => s.parse::<i32>()
+                .map(SyncPriority::from)
+                .map_err(|_| DomainError::Validation(ValidationError::custom(
+                    &format!("Invalid SyncPriority string: {}", s)
+                )))
         }
     }
 }

@@ -2,10 +2,12 @@ use crate::auth::AuthContext;
 use sqlx::SqlitePool;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::delete_service::DeleteServiceRepository;
+use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::workshop::types::{
     NewWorkshop, Workshop, WorkshopRow, UpdateWorkshop,
 };
-use crate::errors::{DbError, DomainError, DomainResult};
+use crate::domains::sync::types::SyncPriority;
+use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -57,6 +59,24 @@ pub trait WorkshopRepository:
         project_id: Uuid,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Workshop>>;
+
+    async fn update_sync_priority(
+        &self,
+        ids: &[Uuid],
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> DomainResult<u64>;
+
+    async fn increment_participant_count(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()>;
+    async fn decrement_participant_count(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()>;
+
+    async fn set_document_reference(
+        &self,
+        workshop_id: Uuid,
+        field_name: &str, // e.g., "agenda"
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()>;
 }
 
 /// SQLite implementation for WorkshopRepository
@@ -491,4 +511,107 @@ impl WorkshopRepository for SqliteWorkshopRepository {
      ) -> DomainResult<PaginatedResult<Workshop>> {
          self.find_all(params, Some(project_id)).await
      }
+
+    async fn update_sync_priority(
+        &self,
+        ids: &[Uuid],
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> DomainResult<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let priority_val = priority as i64;
+        
+        let mut builder = QueryBuilder::new("UPDATE workshops SET ");
+        builder.push("sync_priority = ");
+        builder.push_bind(priority_val);
+        builder.push(", updated_at = ");
+        builder.push_bind(now);
+        builder.push(", updated_by_user_id = ");
+        builder.push_bind(user_id_str);
+        
+        // Build the WHERE clause with IN condition
+        builder.push(" WHERE id IN (");
+        let mut id_separated = builder.separated(",");
+        for id in ids {
+            id_separated.push_bind(id.to_string());
+        }
+        id_separated.push_unseparated(")"); // Correctly close parenthesis
+        builder.push(" AND deleted_at IS NULL");
+        
+        let query = builder.build();
+        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+        
+        Ok(result.rows_affected())
+    }
+
+    async fn increment_participant_count(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        query("UPDATE workshops SET participant_count = participant_count + 1, updated_at = ?, updated_by_user_id = ? WHERE id = ? AND deleted_at IS NULL")
+            .bind(now)
+            .bind(user_id_str)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map(|_| ()) // Discard result on success
+            .map_err(DbError::from)
+    }
+
+    async fn decrement_participant_count(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        query("UPDATE workshops SET participant_count = MAX(0, participant_count - 1), updated_at = ?, updated_by_user_id = ? WHERE id = ? AND deleted_at IS NULL")
+             .bind(now)
+            .bind(user_id_str)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map(|_| ()) // Discard result on success
+            .map_err(DbError::from)
+    }
+
+    async fn set_document_reference(
+        &self,
+        workshop_id: Uuid,
+        field_name: &str, // e.g., "agenda"
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()> {
+        let column_name = format!("{}_ref", field_name); 
+        
+        // Validate the field name
+        if !Workshop::field_metadata().iter().any(|m| m.field_name == field_name && m.is_document_reference_only) {
+             return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid document reference field for Workshop: {}", field_name))));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let document_id_str = document_id.to_string();
+        
+        let mut builder = sqlx::QueryBuilder::new("UPDATE workshops SET ");
+        builder.push(&column_name);
+        builder.push(" = ");
+        builder.push_bind(document_id_str);
+        builder.push(", updated_at = ");
+        builder.push_bind(now);
+        builder.push(", updated_by_user_id = ");
+        builder.push_bind(user_id_str);
+        builder.push(" WHERE id = ");
+        builder.push_bind(workshop_id.to_string());
+        builder.push(" AND deleted_at IS NULL");
+
+        let query = builder.build();
+        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+
+        if result.rows_affected() == 0 {
+            Err(DomainError::EntityNotFound("Workshop".to_string(), workshop_id))
+        } else {
+            Ok(())
+        }
+    }
 }

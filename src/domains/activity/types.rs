@@ -6,10 +6,15 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
+use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
+use std::collections::HashSet;
+use rust_decimal::Decimal;
+use std::str::FromStr;
+use crate::domains::document::types::MediaDocumentResponse;
 
 /// Activity entity - represents a specific activity within a project
 /// Aligned with v1_schema.sql
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Activity {
     pub id: Uuid,
     pub project_id: Option<Uuid>,
@@ -26,7 +31,7 @@ pub struct Activity {
     pub target_value_updated_at: Option<DateTime<Utc>>,
     pub target_value_updated_by: Option<Uuid>,
     // Added Actual Value fields
-    pub actual_value: f64, // Assumes DEFAULT 0 in schema
+    pub actual_value: Option<f64>, // Changed to Option<f64>
     pub actual_value_updated_at: Option<DateTime<Utc>>,
     pub actual_value_updated_by: Option<Uuid>,
     // Removed start/end date fields
@@ -35,10 +40,17 @@ pub struct Activity {
     pub status_id_updated_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub created_by_user_id: Option<Uuid>,
-    pub updated_by_user_id: Option<Uuid>,
+    pub created_by_user_id: Uuid, // Changed to Uuid
+    pub updated_by_user_id: Uuid, // Changed to Uuid
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+
+    // Document reference fields
+    pub photo_evidence_ref: Option<Uuid>,
+    pub receipts_ref: Option<Uuid>,
+    pub signed_report_ref: Option<Uuid>,
+    pub monitoring_data_ref: Option<Uuid>,
+    pub output_verification_ref: Option<Uuid>,
 }
 
 impl Activity {
@@ -54,10 +66,38 @@ impl Activity {
         if let Some(target) = self.target_value {
             if target > 0.0 {
                 // Ensure we don't divide by zero
-                return Some((self.actual_value / target) * 100.0);
+                return Some((self.actual_value.unwrap_or(0.0) / target) * 100.0);
             }
         }
         None // No target or target is zero
+    }
+
+    /// Example calculated field (can be added if needed)
+    pub fn calculate_progress_percentage(&self) -> Option<f64> {
+        if let (Some(actual), Some(target)) = (self.actual_value, self.target_value) {
+            if target > 0.0 {
+                return Some((actual / target) * 100.0);
+            }
+        }
+        None
+    }
+}
+
+impl DocumentLinkable for Activity {
+    fn field_metadata() -> Vec<EntityFieldMetadata> {
+        vec![
+            EntityFieldMetadata { field_name: "description", display_name: "Description", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "kpi", display_name: "KPI", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "target_value", display_name: "Target Value", supports_documents: false, field_type: FieldType::Number, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "actual_value", display_name: "Actual Value", supports_documents: true, field_type: FieldType::Number, is_document_reference_only: false }, // e.g., proof of actuals
+            EntityFieldMetadata { field_name: "project_id", display_name: "Project", supports_documents: false, field_type: FieldType::Uuid, is_document_reference_only: false },
+            // Document Reference Fields from Migration
+            EntityFieldMetadata { field_name: "photo_evidence", display_name: "Photo Evidence", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "receipts", display_name: "Receipts", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true }, // May represent multiple docs
+            EntityFieldMetadata { field_name: "signed_report", display_name: "Signed Report", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "monitoring_data", display_name: "Monitoring Data", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "output_verification", display_name: "Output Verification", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+        ]
     }
 }
 
@@ -187,7 +227,7 @@ pub struct ActivityRow {
     pub target_value_updated_at: Option<String>,
     pub target_value_updated_by: Option<String>,
     // Added Actual Value fields
-    pub actual_value: f64,
+    pub actual_value: Option<f64>, // Changed to Option<f64>
     pub actual_value_updated_at: Option<String>,
     pub actual_value_updated_by: Option<String>,
     // Removed start/end date fields
@@ -196,64 +236,58 @@ pub struct ActivityRow {
     pub status_id_updated_by: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    pub created_by_user_id: Option<String>,
-    pub updated_by_user_id: Option<String>,
+    pub created_by_user_id: String, // Keep as String for FromRow
+    pub updated_by_user_id: String, // Keep as String for FromRow
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+
+    // Document reference columns (TEXT NULL in DB)
+    pub photo_evidence_ref: Option<String>,
+    pub receipts_ref: Option<String>,
+    pub signed_report_ref: Option<String>,
+    pub monitoring_data_ref: Option<String>,
+    pub output_verification_ref: Option<String>,
 }
 
 impl ActivityRow {
     /// Convert database row to domain entity
     pub fn into_entity(self) -> DomainResult<Activity> {
-        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
-            s.as_ref().map(|id_str| {
-                Uuid::parse_str(id_str)
-                    .map_err(|_| DomainError::Internal(format!("Invalid UUID format in DB: {}", id_str)))
-            })
-        };
-
-        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
-            s.as_ref().map(|dt_str| {
-                DateTime::parse_from_rfc3339(dt_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|_| DomainError::Internal(format!("Invalid RFC3339 format in DB: {}", dt_str)))
-            })
-        };
+        let parse_uuid = |s: String| Uuid::from_str(&s).map_err(|_| DomainError::InvalidUuid(s));
+        let parse_uuid_opt = |s: Option<String>| s.map(parse_uuid).transpose();
+        let parse_datetime = |s: String| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid date format: {}", s)));
+        let parse_datetime_opt = |s: Option<String>| s.map(parse_datetime).transpose();
 
         Ok(Activity {
-            id: Uuid::parse_str(&self.id)
-                 .map_err(|_| DomainError::Internal(format!("Invalid primary key UUID format in DB: {}", self.id)))?,
-            project_id: parse_uuid(&self.project_id).transpose()?,
-            // name removed
+            id: parse_uuid(self.id)?,
+            project_id: parse_uuid_opt(self.project_id)?,
             description: self.description,
-            description_updated_at: parse_datetime(&self.description_updated_at).transpose()?,
-            description_updated_by: parse_uuid(&self.description_updated_by).transpose()?,
-            // kpi added
+            description_updated_at: parse_datetime_opt(self.description_updated_at)?,
+            description_updated_by: parse_uuid_opt(self.description_updated_by)?,
             kpi: self.kpi,
-            kpi_updated_at: parse_datetime(&self.kpi_updated_at).transpose()?,
-            kpi_updated_by: parse_uuid(&self.kpi_updated_by).transpose()?,
-            // target_value added
+            kpi_updated_at: parse_datetime_opt(self.kpi_updated_at)?,
+            kpi_updated_by: parse_uuid_opt(self.kpi_updated_by)?,
             target_value: self.target_value,
-            target_value_updated_at: parse_datetime(&self.target_value_updated_at).transpose()?,
-            target_value_updated_by: parse_uuid(&self.target_value_updated_by).transpose()?,
-            // actual_value added
+            target_value_updated_at: parse_datetime_opt(self.target_value_updated_at)?,
+            target_value_updated_by: parse_uuid_opt(self.target_value_updated_by)?,
             actual_value: self.actual_value,
-            actual_value_updated_at: parse_datetime(&self.actual_value_updated_at).transpose()?,
-            actual_value_updated_by: parse_uuid(&self.actual_value_updated_by).transpose()?,
-            // start/end date removed
+            actual_value_updated_at: parse_datetime_opt(self.actual_value_updated_at)?,
+            actual_value_updated_by: parse_uuid_opt(self.actual_value_updated_by)?,
             status_id: self.status_id,
-            status_id_updated_at: parse_datetime(&self.status_id_updated_at).transpose()?,
-            status_id_updated_by: parse_uuid(&self.status_id_updated_by).transpose()?,
-            created_at: DateTime::parse_from_rfc3339(&self.created_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                 .map_err(|_| DomainError::Internal(format!("Invalid created_at format in DB: {}", self.created_at)))?,
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                 .map_err(|_| DomainError::Internal(format!("Invalid updated_at format in DB: {}", self.updated_at)))?,
-            created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at).transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+            status_id_updated_at: parse_datetime_opt(self.status_id_updated_at)?,
+            status_id_updated_by: parse_uuid_opt(self.status_id_updated_by)?,
+            created_at: parse_datetime(self.created_at)?,
+            updated_at: parse_datetime(self.updated_at)?,
+            created_by_user_id: parse_uuid(self.created_by_user_id)?, // Parse from String
+            updated_by_user_id: parse_uuid(self.updated_by_user_id)?, // Parse from String
+            deleted_at: parse_datetime_opt(self.deleted_at)?,
+            deleted_by_user_id: parse_uuid_opt(self.deleted_by_user_id)?,
+
+            // Parse document reference UUIDs
+            photo_evidence_ref: parse_uuid_opt(self.photo_evidence_ref)?,
+            receipts_ref: parse_uuid_opt(self.receipts_ref)?,
+            signed_report_ref: parse_uuid_opt(self.signed_report_ref)?,
+            monitoring_data_ref: parse_uuid_opt(self.monitoring_data_ref)?,
+            output_verification_ref: parse_uuid_opt(self.output_verification_ref)?,
         })
     }
 }
@@ -285,7 +319,7 @@ pub struct ActivityResponse {
     // Added KPI, Target, Actual
     pub kpi: Option<String>,
     pub target_value: Option<f64>,
-    pub actual_value: f64,
+    pub actual_value: Option<f64>,
     pub progress_percentage: Option<f64>, // Calculated field
     // Removed start/end date, is_active
     pub status_id: Option<i64>,
@@ -293,6 +327,14 @@ pub struct ActivityResponse {
     pub project: Option<ProjectSummary>, // Populated when details are fetched
     pub created_at: String,
     pub updated_at: String,
+    pub created_by_user_id: Uuid,
+    pub updated_by_user_id: Uuid,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by_user_id: Option<Uuid>,
+
+    // Added for enrichment
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documents: Option<Vec<MediaDocumentResponse>>,
 }
 
 impl From<Activity> for ActivityResponse {
@@ -314,6 +356,11 @@ impl From<Activity> for ActivityResponse {
             project: None, // Needs to be populated separately
             created_at: activity.created_at.to_rfc3339(),
             updated_at: activity.updated_at.to_rfc3339(),
+            created_by_user_id: activity.created_by_user_id,
+            updated_by_user_id: activity.updated_by_user_id,
+            deleted_at: activity.deleted_at,
+            deleted_by_user_id: activity.deleted_by_user_id,
+            documents: None, // Default to None, enrichment happens in service
         }
     }
 }
@@ -330,4 +377,15 @@ impl ActivityResponse {
         self.status = Some(status);
         self
     }
+}
+
+/// Enum to specify which related entities to include in the response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivityInclude {
+    Project,    // Include a summary of the related project
+    Status,     // Include details about the status ID
+    Documents,  // Include linked media documents
+    CreatedBy,  // Include summary of the user who created it
+    UpdatedBy,  // Include summary of the user who last updated it
+    All,        // Include all of the above
 }

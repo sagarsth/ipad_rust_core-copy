@@ -4,6 +4,9 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc, NaiveDate};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
+use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
+use std::collections::HashSet;
 
 /// Livelihood entity - represents a livelihood grant for a participant
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +55,26 @@ impl Livelihood {
     }
 }
 
+impl DocumentLinkable for Livelihood {
+    fn field_metadata() -> Vec<EntityFieldMetadata> {
+        vec![
+            EntityFieldMetadata { field_name: "grant_amount", display_name: "Initial Grant Amount", supports_documents: true, field_type: FieldType::Number, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "purpose", display_name: "Purpose", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "progress1", display_name: "Progress 1", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "progress2", display_name: "Progress 2", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "outcome", display_name: "Outcome", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "participant_id", display_name: "Participant", supports_documents: false, field_type: FieldType::Uuid, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "project_id", display_name: "Project", supports_documents: false, field_type: FieldType::Uuid, is_document_reference_only: false },
+            // Document Reference Fields from Migration
+            EntityFieldMetadata { field_name: "business_plan", display_name: "Business Plan", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "grant_agreement", display_name: "Grant Agreement", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "receipts", display_name: "Receipts", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true }, // This might represent multiple linked docs
+            EntityFieldMetadata { field_name: "progress_photos", display_name: "Progress Photos", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true }, // This might represent multiple linked docs
+            EntityFieldMetadata { field_name: "case_study", display_name: "Case Study", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+        ]
+    }
+}
+
 /// SubsequentGrant entity - represents additional grants for a livelihood
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubsequentGrant {
@@ -83,6 +106,21 @@ impl SubsequentGrant {
     // Helper to parse grant date
     pub fn parsed_grant_date(&self) -> Option<NaiveDate> {
         self.grant_date.as_ref().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+    }
+}
+
+impl DocumentLinkable for SubsequentGrant {
+     fn field_metadata() -> Vec<EntityFieldMetadata> {
+        vec![
+            EntityFieldMetadata { field_name: "amount", display_name: "Grant Amount", supports_documents: true, field_type: FieldType::Number, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "purpose", display_name: "Purpose", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "grant_date", display_name: "Grant Date", supports_documents: false, field_type: FieldType::Date, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "livelihood_id", display_name: "Livelihood", supports_documents: false, field_type: FieldType::Uuid, is_document_reference_only: false },
+            // Document Reference Fields from Migration
+            EntityFieldMetadata { field_name: "grant_application", display_name: "Grant Application", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "grant_report", display_name: "Grant Report", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "receipts", display_name: "Receipts", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true }, // May represent multiple docs
+        ]
     }
 }
 
@@ -446,6 +484,8 @@ pub struct LivelihoodResponse {
     pub updated_at: String,
     pub subsequent_grants: Option<Vec<SubsequentGrantSummary>>,
     pub total_grant_amount: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documents: Option<Vec<MediaDocumentResponse>>,
 }
 
 impl From<Livelihood> for LivelihoodResponse {
@@ -465,6 +505,7 @@ impl From<Livelihood> for LivelihoodResponse {
             updated_at: livelihood.updated_at.to_rfc3339(),
             subsequent_grants: None,
             total_grant_amount: livelihood.grant_amount,
+            documents: None,
         }
     }
 }
@@ -493,12 +534,13 @@ impl LivelihoodResponse {
     }
 }
 
-/// Enum for specifying included relations when fetching livelihoods
+/// Enum to specify included relations when fetching livelihoods
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LivelihoodInclude {
-    Participant,
     Project,
+    Participant,
     SubsequentGrants,
+    Documents,
     All,
 }
 

@@ -3,11 +3,16 @@ use sqlx::{SqlitePool, Transaction, Sqlite};
 use crate::domains::core::dependency_checker::DependencyChecker;
 use crate::domains::core::delete_service::{BaseDeleteService, DeleteOptions, DeleteService, DeleteServiceRepository};
 use crate::domains::core::repository::{DeleteResult, FindById, HardDeletable, SoftDeletable};
+use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::permission::Permission;
 use crate::domains::participant::repository::ParticipantRepository;
-use crate::domains::participant::types::{NewParticipant, Participant, ParticipantResponse, UpdateParticipant};
+use crate::domains::participant::types::{NewParticipant, Participant, ParticipantResponse, UpdateParticipant, ParticipantInclude};
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
-use crate::errors::{DomainResult, ServiceError, ServiceResult};
+use crate::domains::document::service::DocumentService;
+use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::sync::types::SyncPriority;
+use crate::domains::compression::types::CompressionPriority;
+use crate::errors::{DbError, DomainError, DomainResult, ServiceError, ServiceResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::validation::Validate;
 use async_trait::async_trait;
@@ -26,12 +31,14 @@ pub trait ParticipantService: DeleteService<Participant> + Send + Sync {
     async fn get_participant_by_id(
         &self,
         id: Uuid,
+        include: Option<&[ParticipantInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<ParticipantResponse>;
 
     async fn list_participants(
         &self,
         params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<ParticipantResponse>>;
 
@@ -49,6 +56,38 @@ pub trait ParticipantService: DeleteService<Participant> + Send + Sync {
         auth: &AuthContext,
     ) -> ServiceResult<DeleteResult>;
     
+    async fn upload_document_for_participant(
+        &self,
+        participant_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse>;
+
+    async fn bulk_upload_documents_for_participant(
+        &self,
+        participant_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>>;
+    
+    async fn create_participant_with_documents(
+        &self,
+        new_participant: NewParticipant,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(ParticipantResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)>;
+    
     // Add methods for workshop/livelihood management if needed
     // async fn add_participant_to_workshop(...)
     // async fn remove_participant_from_workshop(...)
@@ -57,8 +96,10 @@ pub trait ParticipantService: DeleteService<Participant> + Send + Sync {
 /// Implementation of the participant service
 #[derive(Clone)] 
 pub struct ParticipantServiceImpl {
+    pool: SqlitePool,
     repo: Arc<dyn ParticipantRepository + Send + Sync>,
     delete_service: Arc<BaseDeleteService<Participant>>,
+    document_service: Arc<dyn DocumentService>,
 }
 
 impl ParticipantServiceImpl {
@@ -68,6 +109,7 @@ impl ParticipantServiceImpl {
         tombstone_repo: Arc<dyn TombstoneRepository + Send + Sync>,
         change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
+        document_service: Arc<dyn DocumentService>,
     ) -> Self {
         // Local adapter struct
         struct RepoAdapter(Arc<dyn ParticipantRepository + Send + Sync>);
@@ -118,7 +160,7 @@ impl ParticipantServiceImpl {
             Arc::new(RepoAdapter(participant_repo.clone()));
 
         let delete_service = Arc::new(BaseDeleteService::new(
-            pool,
+            pool.clone(),
             adapted_repo,
             tombstone_repo,
             change_log_repo,
@@ -127,9 +169,71 @@ impl ParticipantServiceImpl {
         ));
         
         Self {
+            pool,
             repo: participant_repo,
             delete_service,
+            document_service,
         }
+    }
+    
+    async fn enrich_response(
+        &self,
+        mut response: ParticipantResponse,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantResponse> {
+        if let Some(includes) = include {
+            let include_docs = includes.contains(&ParticipantInclude::Documents) || 
+                               includes.contains(&ParticipantInclude::All);
+
+            if include_docs {
+                let doc_params = PaginationParams::default();
+                let docs_result = self.document_service
+                    .list_media_documents_by_related_entity(
+                        auth,
+                        "participants",
+                        response.id,
+                        doc_params,
+                        None
+                    ).await?;
+                response.documents = Some(docs_result.items);
+            }
+        }
+        
+        Ok(response)
+    }
+    
+    async fn upload_documents_for_entity(
+        &self,
+        entity_id: Uuid,
+        entity_type: &str,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> Vec<Result<MediaDocumentResponse, ServiceError>> {
+        let mut results = Vec::new();
+        
+        for (file_data, filename, linked_field) in documents {
+            let upload_result = self.document_service.upload_document(
+                auth,
+                file_data,
+                filename.clone(),
+                None,
+                document_type_id,
+                entity_id,
+                entity_type.to_string(),
+                linked_field,
+                sync_priority,
+                compression_priority,
+                None,
+            ).await;
+            
+            results.push(upload_result);
+        }
+        
+        results
     }
 }
 
@@ -202,6 +306,7 @@ impl ParticipantService for ParticipantServiceImpl {
     async fn get_participant_by_id(
         &self,
         id: Uuid,
+        include: Option<&[ParticipantInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<ParticipantResponse> {
         if !auth.has_permission(Permission::ViewParticipants) {
@@ -211,12 +316,15 @@ impl ParticipantService for ParticipantServiceImpl {
         }
 
         let participant = self.repo.find_by_id(id).await?;
-        Ok(ParticipantResponse::from(participant))
+        let response = ParticipantResponse::from(participant);
+        
+        self.enrich_response(response, include, auth).await
     }
 
     async fn list_participants(
         &self,
         params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<ParticipantResponse>> {
         if !auth.has_permission(Permission::ViewParticipants) {
@@ -227,14 +335,15 @@ impl ParticipantService for ParticipantServiceImpl {
 
         let paginated_result = self.repo.find_all(params).await?;
 
-        let response_items = paginated_result
-            .items
-            .into_iter()
-            .map(ParticipantResponse::from)
-            .collect();
+        let mut enriched_items = Vec::with_capacity(paginated_result.items.len());
+        for item in paginated_result.items {
+            let response = ParticipantResponse::from(item);
+            let enriched = self.enrich_response(response, include, auth).await?; 
+            enriched_items.push(enriched);
+        }
 
         Ok(PaginatedResult::new(
-            response_items,
+            enriched_items,
             paginated_result.total,
             params,
         ))
@@ -295,5 +404,173 @@ impl ParticipantService for ParticipantServiceImpl {
         // Use the delete method inherited from DeleteService<Participant>
         let result = self.delete(id, auth, options).await?;
         Ok(result)
+    }
+    
+    async fn upload_document_for_participant(
+        &self,
+        participant_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse> {
+        // 1. Verify participant exists
+        let _participant = self.repo.find_by_id(participant_id).await
+            .map_err(ServiceError::Domain)?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Validate the linked field if specified
+        if let Some(field) = &linked_field {
+            if !Participant::is_document_linkable_field(field) {
+                let valid_fields: Vec<String> = Participant::document_linkable_fields()
+                    .into_iter()
+                    .collect();
+                    
+                return Err(ServiceError::Domain(ValidationError::Custom(format!(
+                    "Field '{}' does not support document attachments for participants. Valid fields: {}",
+                    field, valid_fields.join(", ")
+                )).into())); 
+            }
+        }
+
+        // 4. Delegate to document service, passing linked_field
+        let document = self.document_service.upload_document(
+            auth,
+            file_data,
+            original_filename,
+            title,
+            document_type_id,
+            participant_id,
+            "participants".to_string(), // Entity type
+            linked_field.clone(), // Pass the validated field name
+            sync_priority,
+            compression_priority,
+            None, 
+        ).await?;
+
+        // 5. --- NEW: Update entity reference if it was a document-only field ---
+        if let Some(field_name) = linked_field {
+            if let Some(metadata) = Participant::get_field_metadata(&field_name) {
+                if metadata.is_document_reference_only {
+                    // Call repo method to update the specific reference column
+                    self.repo.set_document_reference(
+                        participant_id, 
+                        &field_name, // e.g., "profile_photo"
+                        document.id, // The ID of the newly created MediaDocument
+                        auth
+                    ).await?;
+                }
+            }
+        }
+
+        Ok(document)
+    }
+
+    async fn bulk_upload_documents_for_participant(
+        &self,
+        participant_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>> {
+        // 1. Verify participant exists
+        let _participant = self.repo.find_by_id(participant_id).await
+            .map_err(ServiceError::Domain)?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Delegate to document service
+        let documents = self.document_service.bulk_upload_documents(
+            auth,
+            files,
+            title,
+            document_type_id,
+            participant_id,
+            "participants".to_string(),
+            sync_priority,
+            compression_priority,
+            None,
+        ).await?;
+
+        Ok(documents)
+    }
+    
+    async fn create_participant_with_documents(
+        &self,
+        new_participant: NewParticipant,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(ParticipantResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)> {
+        // 1. Check Permissions
+        if !auth.has_permission(Permission::CreateParticipants) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to create participants".to_string(),
+            ));
+        }
+        
+        if !documents.is_empty() && !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 2. Validate Input DTO
+        new_participant.validate()?;
+        
+        // 3. Begin transaction for participant creation
+        let mut tx = self.pool.begin().await
+            .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+        
+        // 4. Create the participant first (within transaction)
+        let created_participant = match self.repo.create_with_tx(&new_participant, auth, &mut tx).await {
+            Ok(participant) => participant,
+            Err(e) => {
+                let _ = tx.rollback().await; // Rollback on error
+                return Err(ServiceError::Domain(e));
+            }
+        };
+        
+        // 5. Commit transaction to ensure participant is created before attaching docs
+        if let Err(e) = tx.commit().await {
+             return Err(ServiceError::Domain(DomainError::Database(DbError::from(e))));
+        }
+        
+        // 6. Now upload documents (outside transaction)
+        let document_results = if !documents.is_empty() {
+            self.upload_documents_for_entity(
+                created_participant.id,
+                "participants",
+                documents,
+                document_type_id,
+                new_participant.sync_priority.unwrap_or(SyncPriority::Normal),
+                None,
+                auth,
+            ).await
+        } else {
+            Vec::new()
+        };
+        
+        // 7. Convert to Response DTO and return with document results
+        let response = ParticipantResponse::from(created_participant);
+        Ok((response, document_results))
     }
 }

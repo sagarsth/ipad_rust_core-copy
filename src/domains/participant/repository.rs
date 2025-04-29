@@ -1,14 +1,16 @@
 use crate::auth::AuthContext;
-use sqlx::{Executor, Row, Sqlite, Transaction, SqlitePool};
+use sqlx::{Executor, Row, Sqlite, Transaction, SqlitePool, QueryBuilder};
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
+use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::participant::types::{NewParticipant, Participant, ParticipantRow, UpdateParticipant};
-use crate::errors::{DbError, DomainError, DomainResult};
+use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{query, query_as, query_scalar};
 use uuid::Uuid;
+use crate::domains::sync::types::SyncPriority;
 
 /// Trait defining participant repository operations
 #[async_trait]
@@ -44,9 +46,20 @@ pub trait ParticipantRepository: DeleteServiceRepository<Participant> + Send + S
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Participant>>;
     
-    // Add methods for counting related entities if needed later
-    // async fn count_workshops(&self, participant_id: Uuid) -> DomainResult<i64>;
-    // async fn count_livelihoods(&self, participant_id: Uuid) -> DomainResult<i64>;
+    async fn update_sync_priority(
+        &self,
+        ids: &[Uuid],
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> DomainResult<u64>;
+    
+    async fn set_document_reference(
+        &self,
+        participant_id: Uuid,
+        field_name: &str, // e.g., "profile_photo"
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()>;
 }
 
 /// SQLite implementation for ParticipantRepository
@@ -374,5 +387,86 @@ impl ParticipantRepository for SqliteParticipantRepository {
             total as u64,
             params,
         ))
+    }
+    
+    async fn update_sync_priority(
+        &self,
+        ids: &[Uuid],
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> DomainResult<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let priority_val = priority as i64;
+        
+        let mut builder = QueryBuilder::new("UPDATE participants SET ");
+        builder.push("sync_priority = ");
+        builder.push_bind(priority_val);
+        builder.push(", updated_at = ");
+        builder.push_bind(now);
+        builder.push(", updated_by_user_id = ");
+        builder.push_bind(user_id_str);
+        
+        // Build the WHERE clause with IN condition
+        builder.push(" WHERE id IN (");
+        let mut id_separated = builder.separated(",");
+        for id in ids {
+            id_separated.push_bind(id.to_string());
+        }
+        id_separated.push_unseparated(")"); // Correctly close parenthesis
+        builder.push(" AND deleted_at IS NULL");
+        
+        let query = builder.build();
+        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+        
+        Ok(result.rows_affected())
+    }
+    
+    async fn set_document_reference(
+        &self,
+        participant_id: Uuid,
+        field_name: &str, // e.g., "profile_photo"
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()> {
+        // Construct the database column name (e.g., "profile_photo_ref")
+        let column_name = format!("{}_ref", field_name); 
+        
+        // Validate the field name against the metadata
+        if !Participant::field_metadata().iter().any(|m| m.field_name == field_name && m.is_document_reference_only) {
+             return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid document reference field for Participant: {}", field_name))));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let document_id_str = document_id.to_string();
+        
+        // Use QueryBuilder for dynamic column name safety
+        let mut builder = sqlx::QueryBuilder::new("UPDATE participants SET ");
+        builder.push(&column_name); // Push the validated column name
+        builder.push(" = ");
+        builder.push_bind(document_id_str);
+        builder.push(", updated_at = ");
+        builder.push_bind(now);
+        builder.push(", updated_by_user_id = ");
+        builder.push_bind(user_id_str);
+        builder.push(" WHERE id = ");
+        builder.push_bind(participant_id.to_string());
+        builder.push(" AND deleted_at IS NULL");
+
+        let query = builder.build();
+        
+        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+
+        if result.rows_affected() == 0 {
+            // Participant might not exist or was deleted
+            Err(DomainError::EntityNotFound("Participant".to_string(), participant_id))
+        } else {
+            Ok(())
+        }
     }
 }

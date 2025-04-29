@@ -1,4 +1,4 @@
-mod has_permission;
+pub mod has_permission;
 
 
 pub use has_permission::*;

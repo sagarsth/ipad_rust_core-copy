@@ -1,9 +1,11 @@
 use crate::auth::AuthContext;
 use sqlx::{Executor, Row, Sqlite, Transaction, SqlitePool, Arguments, sqlite::SqliteArguments};
+use sqlx::QueryBuilder;
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
+use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::project::types::{NewProject, Project, ProjectRow, UpdateProject};
-use crate::errors::{DbError, DomainError, DomainResult};
+use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams, SyncPriority};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -56,6 +58,14 @@ pub trait ProjectRepository: DeleteServiceRepository<Project> + Send + Sync {
         priority: SyncPriority,
         auth: &AuthContext,
     ) -> DomainResult<u64>;
+
+    async fn set_document_reference(
+        &self,
+        project_id: Uuid,
+        field_name: &str, // e.g., "proposal_document"
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()>;
 }
 
 /// SQLite implementation for ProjectRepository
@@ -220,10 +230,12 @@ impl ProjectRepository for SqliteProjectRepository {
         let now = Utc::now().to_rfc3339();
         let user_id_str = auth.user_id.to_string();
         let sg_id_str = new_project.strategic_goal_id.map(|id| id.to_string());
+        let created_by_id_str = new_project.created_by_user_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| user_id_str.clone());
 
-        query(
-            r#"
-            INSERT INTO projects (
+        let mut builder = QueryBuilder::new(
+            r#"INSERT INTO projects (
                 id, strategic_goal_id, 
                 name, name_updated_at, name_updated_by,
                 objective, objective_updated_at, objective_updated_by,
@@ -234,32 +246,35 @@ impl ProjectRepository for SqliteProjectRepository {
                 sync_priority,
                 created_at, updated_at, created_by_user_id, updated_by_user_id,
                 deleted_at, deleted_by_user_id
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-                ?,
-                ?, ?, ?, ?, NULL, NULL
-            )
-            "#,
-        )
-        .bind(id.to_string())
-        .bind(sg_id_str)
-        .bind(&new_project.name).bind(&now).bind(&user_id_str) // name LWW
-        .bind(&new_project.objective)
-        .bind(new_project.objective.as_ref().map(|_| &now)).bind(new_project.objective.as_ref().map(|_| &user_id_str)) // objective LWW
-        .bind(&new_project.outcome)
-        .bind(new_project.outcome.as_ref().map(|_| &now)).bind(new_project.outcome.as_ref().map(|_| &user_id_str)) // outcome LWW
-        .bind(new_project.status_id)
-        .bind(new_project.status_id.map(|_| &now)).bind(new_project.status_id.map(|_| &user_id_str)) // status_id LWW
-        .bind(&new_project.timeline)
-        .bind(new_project.timeline.as_ref().map(|_| &now)).bind(new_project.timeline.as_ref().map(|_| &user_id_str)) // timeline LWW
-        .bind(&new_project.responsible_team)
-        .bind(new_project.responsible_team.as_ref().map(|_| &now)).bind(new_project.responsible_team.as_ref().map(|_| &user_id_str)) // responsible_team LWW
-        .bind(new_project.sync_priority as i64)
-        .bind(&now).bind(&now) // created_at, updated_at
-        .bind(&user_id_str).bind(&user_id_str) // created_by, updated_by
-        .execute(&mut **tx)
-        .await
-        .map_err(DbError::from)?;
+            ) "#
+        );
+
+        builder.push_values([ (
+            id.to_string(), sg_id_str,
+            new_project.name.clone(), now.clone(), user_id_str.clone(),
+            new_project.objective.clone(), new_project.objective.as_ref().map(|_| &now), new_project.objective.as_ref().map(|_| &user_id_str),
+            new_project.outcome.clone(), new_project.outcome.as_ref().map(|_| &now), new_project.outcome.as_ref().map(|_| &user_id_str),
+            new_project.status_id.clone(), new_project.status_id.as_ref().map(|_| &now), new_project.status_id.as_ref().map(|_| &user_id_str),
+            new_project.timeline.clone(), new_project.timeline.as_ref().map(|_| &now), new_project.timeline.as_ref().map(|_| &user_id_str),
+            new_project.responsible_team.clone(), new_project.responsible_team.as_ref().map(|_| &now), new_project.responsible_team.as_ref().map(|_| &user_id_str),
+            new_project.sync_priority as i64,
+            now.clone(), now.clone(), created_by_id_str, user_id_str.clone(),
+            Option::<String>::None, Option::<String>::None
+        )], |mut b, values| {
+             b.push_bind(values.0); b.push_bind(values.1);
+             b.push_bind(values.2); b.push_bind(values.3); b.push_bind(values.4);
+             b.push_bind(values.5); b.push_bind(values.6); b.push_bind(values.7);
+             b.push_bind(values.8); b.push_bind(values.9); b.push_bind(values.10);
+             b.push_bind(values.11); b.push_bind(values.12); b.push_bind(values.13);
+             b.push_bind(values.14); b.push_bind(values.15); b.push_bind(values.16);
+             b.push_bind(values.17); b.push_bind(values.18); b.push_bind(values.19);
+             b.push_bind(values.20);
+             b.push_bind(values.21); b.push_bind(values.22); b.push_bind(values.23); b.push_bind(values.24);
+             b.push_bind(values.25); b.push_bind(values.26);
+        });
+
+        let query = builder.build();
+        query.execute(&mut **tx).await.map_err(DbError::from)?;
 
         self.find_by_id_with_tx(id, tx).await
     }
@@ -285,70 +300,82 @@ impl ProjectRepository for SqliteProjectRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<Project> {
-        let _ = self.find_by_id_with_tx(id, tx).await?; // Ensure exists
-
+        let _ = self.find_by_id_with_tx(id, tx).await?; // Ensure the project exists
+        
         let now = Utc::now().to_rfc3339();
         let user_id_str = auth.user_id.to_string();
+        let id_str = id.to_string();
 
-        let mut set_clauses = Vec::new();
-        let mut args = SqliteArguments::default();
-
-        macro_rules! add_lww_update_option {($field:ident, $value:expr) => {
-            if let Some(val) = $value {
-                set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
-                args.add(val);
-                args.add(&now);
-                args.add(&user_id_str);
+        // Define LWW macros locally
+        macro_rules! add_lww_option {($builder:expr, $separated:expr, $field_sql:literal, $value:expr, $now_ref:expr, $user_id_ref:expr, $fields_updated_flag:expr) => {
+            if let Some(ref val) = $value {
+                $separated.push(concat!($field_sql, " = "));
+                $separated.push_bind_unseparated(val.clone());
+                $separated.push(concat!(" ", $field_sql, "_updated_at = "));
+                $separated.push_bind_unseparated($now_ref.clone());
+                $separated.push(concat!(" ", $field_sql, "_updated_by = "));
+                $separated.push_bind_unseparated($user_id_ref.clone());
+                $fields_updated_flag = true;
             }
         };}
-        macro_rules! add_lww_update {($field:ident, $value:expr) => {
-            if let Some(val) = $value {
-                set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
-                args.add(val);
-                args.add(&now);
-                args.add(&user_id_str);
-            }
-        };}
-
-        if let Some(opt_sg_id) = update_data.strategic_goal_id {
-             set_clauses.push("strategic_goal_id = ?".to_string());
-             args.add(opt_sg_id.map(|id| id.to_string())); 
-        }
         
-        add_lww_update!(name, &update_data.name);
-        add_lww_update_option!(objective, &update_data.objective);
-        add_lww_update_option!(outcome, &update_data.outcome);
-        add_lww_update!(status_id, &update_data.status_id);
-        add_lww_update_option!(timeline, &update_data.timeline);
-        add_lww_update_option!(responsible_team, &update_data.responsible_team);
+        macro_rules! add_lww_uuid_option {($builder:expr, $separated:expr, $field_sql:literal, $value:expr, $now_ref:expr, $user_id_ref:expr, $fields_updated_flag:expr) => {
+            // Handle Option<Option<Uuid>> by checking both Some layers
+            if let Some(inner_option) = $value { 
+                if let Some(uuid_val) = inner_option { // Check inner Option
+                    let uuid_str = uuid_val.to_string(); // Convert unwrapped Uuid
+                    $separated.push(concat!($field_sql, " = "));
+                    $separated.push_bind_unseparated(uuid_str);
+                } else { // Handle case where outer is Some but inner is None (explicit NULL)
+                    $separated.push(concat!($field_sql, " = NULL")); 
+                }
+                // Regardless of inner value, update LWW timestamps if outer Option was Some
+                $separated.push(concat!(" ", $field_sql, "_updated_at = "));
+                $separated.push_bind_unseparated($now_ref.clone());
+                $separated.push(concat!(" ", $field_sql, "_updated_by = "));
+                $separated.push_bind_unseparated($user_id_ref.clone());
+                $fields_updated_flag = true;
+            }
+        };}
 
+        let mut builder = QueryBuilder::new("UPDATE projects SET ");
+        let mut separated = builder.separated(", ");
+        let mut fields_updated = false;
+
+        // Apply LWW updates using the macros
+        add_lww_uuid_option!(builder, separated, "strategic_goal_id", update_data.strategic_goal_id, &now, &user_id_str, fields_updated);
+        add_lww_option!(builder, separated, "name", update_data.name, &now, &user_id_str, fields_updated);
+        add_lww_option!(builder, separated, "objective", update_data.objective, &now, &user_id_str, fields_updated);
+        add_lww_option!(builder, separated, "outcome", update_data.outcome, &now, &user_id_str, fields_updated);
+        add_lww_option!(builder, separated, "status_id", update_data.status_id, &now, &user_id_str, fields_updated);
+        add_lww_option!(builder, separated, "timeline", update_data.timeline, &now, &user_id_str, fields_updated);
+        add_lww_option!(builder, separated, "responsible_team", update_data.responsible_team, &now, &user_id_str, fields_updated);
+        
+        // Sync priority is not an LWW field, update directly if present
         if let Some(priority) = update_data.sync_priority {
-            set_clauses.push("sync_priority = ?".to_string());
-            args.add(priority as i64);
+            separated.push("sync_priority = ");
+            separated.push_bind_unseparated(priority as i64);
+            fields_updated = true;
+        }
+
+        if !fields_updated {
+            return self.find_by_id_with_tx(id, tx).await;
         }
         
-        if set_clauses.is_empty() {
-             return self.find_by_id_with_tx(id, tx).await;
-        }
+        separated.push("updated_at = ");
+        separated.push_bind_unseparated(now);
+        separated.push("updated_by_user_id = ");
+        separated.push_bind_unseparated(user_id_str);
 
-        set_clauses.push("updated_at = ?".to_string());
-        args.add(&now);
-        set_clauses.push("updated_by_user_id = ?".to_string());
-        args.add(&user_id_str);
+        builder.push(" WHERE id = ");
+        builder.push_bind(id_str);
+        builder.push(" AND deleted_at IS NULL");
 
-        let query_str = format!(
-            "UPDATE projects SET {} WHERE id = ? AND deleted_at IS NULL",
-            set_clauses.join(", ")
-        );
-        args.add(id.to_string());
-
-        let result = sqlx::query_with(&query_str, args)
-            .execute(&mut **tx)
-            .await
-            .map_err(DbError::from)?;
-
+        let query = builder.build();
+        let result = query.execute(&mut **tx).await.map_err(DbError::from)?;
+        
         if result.rows_affected() == 0 {
-            return Err(DomainError::EntityNotFound(Self::entity_name(self).to_string(), id));
+            return Err(DomainError::EntityNotFound("Project".to_string(), id));
         }
 
         self.find_by_id_with_tx(id, tx).await
@@ -438,23 +465,65 @@ impl ProjectRepository for SqliteProjectRepository {
         let user_id_str = auth.user_id.to_string();
         let priority_val = priority as i64;
         
-        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let query_str = format!(
-            "UPDATE {} SET sync_priority = ?, updated_at = ?, updated_by_user_id = ? WHERE id IN ({}) AND deleted_at IS NULL",
-            Self::entity_name(self),
-            placeholders
-        );
+        let mut builder = QueryBuilder::new("UPDATE projects SET ");
+        builder.push("sync_priority = ");
+        builder.push_bind(priority_val);
+        builder.push(", updated_at = ");
+        builder.push_bind(now);
+        builder.push(", updated_by_user_id = ");
+        builder.push_bind(user_id_str);
         
-        let mut query_builder = sqlx::query(&query_str)
-            .bind(priority_val)
-            .bind(now)
-            .bind(user_id_str);
-            
+        // Build the WHERE clause with IN condition
+        builder.push(" WHERE id IN (");
+        let mut id_separated = builder.separated(",");
         for id in ids {
-            query_builder = query_builder.bind(id.to_string());
+            id_separated.push_bind(id.to_string());
         }
+        builder.push(") AND deleted_at IS NULL");
         
-        let result = query_builder.execute(&self.pool).await.map_err(DbError::from)?;
+        let query = builder.build();
+        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+        
         Ok(result.rows_affected())
+    }
+
+    async fn set_document_reference(
+        &self,
+        project_id: Uuid,
+        field_name: &str, // e.g., "proposal_document"
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()> {
+        let column_name = format!("{}_ref", field_name); 
+        
+        // Validate the field name
+        if !Project::field_metadata().iter().any(|m| m.field_name == field_name && m.is_document_reference_only) {
+             return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid document reference field for Project: {}", field_name))));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let document_id_str = document_id.to_string();
+        
+        let mut builder = sqlx::QueryBuilder::new("UPDATE projects SET ");
+        builder.push(&column_name);
+        builder.push(" = ");
+        builder.push_bind(document_id_str);
+        builder.push(", updated_at = ");
+        builder.push_bind(now);
+        builder.push(", updated_by_user_id = ");
+        builder.push_bind(user_id_str);
+        builder.push(" WHERE id = ");
+        builder.push_bind(project_id.to_string());
+        builder.push(" AND deleted_at IS NULL");
+
+        let query = builder.build();
+        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+
+        if result.rows_affected() == 0 {
+            Err(DomainError::EntityNotFound("Project".to_string(), project_id))
+        } else {
+            Ok(())
+        }
     }
 }

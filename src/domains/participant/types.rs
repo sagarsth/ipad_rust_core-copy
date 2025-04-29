@@ -6,6 +6,12 @@ use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use std::fmt;
 
+// Added imports
+use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::sync::types::SyncPriority;
+use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
+use std::collections::HashSet;
+
 /// Gender enum with string representation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Gender {
@@ -106,6 +112,7 @@ pub struct Participant {
     pub updated_by_user_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub sync_priority: Option<SyncPriority>,
 }
 
 impl Participant {
@@ -125,6 +132,24 @@ impl Participant {
     }
 }
 
+impl DocumentLinkable for Participant {
+    fn field_metadata() -> Vec<EntityFieldMetadata> {
+        vec![
+            EntityFieldMetadata { field_name: "name", display_name: "Full Name", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "gender", display_name: "Gender", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "disability", display_name: "Has Disability", supports_documents: true, field_type: FieldType::Boolean, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "disability_type", display_name: "Type of Disability", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "age_group", display_name: "Age Group", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "location", display_name: "Location", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            // Document Reference Fields from Migration
+            EntityFieldMetadata { field_name: "profile_photo", display_name: "Profile Photo", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "identification", display_name: "Identification", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "consent_form", display_name: "Consent Form", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "needs_assessment", display_name: "Needs Assessment", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+        ]
+    }
+}
+
 /// NewParticipant DTO - used when creating a new participant
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewParticipant {
@@ -135,6 +160,7 @@ pub struct NewParticipant {
     pub age_group: Option<String>,
     pub location: Option<String>,
     pub created_by_user_id: Option<Uuid>,
+    pub sync_priority: Option<SyncPriority>,
 }
 
 impl Validate for NewParticipant {
@@ -166,6 +192,7 @@ pub struct UpdateParticipant {
     pub age_group: Option<String>,
     pub location: Option<String>,
     pub updated_by_user_id: Uuid,
+    pub sync_priority: Option<SyncPriority>,
 }
 
 impl Validate for UpdateParticipant {
@@ -215,6 +242,7 @@ pub struct ParticipantRow {
     pub updated_by_user_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub sync_priority: i64,
 }
 
 impl ParticipantRow {
@@ -266,6 +294,7 @@ impl ParticipantRow {
             updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
             deleted_at: parse_datetime(&self.deleted_at).transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+            sync_priority: Some(SyncPriority::from(self.sync_priority)),
         })
     }
 }
@@ -292,7 +321,7 @@ impl From<Participant> for ParticipantSummary {
     }
 }
 
-/// ParticipantResponse DTO - used for API responses
+/// ParticipantResponse DTO - used as the API response for a participant
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParticipantResponse {
     pub id: Uuid,
@@ -304,6 +333,8 @@ pub struct ParticipantResponse {
     pub location: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documents: Option<Vec<MediaDocumentResponse>>,
 }
 
 impl From<Participant> for ParticipantResponse {
@@ -318,15 +349,17 @@ impl From<Participant> for ParticipantResponse {
             location: p.location,
             created_at: p.created_at.to_rfc3339(),
             updated_at: p.updated_at.to_rfc3339(),
+            documents: None,
         }
     }
 }
 
-/// Enum for specifying included relations when fetching participants
+/// Enum to specify related data to include in participant responses
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParticipantInclude {
     WorkshopCount,
     LivelihoodCount,
+    Documents,
     All,
 }
 

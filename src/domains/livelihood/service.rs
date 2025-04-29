@@ -2,19 +2,27 @@ use crate::auth::AuthContext;
 use crate::domains::core::delete_service::{BaseDeleteService, DeleteOptions, DeleteService};
 use crate::domains::core::repository::{DeleteResult, FindById};
 use crate::domains::core::dependency_checker::DependencyChecker;
+use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::livelihood::repository::{LivehoodRepository, SubsequentGrantRepository, SqliteLivelihoodRepository, SqliteSubsequentGrantRepository};
 use crate::domains::livelihood::types::{Livelihood, LivelihoodInclude, LivelihoodResponse, NewLivelihood, NewSubsequentGrant, ParticipantSummary, ProjectSummary, SubsequentGrantResponse, SubsequentGrantSummary, UpdateLivelihood, UpdateSubsequentGrant};
 use crate::domains::participant::repository::ParticipantRepository;
 use crate::domains::permission::Permission;
 use crate::domains::project::repository::ProjectRepository;
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
-use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult};
+use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, DbError, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::validation::Validate;
 use async_trait::async_trait;
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Sqlite, Transaction};
 use std::sync::Arc;
 use uuid::Uuid;
+
+// Add document-related imports
+use crate::domains::document::repository::MediaDocumentRepository;
+use crate::domains::document::service::DocumentService;
+use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::sync::types::SyncPriority;
+use crate::domains::compression::types::CompressionPriority;
 
 /// Interface for the livelihood service
 #[async_trait]
@@ -25,6 +33,15 @@ pub trait LivehoodService: DeleteService<Livelihood> + Send + Sync {
         new_livelihood: NewLivelihood,
         auth: &AuthContext,
     ) -> ServiceResult<LivelihoodResponse>;
+
+    /// Create a new livelihood with documents
+    async fn create_livelihood_with_documents(
+        &self,
+        new_livelihood: NewLivelihood,
+        documents: Vec<(Vec<u8>, String, Option<String>)>, // (file_data, filename, linked_field)
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(LivelihoodResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)>;
 
     /// Get a livelihood by ID
     async fn get_livelihood_by_id(
@@ -89,6 +106,32 @@ pub trait LivehoodService: DeleteService<Livelihood> + Send + Sync {
         hard_delete: bool,
         auth: &AuthContext,
     ) -> ServiceResult<()>;
+
+    /// Upload a document for a livelihood
+    async fn upload_document_for_livelihood(
+        &self,
+        livelihood_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse>;
+
+    /// Bulk upload documents for a livelihood
+    async fn bulk_upload_documents_for_livelihood(
+        &self,
+        livelihood_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>>;
 }
 
 /// Implementation of the livelihood service
@@ -98,6 +141,7 @@ pub struct LivehoodServiceImpl {
     subsequent_grant_repo: Arc<SqliteSubsequentGrantRepository>,
     project_repo: Arc<dyn ProjectRepository>,
     participant_repo: Arc<dyn ParticipantRepository>,
+    document_service: Arc<dyn DocumentService>,
     pool: Pool<Sqlite>,
 }
 
@@ -112,6 +156,8 @@ impl LivehoodServiceImpl {
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         project_repo: Arc<dyn ProjectRepository>,
         participant_repo: Arc<dyn ParticipantRepository>,
+        document_service: Arc<dyn DocumentService>,
+        media_doc_repo: Arc<dyn MediaDocumentRepository>,
     ) -> Self {
         let delete_service = Arc::new(BaseDeleteService::new(
             pool.clone(),
@@ -119,7 +165,7 @@ impl LivehoodServiceImpl {
             tombstone_repo,
             change_log_repo,
             dependency_checker,
-            None
+            Some(media_doc_repo) // Pass media repo for delete service to handle document cleanup
         ));
         
         Self {
@@ -128,6 +174,7 @@ impl LivehoodServiceImpl {
             subsequent_grant_repo,
             project_repo,
             participant_repo,
+            document_service,
             pool,
         }
     }
@@ -137,6 +184,7 @@ impl LivehoodServiceImpl {
         &self,
         mut response: LivelihoodResponse,
         include: Option<&[LivelihoodInclude]>,
+        auth: &AuthContext,
     ) -> ServiceResult<LivelihoodResponse> {
         let includes = match include {
             Some(includes) => includes,
@@ -199,8 +247,60 @@ impl LivehoodServiceImpl {
                 Err(e) => return Err(ServiceError::Domain(e)),
             }
         }
+
+        // Include documents if requested
+        if include_all || includes.contains(&LivelihoodInclude::Documents) {
+            let doc_params = PaginationParams::default();
+            match self.document_service.list_media_documents_by_related_entity(
+                auth,
+                "livelihoods", // Entity type
+                response.id,
+                doc_params,
+                None, // No nested includes for documents
+            ).await {
+                Ok(docs_result) => {
+                    response.documents = Some(docs_result.items);
+                }
+                Err(e) => return Err(e),
+            }
+        }
         
         Ok(response)
+    }
+
+    /// Helper method to upload documents for a livelihood and handle errors individually
+    async fn upload_documents_for_entity(
+        &self,
+        entity_id: Uuid,
+        entity_type: &str,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> Vec<Result<MediaDocumentResponse, ServiceError>> {
+        let mut results = Vec::new();
+        
+        for (file_data, filename, linked_field) in documents {
+            let upload_result = self.document_service.upload_document(
+                auth,
+                file_data,
+                filename,
+                None, // No title, will use filename as default
+                document_type_id,
+                entity_id,
+                entity_type.to_string(),
+                linked_field,
+                sync_priority,
+                compression_priority,
+                None, // No temp ID needed since entity exists
+            ).await;
+            
+            // Store the result (success or error) without failing the whole operation
+            results.push(upload_result);
+        }
+        
+        results
     }
 }
 
@@ -266,7 +366,7 @@ impl LivehoodService for LivehoodServiceImpl {
         new_livelihood: NewLivelihood,
         auth: &AuthContext,
     ) -> ServiceResult<LivelihoodResponse> {
-        // Check permissions
+        // Check permissions - explicit permission check
         if !auth.can_edit_livelihoods() {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to create livelihoods".to_string(),
@@ -286,6 +386,66 @@ impl LivehoodService for LivehoodServiceImpl {
         let response = LivelihoodResponse::from(livelihood);
         Ok(response)
     }
+
+    async fn create_livelihood_with_documents(
+        &self,
+        new_livelihood: NewLivelihood,
+        documents: Vec<(Vec<u8>, String, Option<String>)>, // (file_data, filename, linked_field)
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(LivelihoodResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)> {
+        // 1. Check Permissions - explicit permission checks
+        if !auth.can_edit_livelihoods() {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to create livelihoods".to_string(),
+            ));
+        }
+        
+        if !documents.is_empty() && !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 2. Validate Input DTO
+        new_livelihood.validate().map_err(ServiceError::Domain)?;
+        
+        // 3. Begin transaction
+        let mut tx = self.pool.begin().await
+            .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+        
+        // 4. Create the livelihood first (within transaction)
+        let created_livelihood = match self.repo.create_with_tx(&new_livelihood, auth, &mut tx).await {
+            Ok(livelihood) => livelihood,
+            Err(e) => {
+                let _ = tx.rollback().await; // Rollback on error
+                return Err(ServiceError::Domain(e));
+            }
+        };
+
+        // 5. Commit transaction to ensure livelihood is created
+        tx.commit().await
+            .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+
+        // 6. Now upload documents (outside transaction, linking to created_livelihood.id)
+        let document_results = if !documents.is_empty() {
+            self.upload_documents_for_entity(
+                created_livelihood.id,
+                "livelihoods", // Entity type
+                documents,
+                document_type_id,
+                SyncPriority::Normal, // Default priority
+                None, // Use default compression priority
+                auth,
+            ).await
+        } else {
+            Vec::new()
+        };
+
+        // 7. Convert to Response DTO and return with document results
+        let response = LivelihoodResponse::from(created_livelihood);
+        Ok((response, document_results))
+    }
     
     async fn get_livelihood_by_id(
         &self,
@@ -293,7 +453,7 @@ impl LivehoodService for LivehoodServiceImpl {
         include: Option<&[LivelihoodInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<LivelihoodResponse> {
-        // Check permissions
+        // Check permissions - explicit permission check
         if !auth.can_view_livelihoods() {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to view livelihoods".to_string(),
@@ -306,9 +466,9 @@ impl LivehoodService for LivehoodServiceImpl {
             .await
             .map_err(ServiceError::Domain)?;
         
-        // Convert to response and enrich
+        // Convert to response and enrich - now passing auth for document enrichment
         let response = LivelihoodResponse::from(livelihood);
-        self.enrich_response(response, include).await
+        self.enrich_response(response, include, auth).await
     }
     
     async fn list_livelihoods(
@@ -319,7 +479,7 @@ impl LivehoodService for LivehoodServiceImpl {
         include: Option<&[LivelihoodInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<LivelihoodResponse>> {
-        // Check permissions
+        // Check permissions - explicit permission check
         if !auth.can_view_livelihoods() {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to view livelihoods".to_string(),
@@ -332,11 +492,11 @@ impl LivehoodService for LivehoodServiceImpl {
             .await
             .map_err(ServiceError::Domain)?;
         
-        // Map items to responses and enrich
+        // Map items to responses and enrich - now passing auth for document enrichment
         let mut responses = Vec::new();
         for livelihood in result.items {
             let response = LivelihoodResponse::from(livelihood);
-            let enriched = self.enrich_response(response, include).await?;
+            let enriched = self.enrich_response(response, include, auth).await?;
             responses.push(enriched);
         }
         
@@ -356,7 +516,7 @@ impl LivehoodService for LivehoodServiceImpl {
         mut update_data: UpdateLivelihood,
         auth: &AuthContext,
     ) -> ServiceResult<LivelihoodResponse> {
-        // Check permissions
+        // Check permissions - explicit permission check
         if !auth.can_edit_livelihoods() {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to update livelihoods".to_string(),
@@ -375,12 +535,10 @@ impl LivehoodService for LivehoodServiceImpl {
             .await
             .map_err(ServiceError::Domain)?;
         
-        // Convert to response with subsequent grants
+        // Convert to response with subsequent grants and documents
         let response = LivelihoodResponse::from(livelihood);
-        let enriched = self.enrich_response(
-            response, 
-            Some(&[LivelihoodInclude::SubsequentGrants])
-        ).await?;
+        let includes = &[LivelihoodInclude::SubsequentGrants, LivelihoodInclude::Documents];
+        let enriched = self.enrich_response(response, Some(includes), auth).await?;
         
         Ok(enriched)
     }
@@ -391,7 +549,7 @@ impl LivehoodService for LivehoodServiceImpl {
         hard_delete: bool,
         auth: &AuthContext,
     ) -> ServiceResult<DeleteResult> {
-        // Check permissions
+        // Check permissions - explicit permission check
         if hard_delete && !auth.can_hard_delete() {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to hard delete records".to_string(),
@@ -422,7 +580,7 @@ impl LivehoodService for LivehoodServiceImpl {
         mut new_grant: NewSubsequentGrant,
         auth: &AuthContext,
     ) -> ServiceResult<SubsequentGrantResponse> {
-        // Check permissions
+        // Check permissions - explicit permission check
         if !auth.can_edit_livelihoods() {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to add grants".to_string(),
@@ -480,7 +638,7 @@ impl LivehoodService for LivehoodServiceImpl {
         mut update_data: UpdateSubsequentGrant,
         auth: &AuthContext,
     ) -> ServiceResult<SubsequentGrantResponse> {
-        // Check permissions
+        // Check permissions - explicit permission check
         if !auth.can_edit_livelihoods() {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to update grants".to_string(),
@@ -535,7 +693,7 @@ impl LivehoodService for LivehoodServiceImpl {
         id: Uuid,
         auth: &AuthContext,
     ) -> ServiceResult<SubsequentGrantResponse> {
-        // Check permissions
+        // Check permissions - explicit permission check
         if !auth.can_view_livelihoods() {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to view grants".to_string(),
@@ -585,7 +743,7 @@ impl LivehoodService for LivehoodServiceImpl {
         hard_delete: bool,
         auth: &AuthContext,
     ) -> ServiceResult<()> {
-        // Check permissions
+        // Check permissions - explicit permission check
         if hard_delete && !auth.can_hard_delete() {
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to hard delete records".to_string(),
@@ -612,6 +770,112 @@ impl LivehoodService for LivehoodServiceImpl {
         }
         
         Ok(())
+    }
+
+    async fn upload_document_for_livelihood(
+        &self,
+        livelihood_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse> {
+        // 1. Verify livelihood exists
+        let _livelihood = self.repo.find_by_id(livelihood_id).await
+            .map_err(ServiceError::Domain)?;
+
+        // 2. Check permissions - explicit permission check
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Validate the linked field if specified
+        if let Some(field) = &linked_field {
+            if !Livelihood::is_document_linkable_field(field) {
+                let valid_fields: Vec<String> = Livelihood::document_linkable_fields()
+                    .into_iter()
+                    .collect();
+                    
+                return Err(ServiceError::Domain(ValidationError::Custom(format!(
+                    "Field '{}' does not support document attachments for livelihoods. Valid fields: {}",
+                    field, valid_fields.join(", ")
+                )).into()));
+            }
+        }
+
+        // 4. Delegate to document service
+        let document = self.document_service.upload_document(
+            auth,
+            file_data,
+            original_filename,
+            title,
+            document_type_id,
+            livelihood_id,
+            "livelihoods".to_string(), // Entity type
+            linked_field.clone(), // Pass validated field
+            sync_priority,
+            compression_priority,
+            None, // No temp ID for direct uploads
+        ).await?;
+
+        // 5. Update entity reference if it was a document-only field
+        if let Some(field_name) = linked_field {
+            if let Some(metadata) = Livelihood::get_field_metadata(&field_name) {
+                if metadata.is_document_reference_only {
+                    self.repo.set_document_reference(
+                        livelihood_id, 
+                        &field_name, // e.g., "business_plan"
+                        document.id, // The ID of the newly created MediaDocument
+                        auth
+                    ).await?;
+                }
+            }
+        }
+
+        Ok(document)
+    }
+
+    async fn bulk_upload_documents_for_livelihood(
+        &self,
+        livelihood_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>> {
+        // 1. Verify livelihood exists
+        let _livelihood = self.repo.find_by_id(livelihood_id).await
+            .map_err(ServiceError::Domain)?;
+
+        // 2. Check permissions - explicit permission check
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Delegate to document service
+        let documents = self.document_service.bulk_upload_documents(
+            auth,
+            files,
+            title,
+            document_type_id,
+            livelihood_id,
+            "livelihoods".to_string(), // Entity type
+            sync_priority,
+            compression_priority,
+            None, // No temp ID for direct uploads
+        ).await?;
+
+        Ok(documents)
     }
 }
 

@@ -1,12 +1,13 @@
 use crate::auth::AuthContext;
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
+use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::livelihood::types::{Livelihood, LivelihoodRow, NewLivelihood, SubsequentGrant, SubsequentGrantRow, UpdateLivelihood, NewSubsequentGrant, UpdateSubsequentGrant};
-use crate::errors::{DbError, DomainError, DomainResult};
+use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::PaginatedResult;
 use crate::types::PaginationParams;
 use chrono::{DateTime, Utc};
-use sqlx::{Pool, Sqlite, Transaction, query_as, query, Row};
+use sqlx::{Pool, Sqlite, Transaction, query_as, query, Row, QueryBuilder};
 use uuid::Uuid;
 use crate::validation::Validate;
 use async_trait::async_trait;
@@ -69,6 +70,15 @@ pub trait LivehoodRepository:
         participant_id: Uuid,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Livelihood>>;
+
+    /// Set a document reference for a livelihood
+    async fn set_document_reference(
+        &self,
+        livelihood_id: Uuid,
+        field_name: &str, // e.g., "business_plan"
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()>;
 }
 
 /// Repository for subsequent grants
@@ -120,6 +130,15 @@ pub trait SubsequentGrantRepository: Send + Sync {
     async fn hard_delete(
         &self,
         id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()>;
+
+    /// Set a document reference for a subsequent grant
+    async fn set_document_reference(
+        &self,
+        grant_id: Uuid,
+        field_name: &str, // e.g., "grant_agreement"
+        document_id: Uuid,
         auth: &AuthContext,
     ) -> DomainResult<()>;
 }
@@ -397,95 +416,87 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         }
         
         let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
         
-        // Prepare update parts for each field (following LWW pattern)
-        let mut sets = Vec::new();
-        let mut params: Vec<String> = Vec::new();
+        // Use QueryBuilder to build the update query
+        let mut builder = QueryBuilder::new("UPDATE livelihoods SET ");
+        let mut separated = builder.separated(", ");
         
-        // Helper function to add a set clause and parameter
-        let add_set = |sets: &mut Vec<String>, params: &mut Vec<String>, field: &str, value: &str| {
-            sets.push(format!("{} = ?", field));
-            params.push(value.to_string());
-        };
+        // Flag to track if any actual fields are updated
+        let mut fields_updated = false;
         
-        // Helper for timestamp fields (LWW pattern)
-        let add_timestamp_update = |
-            sets: &mut Vec<String>, 
-            params: &mut Vec<String>,
-            field: &str, 
-            value: Option<&String>,
-            existing_ts: Option<&DateTime<Utc>>, 
-            now: &DateTime<Utc>
-        | {
-            if value.is_some() {
-                sets.push(format!("{}_updated_at = ?", field));
-                params.push(now.to_rfc3339());
-                
-                sets.push(format!("{}_updated_by = ?", field));
-                params.push(auth.user_id.to_string());
-            }
-        };
-        
-        // Grant amount
-        if let Some(grant_amount) = update_data.grant_amount {
-            add_set(&mut sets, &mut params, "grant_amount", &grant_amount.to_string());
-            add_timestamp_update(&mut sets, &mut params, "grant_amount", Some(&grant_amount.to_string()), existing.grant_amount_updated_at.as_ref(), &now);
+        // Macro to simplify adding LWW fields
+        macro_rules! add_lww {
+            ($field_name:ident, $field_sql:literal, $value:expr) => {
+                if let Some(val) = $value {
+                    separated.push(concat!($field_sql, " = "));
+                    separated.push_bind_unseparated(val.to_string());
+
+                    separated.push(concat!(" ", $field_sql, "_updated_at = "));
+                    separated.push_bind_unseparated(now_str.clone());
+
+                    separated.push(concat!(" ", $field_sql, "_updated_by = "));
+                    separated.push_bind_unseparated(user_id_str.clone());
+                    fields_updated = true;
+                }
+            };
+            ($field_name:ident, $field_sql:literal, $value:expr, $is_optional:expr) => {
+                if let Some(val) = $value {
+                    separated.push(concat!($field_sql, " = "));
+                    separated.push_bind_unseparated(val.clone());
+
+                    separated.push(concat!(" ", $field_sql, "_updated_at = "));
+                    separated.push_bind_unseparated(now_str.clone());
+
+                    separated.push(concat!(" ", $field_sql, "_updated_by = "));
+                    separated.push_bind_unseparated(user_id_str.clone());
+                    fields_updated = true;
+                }
+            };
         }
         
-        // Purpose
-        if let Some(purpose) = &update_data.purpose {
-            add_set(&mut sets, &mut params, "purpose", purpose);
-            add_timestamp_update(&mut sets, &mut params, "purpose", Some(purpose), existing.purpose_updated_at.as_ref(), &now);
-        }
+        // Add grant amount
+        add_lww!(grant_amount, "grant_amount", update_data.grant_amount);
         
-        // Progress1
-        if let Some(progress1) = &update_data.progress1 {
-            add_set(&mut sets, &mut params, "progress1", progress1);
-            add_timestamp_update(&mut sets, &mut params, "progress1", Some(progress1), existing.progress1_updated_at.as_ref(), &now);
-        }
+        // Add purpose
+        add_lww!(purpose, "purpose", &update_data.purpose, true);
         
-        // Progress2
-        if let Some(progress2) = &update_data.progress2 {
-            add_set(&mut sets, &mut params, "progress2", progress2);
-            add_timestamp_update(&mut sets, &mut params, "progress2", Some(progress2), existing.progress2_updated_at.as_ref(), &now);
-        }
+        // Add progress1
+        add_lww!(progress1, "progress1", &update_data.progress1, true);
         
-        // Outcome
-        if let Some(outcome) = &update_data.outcome {
-            add_set(&mut sets, &mut params, "outcome", outcome);
-            add_timestamp_update(&mut sets, &mut params, "outcome", Some(outcome), existing.outcome_updated_at.as_ref(), &now);
-        }
+        // Add progress2
+        add_lww!(progress2, "progress2", &update_data.progress2, true);
         
-        // Updated timestamps
-        add_set(&mut sets, &mut params, "updated_at", &now.to_rfc3339());
-        add_set(&mut sets, &mut params, "updated_by_user_id", &update_data.updated_by_user_id.to_string());
+        // Add outcome
+        add_lww!(outcome, "outcome", &update_data.outcome, true);
         
-        // If no fields to update, return existing record
-        if sets.len() <= 2 {  // Only updated_at and updated_by
+        // If no actual fields were updated, return the existing record
+        if !fields_updated {
             return Ok(existing);
         }
         
-        // Build and execute the update query
-        let query_string = format!(
-            "UPDATE livelihoods SET {} WHERE id = ? AND deleted_at IS NULL",
-            sets.join(", ")
-        );
+        // Add common update fields
+        separated.push("updated_at = ");
+        separated.push_bind_unseparated(now_str);
+        separated.push(" updated_by_user_id = ");
+        separated.push_bind_unseparated(update_data.updated_by_user_id.to_string());
         
-        let mut query_builder = query(&query_string);
-        
-        // Bind all parameters
-        for param in params {
-            query_builder = query_builder.bind(param);
-        }
-        
-        // Bind the ID
-        query_builder = query_builder.bind(id.to_string());
+        // Finish the query with WHERE clause
+        builder.push(" WHERE id = ");
+        builder.push_bind(id.to_string());
+        builder.push(" AND deleted_at IS NULL");
         
         // Execute the query
-        query_builder
+        let query = builder.build();
+        let result = query
             .execute(&mut **tx)
             .await
             .map_err(DbError::from)?;
+            
+        if result.rows_affected() == 0 {
+            return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
+        }
         
         // Return the updated record
         self.find_by_id_with_tx(id, tx).await
@@ -497,35 +508,24 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         project_id: Option<Uuid>,
         participant_id: Option<Uuid>,
     ) -> DomainResult<PaginatedResult<Livelihood>> {
-        // Base query
-        let mut query_string = String::from("SELECT * FROM livelihoods WHERE deleted_at IS NULL");
-        let mut count_query_string = String::from("SELECT COUNT(*) as count FROM livelihoods WHERE deleted_at IS NULL");
+        // --- Helper closure for WHERE clause --- 
+        let build_where_clause = |builder: &mut QueryBuilder<'_, Sqlite>, proj_id: Option<Uuid>, part_id: Option<Uuid>| {
+            builder.push(" WHERE deleted_at IS NULL");
+            if let Some(pid) = proj_id {
+                builder.push(" AND project_id = ");
+                builder.push_bind(pid.to_string());
+            }
+            if let Some(pid) = part_id {
+                builder.push(" AND participant_id = ");
+                builder.push_bind(pid.to_string());
+            }
+        };
+
+        // --- Count Query --- 
+        let mut count_builder = QueryBuilder::new("SELECT COUNT(*) as count FROM livelihoods");
+        build_where_clause(&mut count_builder, project_id, participant_id); // Apply WHERE logic
         
-        // Parameters to bind
-        let mut param_values: Vec<String> = Vec::new();
-        
-        // Add filters
-        if let Some(pid) = project_id {
-            query_string.push_str(" AND project_id = ?");
-            count_query_string.push_str(" AND project_id = ?");
-            param_values.push(pid.to_string());
-        }
-        
-        if let Some(pid) = participant_id {
-            query_string.push_str(" AND participant_id = ?");
-            count_query_string.push_str(" AND participant_id = ?");
-            param_values.push(pid.to_string());
-        }
-        
-        // Add order by, limit and offset
-        query_string.push_str(" ORDER BY created_at DESC LIMIT ? OFFSET ?");
-        
-        // Build and execute count query
-        let mut count_query = query("SELECT COUNT(*) as count FROM livelihoods WHERE deleted_at IS NULL");
-        
-        for value in &param_values {
-            count_query = count_query.bind(value);
-        }
+        let count_query = count_builder.build(); // Build the final count query
         
         let total: i64 = count_query
             .fetch_one(&self.pool)
@@ -533,23 +533,22 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
             .map_err(DbError::from)?
             .try_get("count")
             .map_err(|e| DbError::Query(format!("Failed to get count: {}", e)))?;
+            
+        // --- Main Query --- 
+        let mut query_builder = QueryBuilder::new("SELECT * FROM livelihoods");
+        build_where_clause(&mut query_builder, project_id, participant_id); // Apply WHERE logic again
         
-        // Build and execute main query
-        let mut main_query = query_as::<_, LivelihoodRow>(&query_string);
+        query_builder.push(" ORDER BY created_at DESC LIMIT ");
+        query_builder.push_bind(params.per_page as i64);
+        query_builder.push(" OFFSET ");
+        query_builder.push_bind((params.page as i64 - 1) * params.per_page as i64);
         
-        for value in param_values {
-            main_query = main_query.bind(value);
-        }
-        
-        main_query = main_query
-            .bind(params.per_page as i64)
-            .bind((params.page as i64 - 1) * params.per_page as i64);
-        
-        let rows = main_query
+        // Build and execute the query_as directly
+        let rows = query_builder.build_query_as::<LivelihoodRow>()
             .fetch_all(&self.pool)
             .await
             .map_err(DbError::from)?;
-        
+            
         // Convert rows to entities
         let mut items = Vec::new();
         for row in rows {
@@ -583,6 +582,47 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
     ) -> DomainResult<PaginatedResult<Livelihood>> {
         self.find_all(params, None, Some(participant_id)).await
     }
+
+    /// Set a document reference for a livelihood
+    async fn set_document_reference(
+        &self,
+        livelihood_id: Uuid,
+        field_name: &str, // e.g., "business_plan"
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()> {
+        let column_name = format!("{}_ref", field_name); 
+        
+        // Validate the field name
+        if !Livelihood::field_metadata().iter().any(|m| m.field_name == field_name && m.is_document_reference_only) {
+             return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid document reference field for Livelihood: {}", field_name))));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let document_id_str = document_id.to_string();
+        
+        let mut builder = sqlx::QueryBuilder::new("UPDATE livelihoods SET ");
+        builder.push(&column_name);
+        builder.push(" = ");
+        builder.push_bind(document_id_str);
+        builder.push(", updated_at = ");
+        builder.push_bind(now);
+        builder.push(", updated_by_user_id = ");
+        builder.push_bind(user_id_str);
+        builder.push(" WHERE id = ");
+        builder.push_bind(livelihood_id.to_string());
+        builder.push(" AND deleted_at IS NULL");
+
+        let query = builder.build();
+        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+
+        if result.rows_affected() == 0 {
+            Err(DomainError::EntityNotFound("Livelihood".to_string(), livelihood_id))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// SQLite implementation of the subsequent grant repository
@@ -604,6 +644,24 @@ impl SqliteSubsequentGrantRepository {
     /// Get the entity name for this repository
     fn entity_name(&self) -> &'static str {
         "subsequent_grant"
+    }
+    
+    /// Find a subsequent grant by ID within a transaction
+    async fn find_by_id_with_tx<'t>(
+        &self,
+        id: Uuid,
+        tx: &mut Transaction<'t, Sqlite>,
+    ) -> DomainResult<SubsequentGrant> {
+        let row = query_as::<_, SubsequentGrantRow>(
+            "SELECT * FROM subsequent_grants WHERE id = ? AND deleted_at IS NULL"
+        )
+        .bind(id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(DbError::from)?
+        .ok_or_else(|| DomainError::EntityNotFound(self.entity_name().to_string(), id))?;
+        
+        Self::map_row_to_entity(row)
     }
 }
 
@@ -633,59 +691,53 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<SubsequentGrant> {
-        // Validate the input
         new_grant.validate()?;
-        
         let id = Uuid::new_v4();
         let now = Utc::now();
-        
-        // Get created by from auth context or from dto
         let created_by = new_grant.created_by_user_id.unwrap_or(auth.user_id);
         
-        // Insert the new subsequent grant
         query(
-            r#"
-            INSERT INTO subsequent_grants (
-                id, 
-                livelihood_id, 
-                amount, 
-                amount_updated_at,
-                amount_updated_by,
-                purpose, 
-                purpose_updated_at,
-                purpose_updated_by,
-                grant_date,
-                grant_date_updated_at,
-                grant_date_updated_by,
-                created_at, 
-                updated_at,
-                created_by_user_id,
-                updated_by_user_id
-            ) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#
-        )
-        .bind(id.to_string())
-        .bind(new_grant.livelihood_id.to_string())
-        .bind(new_grant.amount)
-        .bind(new_grant.amount.map(|_| now.to_rfc3339()))
-        .bind(new_grant.amount.map(|_| auth.user_id.to_string()))
-        .bind(&new_grant.purpose)
-        .bind(new_grant.purpose.as_ref().map(|_| now.to_rfc3339()))
-        .bind(new_grant.purpose.as_ref().map(|_| auth.user_id.to_string()))
-        .bind(&new_grant.grant_date)
-        .bind(new_grant.grant_date.as_ref().map(|_| now.to_rfc3339()))
-        .bind(new_grant.grant_date.as_ref().map(|_| auth.user_id.to_string()))
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .bind(created_by.to_string())
-        .bind(auth.user_id.to_string())
-        .execute(&mut **tx)
-        .await
-        .map_err(DbError::from)?;
-        
-        // Fetch the newly created subsequent grant
-        self.find_by_id(id).await
+             r#"
+             INSERT INTO subsequent_grants (
+                 id, 
+                 livelihood_id, 
+                 amount, 
+                 amount_updated_at,
+                 amount_updated_by,
+                 purpose, 
+                 purpose_updated_at,
+                 purpose_updated_by,
+                 grant_date,
+                 grant_date_updated_at,
+                 grant_date_updated_by,
+                 created_at, 
+                 updated_at,
+                 created_by_user_id,
+                 updated_by_user_id
+             ) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             "#
+         )
+         .bind(id.to_string())
+         .bind(new_grant.livelihood_id.to_string())
+         .bind(new_grant.amount)
+         .bind(new_grant.amount.map(|_| now.to_rfc3339()))
+         .bind(new_grant.amount.map(|_| auth.user_id.to_string()))
+         .bind(&new_grant.purpose)
+         .bind(new_grant.purpose.as_ref().map(|_| now.to_rfc3339()))
+         .bind(new_grant.purpose.as_ref().map(|_| auth.user_id.to_string()))
+         .bind(&new_grant.grant_date)
+         .bind(new_grant.grant_date.as_ref().map(|_| now.to_rfc3339()))
+         .bind(new_grant.grant_date.as_ref().map(|_| auth.user_id.to_string()))
+         .bind(now.to_rfc3339())
+         .bind(now.to_rfc3339())
+         .bind(created_by.to_string())
+         .bind(auth.user_id.to_string())
+         .execute(&mut **tx)
+         .await
+         .map_err(DbError::from)?;
+         
+        self.find_by_id_with_tx(id, tx).await
     }
     
     async fn update(
@@ -694,104 +746,81 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         update_data: &UpdateSubsequentGrant,
         auth: &AuthContext,
     ) -> DomainResult<SubsequentGrant> {
-        // Validate the input
         update_data.validate()?;
-        
-        // Fetch the existing record to ensure it exists and isn't deleted
-        let existing = self.find_by_id(id).await?;
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let existing = self.find_by_id_with_tx(id, &mut tx).await?;
         
         if existing.deleted_at.is_some() {
             return Err(DomainError::DeletedEntity(self.entity_name().to_string(), id));
         }
         
         let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
         
-        // Prepare update parts for each field (following LWW pattern)
-        let mut sets = Vec::new();
-        let mut params: Vec<String> = Vec::new();
+        let mut builder = QueryBuilder::new("UPDATE subsequent_grants SET ");
+        let mut separated = builder.separated(", ");
+        let mut fields_updated = false;
         
-        // Helper function to add a set clause and parameter
-        let add_set = |sets: &mut Vec<String>, params: &mut Vec<String>, field: &str, value: &str| {
-            sets.push(format!("{} = ?", field));
-            params.push(value.to_string());
-        };
-        
-        // Helper for timestamp fields (LWW pattern)
-        let add_timestamp_update = |
-            sets: &mut Vec<String>, 
-            params: &mut Vec<String>,
-            field: &str, 
-            value: Option<&String>,
-            existing_ts: Option<&DateTime<Utc>>, 
-            now: &DateTime<Utc>
-        | {
-            if value.is_some() {
-                sets.push(format!("{}_updated_at = ?", field));
-                params.push(now.to_rfc3339());
-                
-                sets.push(format!("{}_updated_by = ?", field));
-                params.push(auth.user_id.to_string());
-            }
-        };
-        
-        // Amount
-        if let Some(amount) = update_data.amount {
-            add_set(&mut sets, &mut params, "amount", &amount.to_string());
-            add_timestamp_update(&mut sets, &mut params, "amount", Some(&amount.to_string()), existing.amount_updated_at.as_ref(), &now);
+        macro_rules! add_lww {
+            ($field_name:ident, $field_sql:literal, $value:expr) => {
+                if let Some(val) = $value {
+                    separated.push(concat!($field_sql, " = "));
+                    separated.push_bind_unseparated(val.to_string());
+                    separated.push(concat!(" ", $field_sql, "_updated_at = "));
+                    separated.push_bind_unseparated(now_str.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_by = "));
+                    separated.push_bind_unseparated(user_id_str.clone());
+                    fields_updated = true;
+                }
+            };
+            ($field_name:ident, $field_sql:literal, $value:expr, $is_optional:expr) => {
+                if let Some(val) = $value {
+                    separated.push(concat!($field_sql, " = "));
+                    separated.push_bind_unseparated(val.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_at = "));
+                    separated.push_bind_unseparated(now_str.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_by = "));
+                    separated.push_bind_unseparated(user_id_str.clone());
+                    fields_updated = true;
+                }
+            };
         }
         
-        // Purpose
-        if let Some(purpose) = &update_data.purpose {
-            add_set(&mut sets, &mut params, "purpose", purpose);
-            add_timestamp_update(&mut sets, &mut params, "purpose", Some(purpose), existing.purpose_updated_at.as_ref(), &now);
-        }
+        add_lww!(amount, "amount", update_data.amount);
+        add_lww!(purpose, "purpose", &update_data.purpose, true);
+        add_lww!(grant_date, "grant_date", &update_data.grant_date, true);
         
-        // Grant date
-        if let Some(grant_date) = &update_data.grant_date {
-            add_set(&mut sets, &mut params, "grant_date", grant_date);
-            add_timestamp_update(&mut sets, &mut params, "grant_date", Some(grant_date), existing.grant_date_updated_at.as_ref(), &now);
-        }
-        
-        // Updated timestamps
-        add_set(&mut sets, &mut params, "updated_at", &now.to_rfc3339());
-        add_set(&mut sets, &mut params, "updated_by_user_id", &update_data.updated_by_user_id.to_string());
-        
-        // If no fields to update, return existing record
-        if sets.len() <= 2 {  // Only updated_at and updated_by
+        if !fields_updated {
             return Ok(existing);
         }
         
-        // Build and execute the update query
-        let query_string = format!(
-            "UPDATE subsequent_grants SET {} WHERE id = ? AND deleted_at IS NULL",
-            sets.join(", ")
-        );
+        separated.push("updated_at = ");
+        separated.push_bind_unseparated(now_str);
+        separated.push(" updated_by_user_id = ");
+        separated.push_bind_unseparated(update_data.updated_by_user_id.to_string());
         
-        let mut query_builder = query(&query_string);
+        builder.push(" WHERE id = ");
+        builder.push_bind(id.to_string());
+        builder.push(" AND deleted_at IS NULL");
         
-        // Bind all parameters
-        for param in params {
-            query_builder = query_builder.bind(param);
+        let query = builder.build();
+        let result = query.execute(&mut *tx).await.map_err(DbError::from)?;
+            
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(DbError::from)?;
+            return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
         }
         
-        // Bind the ID
-        query_builder = query_builder.bind(id.to_string());
-        
-        // Execute the query
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
-        
-        query_builder
-            .execute(&mut *tx)
-            .await
-            .map_err(DbError::from)?;
-        
+        let updated_grant = self.find_by_id_with_tx(id, &mut tx).await?;
         tx.commit().await.map_err(DbError::from)?;
-        
-        // Return the updated record
-        self.find_by_id(id).await
+        Ok(updated_grant)
     }
     
-    async fn find_by_id(&self, id: Uuid) -> DomainResult<SubsequentGrant> {
+    async fn find_by_id(
+        &self, 
+        id: Uuid
+    ) -> DomainResult<SubsequentGrant> {
         let row = query_as::<_, SubsequentGrantRow>(
             "SELECT * FROM subsequent_grants WHERE id = ? AND deleted_at IS NULL"
         )
@@ -804,7 +833,10 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         Self::map_row_to_entity(row)
     }
     
-    async fn find_by_livelihood_id(&self, livelihood_id: Uuid) -> DomainResult<Vec<SubsequentGrant>> {
+    async fn find_by_livelihood_id(
+        &self, 
+        livelihood_id: Uuid
+    ) -> DomainResult<Vec<SubsequentGrant>> {
         let rows = query_as::<_, SubsequentGrantRow>(
             "SELECT * FROM subsequent_grants WHERE livelihood_id = ? AND deleted_at IS NULL ORDER BY created_at ASC"
         )
@@ -821,9 +853,13 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         Ok(grants)
     }
     
-    async fn soft_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
-        // First check if the record exists and is not already deleted
-        let existing = self.find_by_id(id).await?;
+    async fn soft_delete(
+        &self, 
+        id: Uuid, 
+        auth: &AuthContext
+    ) -> DomainResult<()> {
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let existing = self.find_by_id_with_tx(id, &mut tx).await?;
         
         if existing.deleted_at.is_some() {
             return Err(DomainError::DeletedEntity(self.entity_name().to_string(), id));
@@ -831,52 +867,97 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         
         let now = Utc::now();
         
-        // Update the record with deleted_at and deleted_by
-        let rows_affected = query(
-            r#"
-            UPDATE subsequent_grants 
-            SET deleted_at = ?, deleted_by_user_id = ?, updated_at = ?
-            WHERE id = ? AND deleted_at IS NULL
-            "#
-        )
-        .bind(now.to_rfc3339())
-        .bind(auth.user_id.to_string())
-        .bind(now.to_rfc3339())
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(DbError::from)?
-        .rows_affected();
+        let mut builder = QueryBuilder::new("UPDATE subsequent_grants SET ");
+        builder.push("deleted_at = ");
+        builder.push_bind(now.to_rfc3339());
+        builder.push(", deleted_by_user_id = ");
+        builder.push_bind(auth.user_id.to_string());
+        builder.push(", updated_at = ");
+        builder.push_bind(now.to_rfc3339());
         
-        if rows_affected == 0 {
+        builder.push(" WHERE id = ");
+        builder.push_bind(id.to_string());
+        builder.push(" AND deleted_at IS NULL");
+        
+        let query = builder.build();
+        let result = query.execute(&mut *tx).await.map_err(DbError::from)?;
+            
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(DbError::from)?;
             return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
         }
         
+        tx.commit().await.map_err(DbError::from)?;
         Ok(())
     }
     
-    async fn hard_delete(&self, id: Uuid, _auth: &AuthContext) -> DomainResult<()> {
-        // Check if the record exists first
-        let existing = self.find_by_id(id).await?;
+    async fn hard_delete(
+        &self, 
+        id: Uuid, 
+        _auth: &AuthContext
+    ) -> DomainResult<()> {
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let existing = self.find_by_id_with_tx(id, &mut tx).await?;
         
         if existing.deleted_at.is_some() {
             return Err(DomainError::DeletedEntity(self.entity_name().to_string(), id));
         }
         
-        // Delete the record permanently
-        let rows_affected = query(
-            "DELETE FROM subsequent_grants WHERE id = ?"
-        )
-        .bind(id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(DbError::from)?
-        .rows_affected();
+        let mut builder = QueryBuilder::new("DELETE FROM subsequent_grants ");
+        builder.push("WHERE id = ");
+        builder.push_bind(id.to_string());
         
-        if rows_affected == 0 {
+        let query = builder.build();
+        let result = query.execute(&mut *tx).await.map_err(DbError::from)?;
+            
+        if result.rows_affected() == 0 {
+            tx.rollback().await.map_err(DbError::from)?;
             return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
         }
         
+        tx.commit().await.map_err(DbError::from)?;
         Ok(())
+    }
+
+    /// Set a document reference for a subsequent grant
+    async fn set_document_reference(
+        &self,
+        grant_id: Uuid,
+        field_name: &str, // e.g., "grant_agreement"
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()> {
+        let column_name = format!("{}_ref", field_name);
+        
+        // Validate the field name
+        if !SubsequentGrant::field_metadata().iter().any(|m| m.field_name == field_name && m.is_document_reference_only) {
+             return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid document reference field for SubsequentGrant: {}", field_name))));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let document_id_str = document_id.to_string();
+        let grant_id_str = grant_id.to_string();
+        
+        let mut builder = sqlx::QueryBuilder::new("UPDATE subsequent_grants SET ");
+        builder.push(&column_name);
+        builder.push(" = ");
+        builder.push_bind(document_id_str);
+        builder.push(", updated_at = ");
+        builder.push_bind(now);
+        builder.push(", updated_by_user_id = ");
+        builder.push_bind(user_id_str);
+        builder.push(" WHERE id = ");
+        builder.push_bind(grant_id_str);
+        builder.push(" AND deleted_at IS NULL");
+
+        let query = builder.build();
+        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+
+        if result.rows_affected() == 0 {
+            Err(DomainError::EntityNotFound("SubsequentGrant".to_string(), grant_id))
+        } else {
+            Ok(())
+        }
     }
 }

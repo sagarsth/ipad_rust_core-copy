@@ -8,6 +8,12 @@ use std::str::FromStr;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
+// Added imports
+use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::sync::types::SyncPriority;
+use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
+use std::collections::HashSet;
+
 /// Workshop entity - represents a workshop in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workshop {
@@ -61,6 +67,7 @@ pub struct Workshop {
     pub updated_by_user_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub sync_priority: SyncPriority,
 }
 
 impl Workshop {
@@ -110,6 +117,33 @@ impl Workshop {
         } else {
             false
         }
+    }
+}
+
+impl DocumentLinkable for Workshop {
+    fn field_metadata() -> Vec<EntityFieldMetadata> {
+        vec![
+            EntityFieldMetadata { field_name: "purpose", display_name: "Purpose", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "event_date", display_name: "Event Date", supports_documents: false, field_type: FieldType::Date, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "location", display_name: "Location", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "budget", display_name: "Budget", supports_documents: true, field_type: FieldType::Decimal, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "actuals", display_name: "Actuals", supports_documents: true, field_type: FieldType::Decimal, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "local_partner", display_name: "Local Partner", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "partner_responsibility", display_name: "Partner Responsibility", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "partnership_success", display_name: "Partnership Success", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "capacity_challenges", display_name: "Capacity Challenges", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "strengths", display_name: "Strengths", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "outcomes", display_name: "Outcomes", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "recommendations", display_name: "Recommendations", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "challenge_resolution", display_name: "Challenge Resolution", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "project_id", display_name: "Project", supports_documents: false, field_type: FieldType::Uuid, is_document_reference_only: false },
+            // Document Reference Fields from Migration
+            EntityFieldMetadata { field_name: "agenda", display_name: "Agenda", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "materials", display_name: "Materials", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "attendance_sheet", display_name: "Attendance Sheet", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "evaluation_summary", display_name: "Evaluation Summary", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "photos", display_name: "Photos", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+        ]
     }
 }
 
@@ -272,6 +306,7 @@ pub struct WorkshopRow {
     pub updated_by_user_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub sync_priority: i64,
 }
 
 impl WorkshopRow {
@@ -355,6 +390,7 @@ impl WorkshopRow {
             updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
             deleted_at: parse_datetime(&self.deleted_at).transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+            sync_priority: SyncPriority::from(self.sync_priority),
         })
     }
 }
@@ -413,7 +449,10 @@ pub struct WorkshopResponse {
     pub created_at: String,
     pub updated_at: String,
     pub is_past: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub participants: Option<Vec<ParticipantSummary>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documents: Option<Vec<MediaDocumentResponse>>,
 }
 
 /// Participant summary for workshop responses
@@ -460,6 +499,7 @@ impl WorkshopResponse {
             updated_at: workshop.updated_at.to_rfc3339(),
             is_past, // Use pre-calculated value
             participants: None, // Initialized later if needed
+            documents: None, // Needs enrichment
         }
     }
     
@@ -481,6 +521,7 @@ impl WorkshopResponse {
 pub enum WorkshopInclude {
     Project,
     Participants,
+    Documents,
     All,
 }
 

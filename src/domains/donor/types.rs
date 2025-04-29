@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc, NaiveDate};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use std::fmt;
+use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
+use std::collections::HashSet;
 
 /// Donor type enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +97,27 @@ impl Donor {
     // Helper to parse first donation date
     pub fn parsed_first_donation_date(&self) -> Option<NaiveDate> {
         self.first_donation_date.as_ref().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+    }
+}
+
+impl DocumentLinkable for Donor {
+    fn field_metadata() -> Vec<EntityFieldMetadata> {
+        vec![
+            EntityFieldMetadata { field_name: "name", display_name: "Donor Name", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "type_", display_name: "Type", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false }, // maps to DonorType enum
+            EntityFieldMetadata { field_name: "contact_person", display_name: "Contact Person", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "email", display_name: "Email", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "phone", display_name: "Phone", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "country", display_name: "Country", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "first_donation_date", display_name: "First Donation Date", supports_documents: false, field_type: FieldType::Date, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "notes", display_name: "Notes", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            // Document Reference Fields from Migration
+            EntityFieldMetadata { field_name: "donor_agreement", display_name: "Donor Agreement", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "due_diligence", display_name: "Due Diligence Docs", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "communication_log", display_name: "Communication Log", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "tax_information", display_name: "Tax Information", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "annual_report", display_name: "Annual Report (from Donor)", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+        ]
     }
 }
 

@@ -6,12 +6,63 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
+use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
+use std::collections::{HashSet, HashMap};
+use std::str::FromStr;
+
+/// Role a user can have in relation to a strategic goal
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UserGoalRole {
+    Created,    // User created the goal
+    Updated,    // User last updated the goal
+}
+
+/// Summary of aggregate value statistics for strategic goals from the repository
+#[derive(Debug, Clone, FromRow)]
+pub struct GoalValueSummary {
+    pub avg_target: Option<f64>,
+    pub avg_actual: Option<f64>,
+    pub total_target: Option<f64>,
+    pub total_actual: Option<f64>,
+    pub count: i64,
+}
+
+/// Response DTO for value summary statistics (calculated in service)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalValueSummaryResponse {
+    pub avg_target: Option<f64>,
+    pub avg_actual: Option<f64>,
+    pub total_target: Option<f64>,
+    pub total_actual: Option<f64>,
+    pub count: i64,
+    pub avg_progress_percentage: Option<f64>,
+}
 
 /// Enum to specify related data to include for Strategic Goals
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum StrategicGoalInclude {
     Documents,
-    // Add other potential includes here (e.g., Projects)
+    Status,          // Include status information
+    Projects,        // Include related projects
+    Activities,      // Include activities (via projects)
+    Participants,    // Include participants (via workshops)
+    DocumentCounts,  // Include just document counts
+}
+
+impl FromStr for StrategicGoalInclude {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "documents" => Ok(Self::Documents),
+            "status" => Ok(Self::Status),
+            "projects" => Ok(Self::Projects),
+            "activities" => Ok(Self::Activities),
+            "participants" => Ok(Self::Participants),
+            "document_counts" => Ok(Self::DocumentCounts),
+            _ => Err(format!("Unknown include option: {}", s)),
+        }
+    }
 }
 
 /// Strategic Goal entity - represents a strategic goal in the system
@@ -62,6 +113,24 @@ impl StrategicGoal {
             }
         }
         None
+    }
+}
+
+impl DocumentLinkable for StrategicGoal {
+    fn field_metadata() -> Vec<EntityFieldMetadata> {
+        vec![
+            EntityFieldMetadata { field_name: "objective_code", display_name: "Objective Code", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "outcome", display_name: "Outcome", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "kpi", display_name: "KPI", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "target_value", display_name: "Target Value", supports_documents: false, field_type: FieldType::Number, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "actual_value", display_name: "Actual Value", supports_documents: true, field_type: FieldType::Number, is_document_reference_only: false }, // Can link proof
+            EntityFieldMetadata { field_name: "responsible_team", display_name: "Responsible Team", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            // Document Reference Fields from Migration
+            EntityFieldMetadata { field_name: "supporting_documentation", display_name: "Supporting Documentation", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "impact_assessment", display_name: "Impact Assessment", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "theory_of_change", display_name: "Theory of Change", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "baseline_data", display_name: "Baseline Data", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+        ]
     }
 }
 

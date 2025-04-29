@@ -3,17 +3,24 @@ use sqlx::{SqlitePool, Transaction, Sqlite};
 use crate::domains::core::dependency_checker::DependencyChecker;
 use crate::domains::core::delete_service::{BaseDeleteService, DeleteOptions, DeleteService, DeleteServiceRepository};
 use crate::domains::core::repository::{DeleteResult, FindById, HardDeletable, SoftDeletable};
+use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::permission::Permission;
 use crate::domains::activity::repository::ActivityRepository;
-use crate::domains::activity::types::{NewActivity, Activity, ActivityResponse, UpdateActivity};
+use crate::domains::activity::types::{NewActivity, Activity, ActivityResponse, UpdateActivity, ActivityInclude};
 use crate::domains::project::repository::ProjectRepository; // Needed for validation
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
-use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, ValidationError};
+use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, ValidationError, DbError};
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::validation::Validate;
 use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
+
+// Added document/sync imports
+use crate::domains::document::service::DocumentService;
+use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::sync::types::SyncPriority;
+use crate::domains::compression::types::CompressionPriority;
 
 /// Trait defining activity service operations
 #[async_trait]
@@ -50,14 +57,49 @@ pub trait ActivityService: DeleteService<Activity> + Send + Sync {
         hard_delete: bool,
         auth: &AuthContext,
     ) -> ServiceResult<DeleteResult>;
+
+    // Add document upload methods
+    async fn upload_document_for_activity(
+        &self,
+        activity_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse>;
+
+    async fn bulk_upload_documents_for_activity(
+        &self,
+        activity_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>>;
+    
+    async fn create_activity_with_documents(
+        &self,
+        new_activity: NewActivity,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(ActivityResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)>;
 }
 
 /// Implementation of the activity service
 #[derive(Clone)] 
 pub struct ActivityServiceImpl {
+    pool: SqlitePool,
     repo: Arc<dyn ActivityRepository + Send + Sync>,
     project_repo: Arc<dyn ProjectRepository + Send + Sync>,
     delete_service: Arc<BaseDeleteService<Activity>>,
+    document_service: Arc<dyn DocumentService>,
 }
 
 impl ActivityServiceImpl {
@@ -68,6 +110,7 @@ impl ActivityServiceImpl {
         tombstone_repo: Arc<dyn TombstoneRepository + Send + Sync>,
         change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
+        document_service: Arc<dyn DocumentService>,
     ) -> Self {
         // Local adapter struct
         struct RepoAdapter(Arc<dyn ActivityRepository + Send + Sync>);
@@ -118,7 +161,7 @@ impl ActivityServiceImpl {
             Arc::new(RepoAdapter(activity_repo.clone()));
 
         let delete_service = Arc::new(BaseDeleteService::new(
-            pool,
+            pool.clone(),
             adapted_repo,
             tombstone_repo,
             change_log_repo,
@@ -127,9 +170,11 @@ impl ActivityServiceImpl {
         ));
         
         Self {
-            repo: activity_repo, // Keep original repo
-            project_repo, // Store project repo for validation
+            pool,
+            repo: activity_repo,
+            project_repo,
             delete_service,
+            document_service,
         }
     }
 
@@ -148,6 +193,64 @@ impl ActivityServiceImpl {
             // If no project_id is provided, it's valid (activity is independent)
              Ok(())
          }
+    }
+
+    // Added enrich_response helper
+    async fn enrich_response(
+        &self,
+        mut response: ActivityResponse,
+        include: Option<&[ActivityInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<ActivityResponse> {
+        if let Some(includes) = include {
+            let include_docs = includes.contains(&ActivityInclude::Documents);
+
+            if include_docs {
+                let doc_params = PaginationParams::default();
+                let docs_result = self.document_service
+                    .list_media_documents_by_related_entity(
+                        auth,
+                        "activities",
+                        response.id,
+                        doc_params,
+                        None,
+                    ).await?;
+                response.documents = Some(docs_result.items);
+            }
+            // TODO: Add enrichment for Project if needed
+        }
+        Ok(response)
+    }
+    
+    // Added upload_documents_for_entity helper
+    async fn upload_documents_for_entity(
+        &self,
+        entity_id: Uuid,
+        entity_type: &str,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> Vec<Result<MediaDocumentResponse, ServiceError>> {
+        let mut results = Vec::new();
+        for (file_data, filename, linked_field) in documents {
+            let upload_result = self.document_service.upload_document(
+                auth,
+                file_data,
+                filename,
+                None,
+                document_type_id,
+                entity_id,
+                entity_type.to_string(),
+                linked_field,
+                sync_priority,
+                compression_priority,
+                None,
+            ).await;
+            results.push(upload_result);
+        }
+        results
     }
 }
 
@@ -330,5 +433,158 @@ impl ActivityService for ActivityServiceImpl {
         
         let result = self.delete(id, auth, options).await?;
         Ok(result)
+    }
+
+    // Implement document upload methods
+    async fn upload_document_for_activity(
+        &self,
+        activity_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse> {
+        // 1. Verify activity exists
+        let _activity = self.repo.find_by_id(activity_id).await
+            .map_err(ServiceError::Domain)?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Validate the linked field if specified
+        if let Some(field) = &linked_field {
+            if !Activity::is_document_linkable_field(field) { // Use Activity::...
+                let valid_fields: Vec<String> = Activity::document_linkable_fields() // Use Activity::...
+                    .into_iter()
+                    .collect();
+                    
+                // Correctly wrap the ValidationError
+                return Err(ServiceError::Domain(ValidationError::Custom(format!(
+                    "Field '{}' does not support document attachments for activities. Valid fields: {}",
+                    field, valid_fields.join(", ")
+                )).into()));
+            }
+        }
+
+        // 4. Delegate to document service
+        let document = self.document_service.upload_document(
+            auth,
+            file_data,
+            original_filename,
+            title,
+            document_type_id,
+            activity_id,
+            "activities".to_string(), // Correct entity type
+            linked_field.clone(), // Pass validated field
+            sync_priority,
+            compression_priority,
+            None, 
+        ).await?;
+
+        // 5. --- NEW: Update entity reference if it was a document-only field ---
+        if let Some(field_name) = linked_field {
+            if let Some(metadata) = Activity::get_field_metadata(&field_name) { // Use Activity::...
+                if metadata.is_document_reference_only {
+                    // Call repo method to update the specific reference column
+                    self.repo.set_document_reference(
+                        activity_id, 
+                        &field_name, // e.g., "photo_evidence"
+                        document.id, // The ID of the newly created MediaDocument
+                        auth
+                    ).await?;
+                }
+            }
+        }
+
+        Ok(document)
+    }
+
+    async fn bulk_upload_documents_for_activity(
+        &self,
+        activity_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>> {
+        // 1. Verify activity exists
+        let _activity = self.repo.find_by_id(activity_id).await
+            .map_err(ServiceError::Domain)?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Delegate to document service
+        let documents = self.document_service.bulk_upload_documents(
+            auth,
+            files,
+            title,
+            document_type_id,
+            activity_id,
+            "activities".to_string(), // Correct entity type
+            sync_priority,
+            compression_priority,
+            None,
+        ).await?;
+
+        Ok(documents)
+    }
+    
+    async fn create_activity_with_documents(
+        &self,
+        new_activity: NewActivity,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(ActivityResponse, Vec<Result<MediaDocumentResponse, ServiceError>>) > {
+        if !auth.has_permission(Permission::CreateActivities) {
+            return Err(ServiceError::PermissionDenied("User cannot create activities".to_string()));
+        }
+        if !documents.is_empty() && !auth.has_permission(Permission::UploadDocuments) {
+             return Err(ServiceError::PermissionDenied("User cannot upload documents".to_string()));
+        }
+
+        new_activity.validate()?;
+        self.validate_project_exists_if_provided(new_activity.project_id).await?;
+
+        let mut tx = self.pool.begin().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+        let created_activity = match self.repo.create_with_tx(&new_activity, auth, &mut tx).await {
+            Ok(a) => a,
+            Err(e) => { let _ = tx.rollback().await; return Err(ServiceError::Domain(e)); }
+        };
+        tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+
+        let document_results = if !documents.is_empty() {
+            self.upload_documents_for_entity(
+                created_activity.id,
+                "activities",
+                documents,
+                document_type_id,
+                SyncPriority::Normal, // Use a default or derive from activity?
+                None, 
+                auth,
+            ).await
+        } else {
+            Vec::new()
+        };
+
+        let response = ActivityResponse::from(created_activity);
+        // Potentially enrich response here if needed after create + docs
+        // let enriched_response = self.enrich_response(response, Some(&[ActivityInclude::Documents]), auth).await?;
+        Ok((response, document_results))
     }
 }

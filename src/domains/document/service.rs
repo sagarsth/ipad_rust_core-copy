@@ -1121,12 +1121,12 @@ impl DocumentService for DocumentServiceImpl {
             return Err(ServiceError::Domain(DomainError::Database(DbError::from(e))));
         }
         
-        if doc_to_delete.file_path != "ERROR" {
+            if doc_to_delete.file_path != "ERROR" {
             let mut original_deleted = false;
             let mut compressed_deleted = false;
     
             // Try to delete original file
-            if let Err(e) = self.file_storage_service.delete_file(&doc_to_delete.file_path).await {
+                if let Err(e) = self.file_storage_service.delete_file(&doc_to_delete.file_path).await {
                  // Only log if it's not a NotFound error, as that's expected if already deleted
                  if !matches!(e, crate::domains::core::file_storage_service::FileStorageError::NotFound(_)) {
                     eprintln!("Warning: Could not immediately delete file {}: {:?}", doc_to_delete.file_path, e);
@@ -1135,11 +1135,11 @@ impl DocumentService for DocumentServiceImpl {
                  original_deleted = matches!(e, crate::domains::core::file_storage_service::FileStorageError::NotFound(_));
             } else {
                 original_deleted = true;
-            }
-            
+                }
+
             // Try to delete compressed file if it exists
-            if let Some(compressed_path) = &doc_to_delete.compressed_file_path {
-                if let Err(e) = self.file_storage_service.delete_file(compressed_path).await {
+                if let Some(compressed_path) = &doc_to_delete.compressed_file_path {
+                    if let Err(e) = self.file_storage_service.delete_file(compressed_path).await {
                     if !matches!(e, crate::domains::core::file_storage_service::FileStorageError::NotFound(_)) {
                         eprintln!("Warning: Could not immediately delete compressed file {}: {:?}", compressed_path, e);
                     }
@@ -1173,7 +1173,7 @@ impl DocumentService for DocumentServiceImpl {
                 ).execute(&self.pool).await {
                     // Log but don't fail the overall operation if this update fails
                     eprintln!("Warning: Could not update file deletion queue entry after successful immediate delete for doc {}: {:?}", doc_id_str, e);
-                }
+        }
             }
         }
         Ok(DeleteResult::HardDeleted)

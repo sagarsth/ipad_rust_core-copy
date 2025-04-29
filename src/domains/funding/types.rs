@@ -5,6 +5,8 @@ use chrono::{DateTime, Utc, NaiveDate};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use std::fmt;
+use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
+use std::collections::HashSet;
 
 /// Funding status enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,6 +175,25 @@ impl ProjectFunding {
             .unwrap_or(true);
             
         end_passed && not_completed
+    }
+}
+
+// Implement DocumentLinkable for ProjectFunding
+impl DocumentLinkable for ProjectFunding {
+    fn field_metadata() -> Vec<EntityFieldMetadata> {
+        vec![
+            // Existing fields - mark relevant ones as supports_documents: true
+            EntityFieldMetadata { field_name: "grant_id", display_name: "Grant ID", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "amount", display_name: "Amount", supports_documents: true, field_type: FieldType::Number, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "currency", display_name: "Currency", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "start_date", display_name: "Start Date", supports_documents: false, field_type: FieldType::Date, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "end_date", display_name: "End Date", supports_documents: false, field_type: FieldType::Date, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "status", display_name: "Status", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false }, // maps to FundingStatus enum
+            EntityFieldMetadata { field_name: "reporting_requirements", display_name: "Reporting Requirements", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "notes", display_name: "Notes", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            // Add specific document reference fields here if needed in the future
+            // e.g., EntityFieldMetadata { field_name: "funding_agreement_doc_id", display_name: "Funding Agreement", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+        ]
     }
 }
 

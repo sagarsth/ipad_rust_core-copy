@@ -222,15 +222,15 @@ where
                 parent_table_name,
                 parent_id_str // Use the variable here
             )
-            .fetch_all(&mut **tx) // Use the transaction
-            .await;
-    
+             .fetch_all(&mut **tx) // Use the transaction
+             .await;
+             
             let document_data = match document_data_result {
                 Ok(data) => data,
-                Err(sqlx::Error::RowNotFound) => Vec::new(), // No documents found is ok
-                Err(e) => return Err(DbError::from(e).into()), // Propagate other DB errors
-            };
-    
+                 Err(sqlx::Error::RowNotFound) => Vec::new(), // No documents found is ok
+                 Err(e) => return Err(DbError::from(e).into()), // Propagate other DB errors
+             };
+
             // Process each document
             for doc in document_data {
                 // Parse the ID string to UUID
@@ -260,9 +260,9 @@ where
                     
                     // 3. Create the tombstone record
                     self.tombstone_repo.create_tombstone_with_tx(&tombstone, tx).await?;
-    
+
                     // 4. Create change log entry for the document's hard delete
-                    let change_log = ChangeLogEntry {
+                     let change_log = ChangeLogEntry {
                         operation_id, // Use tombstone's ID
                         entity_table: media_repo.entity_name().to_string(),
                         entity_id: doc_id,
@@ -280,7 +280,7 @@ where
                     };
                     
                     self.change_log_repo.create_change_log_with_tx(&change_log, tx).await?;
-    
+
                     // 5. Queue file for deletion
                     let queue_id_str = Uuid::new_v4().to_string();
                     let doc_id_str = doc_id.to_string();
@@ -319,7 +319,7 @@ where
                     media_repo.hard_delete_with_tx(doc_id, auth, tx).await?;
                     
                     // DB ON DELETE CASCADE will handle document versions and access logs automatically
-    
+
                 } else {
                     // --- SOFT DELETE PATH ---
                     
@@ -357,9 +357,9 @@ where
                     // Log but don't fail if access logging fails
                     if let Err(e) = access_log_query.await {
                         eprintln!("Failed to log document soft delete: {}", e);
-                    }
                 }
             }
+        }
         }
         
         Ok(())

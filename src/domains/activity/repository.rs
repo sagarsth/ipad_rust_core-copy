@@ -2,8 +2,9 @@ use crate::auth::AuthContext;
 use sqlx::{Executor, Row, Sqlite, Transaction, SqlitePool};
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
+use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::activity::types::{NewActivity, Activity, ActivityRow, UpdateActivity};
-use crate::errors::{DbError, DomainError, DomainResult};
+use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use async_trait::async_trait;
 use chrono::Utc;
@@ -44,6 +45,14 @@ pub trait ActivityRepository: DeleteServiceRepository<Activity> + Send + Sync {
         project_id: Uuid,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Activity>>;
+
+    async fn set_document_reference(
+        &self,
+        activity_id: Uuid,
+        field_name: &str,
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()>;
 }
 
 /// SQLite implementation for ActivityRepository
@@ -383,5 +392,45 @@ impl ActivityRepository for SqliteActivityRepository {
             total as u64,
             params,
         ))
+    }
+
+    async fn set_document_reference(
+        &self,
+        activity_id: Uuid,
+        field_name: &str,
+        document_id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()> {
+        let column_name = format!("{}_ref", field_name); 
+        
+        if !Activity::field_metadata().iter().any(|m| m.field_name == field_name && m.is_document_reference_only) {
+             return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid document reference field for Activity: {}", field_name))));
+        }
+
+        let now = Utc::now().to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let document_id_str = document_id.to_string();
+        let activity_id_str = activity_id.to_string();
+        
+        let mut builder = sqlx::QueryBuilder::new("UPDATE activities SET ");
+        builder.push(&column_name);
+        builder.push(" = ");
+        builder.push_bind(document_id_str);
+        builder.push(", updated_at = ");
+        builder.push_bind(now);
+        builder.push(", updated_by_user_id = ");
+        builder.push_bind(user_id_str);
+        builder.push(" WHERE id = ");
+        builder.push_bind(activity_id_str);
+        builder.push(" AND deleted_at IS NULL");
+
+        let query = builder.build();
+        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+
+        if result.rows_affected() == 0 {
+            Err(DomainError::EntityNotFound("Activity".to_string(), activity_id))
+        } else {
+            Ok(())
+        }
     }
 }

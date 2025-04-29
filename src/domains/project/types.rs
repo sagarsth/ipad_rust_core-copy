@@ -6,6 +6,8 @@ use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::types::SyncPriority;
+use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
+use std::collections::HashSet;
 
 /// Project entity - represents a project in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +56,25 @@ impl Project {
             Some(4) => "Completed",
             _ => "Unknown"
         }
+    }
+}
+
+impl DocumentLinkable for Project {
+    fn field_metadata() -> Vec<EntityFieldMetadata> {
+        vec![
+            EntityFieldMetadata { field_name: "name", display_name: "Project Name", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "objective", display_name: "Objective", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "outcome", display_name: "Outcome", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "timeline", display_name: "Timeline", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "responsible_team", display_name: "Responsible Team", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "strategic_goal_id", display_name: "Strategic Goal", supports_documents: false, field_type: FieldType::Uuid, is_document_reference_only: false },
+            // Document Reference Fields from Migration
+            EntityFieldMetadata { field_name: "proposal_document", display_name: "Proposal Document", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "budget_document", display_name: "Budget Document", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "logical_framework", display_name: "Logical Framework", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "final_report", display_name: "Final Report", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+            EntityFieldMetadata { field_name: "monitoring_plan", display_name: "Monitoring Plan", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
+        ]
     }
 }
 

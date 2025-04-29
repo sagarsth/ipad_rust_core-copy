@@ -3,6 +3,7 @@ use sqlx::{SqlitePool, Transaction, Sqlite};
 use crate::domains::core::dependency_checker::DependencyChecker;
 use crate::domains::core::delete_service::{BaseDeleteService, DeleteOptions, DeleteService, DeleteServiceRepository};
 use crate::domains::core::repository::{DeleteResult, FindById, HardDeletable, SoftDeletable};
+use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::permission::Permission;
 use crate::domains::project::repository::ProjectRepository;
 use crate::domains::workshop::repository::{SqliteWorkshopRepository, WorkshopRepository};
@@ -18,6 +19,10 @@ use crate::validation::Validate;
 use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
+use crate::domains::document::service::DocumentService;
+use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::sync::types::SyncPriority;
+use crate::domains::compression::types::CompressionPriority;
 
 /// Trait defining workshop service operations
 #[async_trait]
@@ -78,6 +83,38 @@ pub trait WorkshopService: DeleteService<Workshop> + Send + Sync {
         update_data: UpdateWorkshopParticipant,
         auth: &AuthContext,
     ) -> ServiceResult<WorkshopParticipant>;
+
+    async fn create_workshop_with_documents(
+        &self,
+        new_workshop: NewWorkshop,
+        documents: Vec<(Vec<u8>, String, Option<String>)>, // (data, filename, linked_field)
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(WorkshopResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)>;
+
+    async fn upload_document_for_workshop(
+        &self,
+        workshop_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse>;
+
+    async fn bulk_upload_documents_for_workshop(
+        &self,
+        workshop_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>>;
 }
 
 /// Implementation of the workshop service
@@ -87,6 +124,7 @@ pub struct WorkshopServiceImpl {
     delete_service: Arc<BaseDeleteService<Workshop>>,
     project_repo: Arc<dyn ProjectRepository>,
     workshop_participant_repo: Arc<dyn WorkshopParticipantRepository>,
+    document_service: Arc<dyn DocumentService>,
     pool: SqlitePool,
 }
 
@@ -99,6 +137,7 @@ impl WorkshopServiceImpl {
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         project_repo: Arc<dyn ProjectRepository>,
         workshop_participant_repo: Arc<dyn WorkshopParticipantRepository>,
+        document_service: Arc<dyn DocumentService>,
     ) -> Self {
         // Define a local wrapper struct that implements DeleteServiceRepository
         // Note: This adapter pattern is useful if the main repo trait doesn't directly implement all needed sub-traits.
@@ -163,6 +202,7 @@ impl WorkshopServiceImpl {
             delete_service,
             project_repo,
             workshop_participant_repo,
+            document_service,
             pool, // Store the pool for direct queries
         }
     }
@@ -510,5 +550,175 @@ impl WorkshopService for WorkshopServiceImpl {
             .await?;
             
         Ok(updated_link)
+    }
+
+    async fn create_workshop_with_documents(
+        &self,
+        mut new_workshop: NewWorkshop,
+        documents: Vec<(Vec<u8>, String, Option<String>)>, // (data, filename, linked_field)
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(WorkshopResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)> {
+        // 1. Check Permissions
+        if !auth.has_permission(Permission::CreateWorkshops) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to create workshops".to_string(),
+            ));
+        }
+        if !documents.is_empty() && !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 2. Validate Input DTOs
+        new_workshop.created_by_user_id = Some(auth.user_id);
+        new_workshop.validate()?;
+        
+        // 3. Begin transaction for workshop creation
+        let mut tx = self.pool.begin().await
+            .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+        
+        // 4. Create the workshop first (within transaction)
+        let created_workshop = match self.repo.create_with_tx(&new_workshop, auth, &mut tx).await {
+            Ok(workshop) => workshop,
+            Err(e) => {
+                let _ = tx.rollback().await; // Rollback on error
+                return Err(ServiceError::Domain(e));
+            }
+        };
+        
+        // 5. Commit transaction 
+        if let Err(e) = tx.commit().await {
+             return Err(ServiceError::Domain(DomainError::Database(DbError::from(e))));
+        }
+        
+        // 6. Upload documents (outside transaction)
+        let document_results = if !documents.is_empty() {
+            // Use the helper method
+            self.upload_documents_for_entity(
+                created_workshop.id,
+                "workshops", // Entity type
+                documents,
+                document_type_id,
+                created_workshop.sync_priority, // Use workshop's priority
+                None, // Default compression priority
+                auth,
+            ).await
+        } else {
+            Vec::new()
+        };
+        
+        // 7. Convert to Response DTO and return 
+        let response = WorkshopResponse::from_workshop(created_workshop);
+        // Optionally enrich here if needed immediately after create
+        // let enriched_response = self.enrich_response(response, Some(&[WorkshopInclude::Documents]), auth).await?;
+        Ok((response, document_results))
+    }
+
+    async fn upload_document_for_workshop(
+        &self,
+        workshop_id: Uuid,
+        file_data: Vec<u8>,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse> {
+        // 1. Verify workshop exists
+        let _workshop = self.repo.find_by_id(workshop_id).await
+            .map_err(ServiceError::Domain)?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Validate the linked field if specified
+        if let Some(field) = &linked_field {
+            if !Workshop::is_document_linkable_field(field) {
+                let valid_fields: Vec<String> = Workshop::document_linkable_fields()
+                    .into_iter()
+                    .collect();
+                    
+                return Err(ServiceError::Domain(ValidationError::Custom(format!(
+                    "Field '{}' does not support document attachments for workshops. Valid fields: {}",
+                    field, valid_fields.join(", ")
+                )).into()));
+            }
+        }
+
+        // 4. Delegate to document service
+        let document = self.document_service.upload_document(
+            auth,
+            file_data,
+            original_filename,
+            title,
+            document_type_id,
+            workshop_id,
+            "workshops".to_string(),
+            linked_field.clone(),
+            sync_priority,
+            compression_priority,
+            None,
+        ).await?;
+
+        // 5. Update entity reference if it was a document-only field
+        if let Some(field_name) = linked_field {
+            if let Some(metadata) = Workshop::get_field_metadata(&field_name) {
+                if metadata.is_document_reference_only {
+                    self.repo.set_document_reference(
+                        workshop_id, 
+                        &field_name,
+                        document.id,
+                        auth
+                    ).await?;
+                }
+            }
+        }
+
+        Ok(document)
+    }
+
+    async fn bulk_upload_documents_for_workshop(
+        &self,
+        workshop_id: Uuid,
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>> {
+        // 1. Verify workshop exists
+        let _workshop = self.repo.find_by_id(workshop_id).await
+            .map_err(ServiceError::Domain)?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Delegate to document service
+        let documents = self.document_service.bulk_upload_documents(
+            auth,
+            files,
+            title,
+            document_type_id,
+            workshop_id,
+            "workshops".to_string(),
+            sync_priority,
+            compression_priority,
+            None,
+        ).await?;
+
+        Ok(documents)
     }
 }
