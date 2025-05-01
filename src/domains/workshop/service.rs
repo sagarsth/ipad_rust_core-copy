@@ -10,7 +10,8 @@ use crate::domains::workshop::repository::{SqliteWorkshopRepository, WorkshopRep
 use crate::domains::workshop::participant_repository::WorkshopParticipantRepository;
 use crate::domains::workshop::types::{
     NewWorkshop, Workshop, WorkshopResponse, UpdateWorkshop, WorkshopInclude, ProjectSummary, ParticipantSummary,
-    NewWorkshopParticipant, UpdateWorkshopParticipant, WorkshopParticipant
+    NewWorkshopParticipant, UpdateWorkshopParticipant, WorkshopParticipant,
+    WorkshopStatistics, WorkshopWithParticipants, WorkshopWithDocumentTimeline, WorkshopBudgetSummary, ProjectWorkshopMetrics, ParticipantAttendance,
 };
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
 use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, ValidationError, DbError};
@@ -23,6 +24,9 @@ use crate::domains::document::service::DocumentService;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
+use chrono::{NaiveDate, Local};
+use rust_decimal::Decimal;
+use std::collections::HashMap;
 
 /// Trait defining workshop service operations
 #[async_trait]
@@ -115,6 +119,105 @@ pub trait WorkshopService: DeleteService<Workshop> + Send + Sync {
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
     ) -> ServiceResult<Vec<MediaDocumentResponse>>;
+
+    /// Get comprehensive workshop statistics for dashboard
+    async fn get_workshop_statistics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<WorkshopStatistics>;
+
+    /// Get workshop budget statistics
+    async fn get_budget_statistics(
+        &self,
+        project_id: Option<Uuid>,
+        auth: &AuthContext,
+    ) -> ServiceResult<(Decimal, Decimal, Decimal, f64)>; // (total_budget, total_actuals, total_variance, avg_variance_pct)
+
+    /// Find workshops by date range
+    async fn find_workshops_by_date_range(
+        &self,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        params: PaginationParams,
+        include: Option<&[WorkshopInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<WorkshopResponse>>;
+
+    /// Find past workshops
+    async fn find_past_workshops(
+        &self,
+        params: PaginationParams,
+        include: Option<&[WorkshopInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<WorkshopResponse>>;
+
+    /// Find upcoming workshops
+    async fn find_upcoming_workshops(
+        &self,
+        params: PaginationParams,
+        include: Option<&[WorkshopInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<WorkshopResponse>>;
+
+    /// Find workshops by location
+    async fn find_workshops_by_location(
+        &self,
+        location: &str,
+        params: PaginationParams,
+        include: Option<&[WorkshopInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<WorkshopResponse>>;
+
+    /// Get workshop with detailed participant information
+    async fn get_workshop_with_participants(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<WorkshopWithParticipants>;
+
+    /// Get workshop with document timeline
+    async fn get_workshop_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<WorkshopWithDocumentTimeline>;
+
+    /// Get budget summaries for project workshops
+    async fn get_workshop_budget_summaries_for_project(
+        &self,
+        project_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<WorkshopBudgetSummary>>;
+
+    /// Get project workshop metrics
+    async fn get_project_workshop_metrics(
+        &self,
+        project_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ProjectWorkshopMetrics>;
+
+    /// Get participant attendance record
+    async fn get_participant_attendance(
+        &self,
+        participant_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantAttendance>;
+
+    /// Batch add participants to a workshop
+    async fn batch_add_participants_to_workshop(
+        &self,
+        workshop_id: Uuid,
+        participant_ids: Vec<Uuid>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<(Uuid, Result<(), ServiceError>)>>;
+
+    /// Find participants with missing evaluations
+    async fn find_participants_with_missing_evaluations(
+        &self,
+        workshop_id: Uuid,
+        eval_type: &str, // "pre" or "post"
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<ParticipantSummary>>;
 }
 
 /// Implementation of the workshop service
@@ -668,20 +771,6 @@ impl WorkshopService for WorkshopServiceImpl {
             None,
         ).await?;
 
-        // 5. Update entity reference if it was a document-only field
-        if let Some(field_name) = linked_field {
-            if let Some(metadata) = Workshop::get_field_metadata(&field_name) {
-                if metadata.is_document_reference_only {
-                    self.repo.set_document_reference(
-                        workshop_id, 
-                        &field_name,
-                        document.id,
-                        auth
-                    ).await?;
-                }
-            }
-        }
-
         Ok(document)
     }
 
@@ -695,30 +784,454 @@ impl WorkshopService for WorkshopServiceImpl {
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
     ) -> ServiceResult<Vec<MediaDocumentResponse>> {
-        // 1. Verify workshop exists
-        let _workshop = self.repo.find_by_id(workshop_id).await
-            .map_err(ServiceError::Domain)?;
+        auth.authorize(Permission::UploadDocuments)?;
 
-        // 2. Check permissions
-        if !auth.has_permission(Permission::UploadDocuments) {
-            return Err(ServiceError::PermissionDenied(
-                "User does not have permission to upload documents".to_string(),
+        let _workshop = self.repo.find_by_id(workshop_id).await.map_err(ServiceError::Domain)?;
+
+        let mut results = Vec::new();
+        for (file_data, original_filename) in files {
+            let result = self.document_service.upload_document(
+                auth,
+                file_data,
+                original_filename,
+                title.clone(),
+                document_type_id,
+                workshop_id,
+                "workshops".to_string(),
+                None, // No specific linked field for bulk uploads
+                sync_priority,
+                compression_priority,
+                None, // No transaction needed here, handled by document service
+            ).await?;
+            results.push(result);
+        }
+        Ok(results)
+    }
+
+    async fn get_workshop_statistics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<WorkshopStatistics> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+
+        // 2. Get statistics from repository
+        let statistics = self.repo.get_workshop_statistics().await
+            .map_err(ServiceError::Domain)?;
+        
+        Ok(statistics)
+    }
+
+    async fn get_budget_statistics(
+        &self,
+        project_id: Option<Uuid>,
+        auth: &AuthContext,
+    ) -> ServiceResult<(Decimal, Decimal, Decimal, f64)> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+
+        // 2. Check project existence if provided
+        if let Some(pid) = project_id {
+            match self.project_repo.find_by_id(pid).await {
+                Ok(_) => (), // Project exists
+                Err(DomainError::EntityNotFound(_, _)) => {
+                    return Err(ServiceError::Domain(
+                        DomainError::EntityNotFound("Project".to_string(), pid)
+                    ));
+                },
+                Err(e) => return Err(ServiceError::Domain(e)),
+            }
+        }
+
+        // 3. Get budget statistics from repository
+        let stats = self.repo.get_budget_statistics(project_id).await
+            .map_err(ServiceError::Domain)?;
+        
+        Ok(stats)
+    }
+
+    async fn find_workshops_by_date_range(
+        &self,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+        params: PaginationParams,
+        include: Option<&[WorkshopInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<WorkshopResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+
+        // 2. Validate date range
+        if start_date > end_date {
+            return Err(ServiceError::Domain(
+                DomainError::Validation(ValidationError::custom(
+                    "Start date cannot be after end date"
+                ))
             ));
         }
 
-        // 3. Delegate to document service
-        let documents = self.document_service.bulk_upload_documents(
-            auth,
-            files,
-            title,
-            document_type_id,
-            workshop_id,
-            "workshops".to_string(),
-            sync_priority,
-            compression_priority,
-            None,
-        ).await?;
+        // 3. Find workshops in date range
+        let paginated_result = self.repo.find_by_date_range(start_date, end_date, params).await
+            .map_err(ServiceError::Domain)?;
 
-        Ok(documents)
+        // 4. Convert and enrich each workshop
+        let mut enriched_items = Vec::new();
+        for workshop in paginated_result.items {
+            let response = WorkshopResponse::from_workshop(workshop);
+            let enriched = self.enrich_response(response, include).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 5. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn find_past_workshops(
+        &self,
+        params: PaginationParams,
+        include: Option<&[WorkshopInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<WorkshopResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+
+        // 2. Find past workshops
+        let paginated_result = self.repo.find_past_workshops(params).await
+            .map_err(ServiceError::Domain)?;
+
+        // 3. Convert and enrich each workshop
+        let mut enriched_items = Vec::new();
+        for workshop in paginated_result.items {
+            let response = WorkshopResponse::from_workshop(workshop);
+            let enriched = self.enrich_response(response, include).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn find_upcoming_workshops(
+        &self,
+        params: PaginationParams,
+        include: Option<&[WorkshopInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<WorkshopResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+
+        // 2. Find upcoming workshops
+        let paginated_result = self.repo.find_upcoming_workshops(params).await
+            .map_err(ServiceError::Domain)?;
+
+        // 3. Convert and enrich each workshop
+        let mut enriched_items = Vec::new();
+        for workshop in paginated_result.items {
+            let response = WorkshopResponse::from_workshop(workshop);
+            let enriched = self.enrich_response(response, include).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn find_workshops_by_location(
+        &self,
+        location: &str,
+        params: PaginationParams,
+        include: Option<&[WorkshopInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<WorkshopResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+
+        // 2. Find workshops by location
+        let paginated_result = self.repo.find_by_location(location, params).await
+            .map_err(ServiceError::Domain)?;
+
+        // 3. Convert and enrich each workshop
+        let mut enriched_items = Vec::new();
+        for workshop in paginated_result.items {
+            let response = WorkshopResponse::from_workshop(workshop);
+            let enriched = self.enrich_response(response, include).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn get_workshop_with_participants(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<WorkshopWithParticipants> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Get the workshop
+        let workshop = self.repo.find_by_id(id).await
+            .map_err(ServiceError::Domain)?;
+            
+        let workshop_response = WorkshopResponse::from_workshop(workshop);
+        
+        // 3. Get detailed participant information
+        let participants = self.workshop_participant_repo.find_participants_with_details(id).await
+            .map_err(ServiceError::Domain)?;
+        
+        // 4. Get evaluation completion counts
+        let (total_participants, _pre_eval_count, _post_eval_count) = // Ignoring pre/post for rate calc
+            self.workshop_participant_repo.get_evaluation_completion_counts(id).await
+            .map_err(ServiceError::Domain)?;
+            
+        // 5. Calculate evaluation completion rate
+        let evaluation_completion_rate = if total_participants > 0 {
+            // Consider a participant's evaluation complete only if both pre and post are done
+            let complete_evals = participants.iter()
+                .filter(|p| p.evaluation_complete)
+                .count() as f64;
+                
+            (complete_evals / total_participants as f64) * 100.0 // As percentage
+        } else {
+            0.0
+        };
+        
+        // 6. Create and return combined response
+        Ok(WorkshopWithParticipants {
+            workshop: workshop_response,
+            participants,
+            total_participants,
+            evaluation_completion_rate,
+        })
+    }
+
+    async fn get_workshop_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<WorkshopWithDocumentTimeline> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+        auth.authorize(Permission::ViewDocuments)?;
+
+        // 2. Get the workshop
+        let workshop = self.repo.find_by_id(id).await
+            .map_err(ServiceError::Domain)?;
+            
+        let workshop_response = WorkshopResponse::from_workshop(workshop);
+        
+        // 3. Get all documents for this workshop
+        let documents = self.document_service.list_media_documents_by_related_entity(
+            auth,
+            "workshops",
+            id,
+            PaginationParams::new(1, 100), // Adjust limits as needed
+            None,
+        ).await?.items;
+        
+        // 4. Organize documents by category
+        let mut documents_by_category: HashMap<String, Vec<MediaDocumentResponse>> = HashMap::new();
+        let mut total_document_count = 0;
+
+        for doc in documents {
+            // Use linked_field if available, otherwise use a default category
+            let category = doc.linked_field.clone().unwrap_or_else(|| "General".to_string());
+            
+            documents_by_category
+                .entry(category)
+                .or_insert_with(Vec::new)
+                .push(doc);
+            total_document_count += 1;
+        }
+        
+        // 5. Create and return combined response
+        Ok(WorkshopWithDocumentTimeline {
+            workshop: workshop_response,
+            documents_by_category,
+            total_document_count,
+        })
+    }
+
+    async fn get_workshop_budget_summaries_for_project(
+        &self,
+        project_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<WorkshopBudgetSummary>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+        
+        // 2. Verify project exists
+        match self.project_repo.find_by_id(project_id).await {
+            Ok(_) => (), // Project exists
+            Err(DomainError::EntityNotFound(_, _)) => {
+                return Err(ServiceError::Domain(
+                    DomainError::EntityNotFound("Project".to_string(), project_id)
+                ));
+            },
+            Err(e) => return Err(ServiceError::Domain(e)),
+        }
+        
+        // 3. Get budget summaries from repository
+        let summaries = self.repo.get_workshop_budget_summaries_for_project(project_id).await
+            .map_err(ServiceError::Domain)?;
+            
+        Ok(summaries)
+    }
+
+    async fn get_project_workshop_metrics(
+        &self,
+        project_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ProjectWorkshopMetrics> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+        auth.authorize(Permission::ViewProjects)?;
+        
+        // 2. Get metrics from repository
+        let metrics = self.repo.get_project_workshop_metrics(project_id).await
+            .map_err(ServiceError::Domain)?;
+            
+        Ok(metrics)
+    }
+
+    async fn get_participant_attendance(
+        &self,
+        participant_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantAttendance> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+        auth.authorize(Permission::ViewWorkshops)?;
+        
+        // 2. Get attendance metrics from repository
+        let attendance = self.workshop_participant_repo.get_participant_attendance(participant_id).await
+            .map_err(ServiceError::Domain)?;
+            
+        Ok(attendance)
+    }
+
+    async fn batch_add_participants_to_workshop(
+        &self,
+        workshop_id: Uuid,
+        participant_ids: Vec<Uuid>,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<(Uuid, Result<(), ServiceError>)>> {
+        // 1. Check permissions
+        auth.authorize(Permission::EditWorkshops)?;
+        
+        // 2. Verify workshop exists
+        match self.repo.find_by_id(workshop_id).await {
+            Ok(_) => (), // Workshop exists
+            Err(e) => return Err(ServiceError::Domain(e)),
+        }
+        
+        // 3. Batch add participants
+        let results = self.workshop_participant_repo.batch_add_participants(
+            workshop_id, 
+            &participant_ids, 
+            auth
+        ).await
+            .map_err(ServiceError::Domain)?;
+            
+        // 4. Convert domain results to service results
+        let service_results = results.into_iter()
+            .map(|(id, result)| {
+                let service_result = result.map_err(ServiceError::Domain);
+                (id, service_result)
+            })
+            .collect();
+            
+        Ok(service_results)
+    }
+
+    async fn find_participants_with_missing_evaluations(
+        &self,
+        workshop_id: Uuid,
+        eval_type: &str,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<ParticipantSummary>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewWorkshops)?;
+        auth.authorize(Permission::ViewParticipants)?;
+        
+        // 2. Verify workshop exists
+        match self.repo.find_by_id(workshop_id).await {
+            Ok(_) => (), // Workshop exists
+            Err(e) => return Err(ServiceError::Domain(e)),
+        }
+        
+        // 3. Validate eval_type
+        match eval_type.to_lowercase().as_str() {
+            "pre" | "post" => (), // Valid
+            _ => return Err(ServiceError::Domain(
+                DomainError::Validation(ValidationError::custom(
+                    &format!("Invalid evaluation type: {}. Must be 'pre' or 'post'", eval_type)
+                ))
+            )),
+        }
+        
+        // 4. Find participants with missing evaluations
+        let participants = self.workshop_participant_repo.find_participants_with_missing_evaluations(
+            workshop_id, 
+            eval_type
+        ).await
+            .map_err(ServiceError::Domain)?;
+            
+        Ok(participants)
+    }
+}
+
+// Add this helper method to WorkshopServiceImpl for document uploads
+impl WorkshopServiceImpl {
+    // Helper method for document uploads (used in create_workshop_with_documents)
+    async fn upload_documents_for_entity(
+        &self,
+        entity_id: Uuid,
+        entity_type: &str,
+        documents: Vec<(Vec<u8>, String, Option<String>)>, // (data, filename, linked_field)
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        auth: &AuthContext,
+    ) -> Vec<Result<MediaDocumentResponse, ServiceError>> {
+        let mut results = Vec::new();
+        
+        for (file_data, filename, linked_field) in documents {
+            let upload_result = self.document_service.upload_document(
+                auth,
+                file_data,
+                filename.clone(),
+                None, // Assume no separate title for batch upload?
+                document_type_id,
+                entity_id,
+                entity_type.to_string(),
+                linked_field.clone(),
+                sync_priority,
+                compression_priority,
+                None, // No transaction needed here, handled by document service
+            ).await;
+            
+            results.push(upload_result);
+        }
+        
+        results
     }
 }

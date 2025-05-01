@@ -4,14 +4,18 @@ use crate::auth::AuthContext;
 use crate::types::ChangeLogOperationType;
 use uuid::Uuid;
 use chrono::Utc;
-use sqlx::{SqlitePool, query, query_as, query_scalar};
+use sqlx::{SqlitePool, query, query_as, query_scalar, Transaction, Sqlite};
 use async_trait::async_trait;
+use std::sync::Arc;
+use crate::domains::sync::repository::ChangeLogRepository;
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+use crate::domains::core::repository::{HardDeletable, FindById};
 
 /// User repository trait
 #[async_trait]
-pub trait UserRepository: Send + Sync {
+pub trait UserRepository: Send + Sync + FindById<User> + HardDeletable {
     /// Find a user by ID
-    async fn find_by_id(&self, id: Uuid) -> DomainResult<User>;
+    // async fn find_by_id(&self, id: Uuid) -> DomainResult<User>; // Defined by FindById
     
     /// Find a user by email
     async fn find_by_email(&self, email: &str) -> DomainResult<User>;
@@ -25,9 +29,6 @@ pub trait UserRepository: Send + Sync {
     /// Update an existing user
     async fn update(&self, id: Uuid, update: UpdateUser, auth: &AuthContext) -> DomainResult<User>;
     
-    /// Hard delete a user
-    async fn hard_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()>;
-    
     /// Update last login timestamp
     async fn update_last_login(&self, id: Uuid) -> DomainResult<()>;
     
@@ -38,53 +39,51 @@ pub trait UserRepository: Send + Sync {
 /// SQLite implementation of UserRepository
 pub struct SqliteUserRepository {
     pool: SqlitePool,
+    change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
 }
 
 impl SqliteUserRepository {
     /// Create a new repository instance
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>) -> Self {
+        Self { pool, change_log_repo }
     }
     
-    /// Create a changelog entry
-    async fn create_changelog(
+    // Helper function to map UserRow to User entity
+    fn map_row_to_entity(row: UserRow) -> DomainResult<User> {
+        row.into_entity()
+    }
+    
+    // Helper to find user by ID within a transaction (needed for updates)
+    async fn find_by_id_with_tx<'t>(
         &self,
-        operation_type: &str,
-        entity_id: Uuid,
-        field_name: Option<&str>,
-        old_value: Option<&str>,
-        new_value: Option<&str>,
-        user_id: &Uuid,
-        device_id: &str,
-    ) -> DomainResult<()> {
-        let operation_id = Uuid::new_v4();
-        let now = Utc::now().to_rfc3339();
-        
-        query(
-            "INSERT INTO change_log (
-                operation_id, entity_table, entity_id, operation_type,
-                field_name, old_value, new_value, timestamp, user_id, device_id
-            ) VALUES (?, 'users', ?, ?, ?, ?, ?, ?, ?, ?)"
+        id: Uuid,
+        tx: &mut Transaction<'t, Sqlite>,
+    ) -> DomainResult<User> {
+        let row = query_as::<_, UserRow>(
+            "SELECT * FROM users WHERE id = ? AND deleted_at IS NULL"
         )
-        .bind(operation_id.to_string())
-        .bind(entity_id.to_string())
-        .bind(operation_type)
-        .bind(field_name)
-        .bind(old_value)
-        .bind(new_value)
-        .bind(now)
-        .bind(user_id.to_string())
-        .bind(device_id)
-        .execute(&self.pool)
+        .bind(id.to_string())
+        .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| DomainError::Database(DbError::from(e)))?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?
+        .ok_or_else(|| DomainError::EntityNotFound("User".to_string(), id))?;
         
-        Ok(())
+        Self::map_row_to_entity(row)
+    }
+    
+    // Helper to log change entries consistently
+    async fn log_change_entry<'t>(
+        &self,
+        entry: ChangeLogEntry,
+        tx: &mut Transaction<'t, Sqlite>,
+    ) -> DomainResult<()> {
+        self.change_log_repo.create_change_log_with_tx(&entry, tx).await
     }
 }
 
+// Implement FindById for SqliteUserRepository
 #[async_trait]
-impl UserRepository for SqliteUserRepository {
+impl FindById<User> for SqliteUserRepository {
     async fn find_by_id(&self, id: Uuid) -> DomainResult<User> {
         let row = query_as::<_, UserRow>(
             "SELECT * FROM users WHERE id = ? AND deleted_at IS NULL"
@@ -95,9 +94,64 @@ impl UserRepository for SqliteUserRepository {
         .map_err(|e| DomainError::Database(DbError::from(e)))?
         .ok_or_else(|| DomainError::EntityNotFound("User".to_string(), id))?;
         
-        row.into_entity()
+        Self::map_row_to_entity(row)
+    }
+}
+
+// Implement HardDeletable for SqliteUserRepository
+#[async_trait]
+impl HardDeletable for SqliteUserRepository {
+    fn entity_name(&self) -> &'static str {
+        "users"
+    }
+
+    async fn hard_delete_with_tx(
+        &self,
+        id: Uuid,
+        _auth: &AuthContext, // Auth context might be used later for checks
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> DomainResult<()> {
+         // Check if user exists first to return correct error
+        let _ = query_scalar::<_, String>("SELECT id FROM users WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| DomainError::Database(DbError::from(e)))?
+            .ok_or_else(|| DomainError::EntityNotFound(self.entity_name().to_string(), id))?;
+            
+        // Hard delete the user
+        let result = query("DELETE FROM users WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| DomainError::Database(DbError::from(e)))?;
+            
+        // Check rows affected to confirm deletion (optional but good practice)
+        if result.rows_affected() == 0 {
+            // Should not happen if fetch_optional found the user, but handle defensively
+            Err(DomainError::EntityNotFound(self.entity_name().to_string(), id))
+        } else {
+             // No logging here - BaseDeleteService handles it
+            Ok(())
+        }
     }
     
+    // Standalone hard_delete is removed as it's handled by the service
+    async fn hard_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
+        // This implementation is now effectively unused, but kept to satisfy 
+        // potential direct calls if the service pattern isn't fully adopted yet.
+        // It lacks the Tombstone + ChangeLog from BaseDeleteService.
+        log::warn!("Direct hard_delete called on UserRepository for {}, bypassing BaseDeleteService logic.", id);
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        match self.hard_delete_with_tx(id, auth, &mut tx).await {
+            Ok(()) => { tx.commit().await.map_err(DbError::from)?; Ok(()) },
+            Err(e) => { let _ = tx.rollback().await; Err(e) }
+        }
+    }
+}
+
+#[async_trait]
+impl UserRepository for SqliteUserRepository {
     async fn find_by_email(&self, email: &str) -> DomainResult<User> {
         let row = query_as::<_, UserRow>(
             "SELECT * FROM users WHERE email = ? AND deleted_at IS NULL"
@@ -135,76 +189,111 @@ impl UserRepository for SqliteUserRepository {
             ));
         }
         
-        // Generate ID
-        let id = Uuid::new_v4();
-        let now = Utc::now().to_rfc3339();
-        
-        // Set created_by to the authenticated user if not specified
-        let created_by = user.created_by_user_id
-            .unwrap_or(auth.user_id)
-            .to_string();
+        // --- Start Transaction --- 
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+
+        let create_result = async {
+            // Generate ID
+            let id = Uuid::new_v4();
+            let now = Utc::now().to_rfc3339();
+            let now_dt = Utc::now(); // For logging
+            let user_uuid = auth.user_id; // Capture UUID
+            let device_uuid: Option<Uuid> = auth.device_id.parse().ok(); // Capture device UUID
             
-        // Default to active if not specified
-        let active = if user.active { 1 } else { 0 };
-        
-        // Insert user
-        query(
-            "INSERT INTO users (
-                id, email, email_updated_at, email_updated_by,
-                password_hash, name, name_updated_at, name_updated_by,
-                role, role_updated_at, role_updated_by,
-                active, active_updated_at, active_updated_by,
-                created_at, updated_at, created_by_user_id, updated_by_user_id
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )"
-        )
-        .bind(id.to_string())
-        .bind(&user.email)
-        .bind(&now)
-        .bind(auth.user_id.to_string())
-        .bind(&user.password)  // Note: This should be hashed before calling repository
-        .bind(&user.name)
-        .bind(&now)
-        .bind(auth.user_id.to_string())
-        .bind(&user.role)
-        .bind(&now)
-        .bind(auth.user_id.to_string())
-        .bind(active)
-        .bind(&now)
-        .bind(auth.user_id.to_string())
-        .bind(&now)
-        .bind(&now)
-        .bind(created_by)
-        .bind(auth.user_id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| DomainError::Database(DbError::from(e)))?;
-        
-        // Create changelog entry
-        self.create_changelog(
-            ChangeLogOperationType::Create.as_str(),
-            id,
-            None,
-            None,
-            Some(&format!("User created: {}", &user.email)),
-            &auth.user_id,
-            &auth.device_id,
-        ).await?;
-        
-        // Return the created user
-        self.find_by_id(id).await
+            // Set created_by to the authenticated user if not specified
+            let created_by = user.created_by_user_id
+                .unwrap_or(auth.user_id)
+                .to_string();
+            
+            // Default to active if not specified
+            let active = if user.active { 1 } else { 0 };
+            
+            // Insert user
+            query(
+                "INSERT INTO users (
+                    id, email, email_updated_at, email_updated_by,
+                    password_hash, name, name_updated_at, name_updated_by,
+                    role, role_updated_at, role_updated_by,
+                    active, active_updated_at, active_updated_by,
+                    created_at, updated_at, created_by_user_id, updated_by_user_id
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )"
+            )
+            .bind(id.to_string())
+            .bind(&user.email)
+            .bind(&now)
+            .bind(auth.user_id.to_string())
+            .bind(&user.password)  // Note: This should be hashed before calling repository
+            .bind(&user.name)
+            .bind(&now)
+            .bind(auth.user_id.to_string())
+            .bind(&user.role)
+            .bind(&now)
+            .bind(auth.user_id.to_string())
+            .bind(active)
+            .bind(&now)
+            .bind(auth.user_id.to_string())
+            .bind(&now)
+            .bind(&now)
+            .bind(created_by)
+            .bind(auth.user_id.to_string())
+            .execute(&mut *tx) // Execute within transaction
+            .await
+            .map_err(|e| DomainError::Database(DbError::from(e)))?;
+            
+            // Create changelog entry
+            let entry = ChangeLogEntry {
+                operation_id: Uuid::new_v4(), // Generate new op ID
+                entity_table: self.entity_name().to_string(), // Use entity_name()
+                entity_id: id,
+                operation_type: ChangeOperationType::Create,
+                field_name: None,
+                old_value: None,
+                new_value: None,
+                timestamp: now_dt,
+                user_id: user_uuid,
+                device_id: device_uuid,
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+            self.log_change_entry(entry, &mut tx).await?;
+            
+            // Return the ID for fetching outside the transaction
+            Ok(id)
+        }.await;
+
+        // --- Commit or Rollback --- 
+        match create_result {
+            Ok(created_id) => {
+                tx.commit().await.map_err(DbError::from)?;
+                // Fetch the newly created record outside the transaction
+                self.find_by_id(created_id).await
+            },
+            Err(e) => {
+                let _ = tx.rollback().await; // Ensure rollback on error
+                Err(e)
+            }
+        }
     }
     
     async fn update(&self, id: Uuid, update: UpdateUser, auth: &AuthContext) -> DomainResult<User> {
         // Check if user exists
-        let user = self.find_by_id(id).await?;
+        // let user = self.find_by_id(id).await?; // Fetch within transaction later
         
         // Begin transaction
         let mut tx = self.pool.begin().await
             .map_err(|e| DomainError::Database(DbError::from(e)))?;
             
+        // Fetch the user within the transaction to get the old state accurately
+        let user = self.find_by_id_with_tx(id, &mut tx).await?;
+        
         let now = Utc::now().to_rfc3339();
+        let now_dt = Utc::now(); // For logging
+        let user_uuid = auth.user_id;
+        let device_uuid: Option<Uuid> = auth.device_id.parse().ok();
         
         // Update email if provided
         if let Some(email) = &update.email {
@@ -226,16 +315,24 @@ impl UserRepository for SqliteUserRepository {
             .await
             .map_err(|e| DomainError::Database(DbError::from(e)))?;
             
-            // Create changelog entry
-            self.create_changelog(
-                ChangeLogOperationType::Update.as_str(),
-                id,
-                Some("email"),
-                Some(&user.email),
-                Some(email),
-                &auth.user_id,
-                &auth.device_id,
-            ).await?;
+            // Log Change
+            let entry = ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: self.entity_name().to_string(),
+                entity_id: id,
+                operation_type: ChangeOperationType::Update,
+                field_name: Some("email".to_string()),
+                old_value: Some(serde_json::to_string(&user.email).unwrap_or_default()),
+                new_value: Some(serde_json::to_string(email).unwrap_or_default()),
+                timestamp: now_dt,
+                user_id: user_uuid,
+                device_id: device_uuid.clone(),
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+            self.log_change_entry(entry, &mut tx).await?;
         }
         
         // Update password if provided
@@ -265,16 +362,24 @@ impl UserRepository for SqliteUserRepository {
             .await
             .map_err(|e| DomainError::Database(DbError::from(e)))?;
             
-            // Create changelog entry
-            self.create_changelog(
-                ChangeLogOperationType::Update.as_str(),
-                id,
-                Some("name"),
-                Some(&user.name),
-                Some(name),
-                &auth.user_id,
-                &auth.device_id,
-            ).await?;
+            // Log Change
+            let entry = ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: self.entity_name().to_string(),
+                entity_id: id,
+                operation_type: ChangeOperationType::Update,
+                field_name: Some("name".to_string()),
+                old_value: Some(serde_json::to_string(&user.name).unwrap_or_default()),
+                new_value: Some(serde_json::to_string(name).unwrap_or_default()),
+                timestamp: now_dt,
+                user_id: user_uuid,
+                device_id: device_uuid.clone(),
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+            self.log_change_entry(entry, &mut tx).await?;
         }
         
         // Update role if provided
@@ -290,16 +395,24 @@ impl UserRepository for SqliteUserRepository {
             .await
             .map_err(|e| DomainError::Database(DbError::from(e)))?;
             
-            // Create changelog entry
-            self.create_changelog(
-                ChangeLogOperationType::Update.as_str(),
-                id,
-                Some("role"),
-                Some(user.role.as_str()),
-                Some(role),
-                &auth.user_id,
-                &auth.device_id,
-            ).await?;
+            // Log Change
+            let entry = ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: self.entity_name().to_string(),
+                entity_id: id,
+                operation_type: ChangeOperationType::Update,
+                field_name: Some("role".to_string()),
+                old_value: Some(serde_json::to_string(user.role.as_str()).unwrap_or_default()),
+                new_value: Some(serde_json::to_string(role).unwrap_or_default()),
+                timestamp: now_dt,
+                user_id: user_uuid,
+                device_id: device_uuid.clone(),
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+            self.log_change_entry(entry, &mut tx).await?;
         }
         
         // Update active if provided
@@ -318,16 +431,24 @@ impl UserRepository for SqliteUserRepository {
             .await
             .map_err(|e| DomainError::Database(DbError::from(e)))?;
             
-            // Create changelog entry
-            self.create_changelog(
-                ChangeLogOperationType::Update.as_str(),
-                id,
-                Some("active"),
-                Some(&current_active.to_string()),
-                Some(&active_value.to_string()),
-                &auth.user_id,
-                &auth.device_id,
-            ).await?;
+            // Log Change
+            let entry = ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: self.entity_name().to_string(),
+                entity_id: id,
+                operation_type: ChangeOperationType::Update,
+                field_name: Some("active".to_string()),
+                old_value: Some(serde_json::to_string(&user.active).unwrap_or_default()), // Log bool directly
+                new_value: Some(serde_json::to_string(&active).unwrap_or_default()), // Log bool directly
+                timestamp: now_dt,
+                user_id: user_uuid,
+                device_id: device_uuid.clone(),
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+            self.log_change_entry(entry, &mut tx).await?;
         }
         
         // Update the updated_at and updated_by fields
@@ -347,31 +468,6 @@ impl UserRepository for SqliteUserRepository {
         
         // Return the updated user
         self.find_by_id(id).await
-    }
-    
-    async fn hard_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
-        // Check if user exists (even if deleted) to prevent errors on double delete
-        let exists: bool = query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE id = ?)")
-            .bind(id.to_string())
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| DomainError::Database(DbError::from(e)))?;
-
-        if !exists {
-             return Ok(()); // Already deleted or never existed, consider it success
-        }
-
-        // Hard delete the user
-        query("DELETE FROM users WHERE id = ?")
-            .bind(id.to_string())
-            .execute(&self.pool) // Execute directly on the pool
-            .await
-            .map_err(|e| DomainError::Database(DbError::from(e)))?;
-            
-        // Log the hard delete action (optional, using standard logging)
-        log::info!("Hard deleted user {} by user {}", id, auth.user_id);
-
-        Ok(())
     }
     
     async fn update_last_login(&self, id: Uuid) -> DomainResult<()> {

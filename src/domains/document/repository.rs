@@ -17,6 +17,11 @@ use uuid::Uuid;
 use std::collections::HashMap; // For update_paths_and_status
 use std::str::FromStr; // Import FromStr if not already imported at the top of the file
 use crate::types::{PaginatedResult, PaginationParams};
+// --- Add imports for ChangeLog ---
+use crate::domains::sync::repository::ChangeLogRepository;
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+use std::sync::Arc;
+use serde_json;
 
 /// Temporary table identifier for linking documents before the main entity exists
 pub const TEMP_RELATED_TABLE: &str = "TEMP";
@@ -45,11 +50,12 @@ pub trait DocumentTypeRepository: DeleteServiceRepository<DocumentType> + Send +
 
 pub struct SqliteDocumentTypeRepository {
     pool: Pool<Sqlite>,
+    change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
 }
 
 impl SqliteDocumentTypeRepository {
-    pub fn new(pool: Pool<Sqlite>) -> Self {
-        Self { pool }
+    pub fn new(pool: Pool<Sqlite>, change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>) -> Self {
+        Self { pool, change_log_repo }
     }
     fn entity_name() -> &'static str {
         "document_types" // Table name
@@ -71,6 +77,14 @@ impl SqliteDocumentTypeRepository {
             .ok_or_else(|| DomainError::EntityNotFound(Self::entity_name().to_string(), id))
             .and_then(Self::map_row)
     }
+    // Helper to log changes consistently
+    async fn log_change_entry<'t>(
+        &self,
+        entry: ChangeLogEntry,
+        tx: &mut Transaction<'t, Sqlite>,
+    ) -> DomainResult<()> {
+        self.change_log_repo.create_change_log_with_tx(&entry, tx).await
+    }
 }
 
 #[async_trait]
@@ -81,7 +95,7 @@ impl FindById<DocumentType> for SqliteDocumentTypeRepository {
             .fetch_optional(&self.pool)
             .await
             .map_err(DbError::from)?
-            .ok_or_else(|| DomainError::EntityNotFound(Self::entity_name().to_string(), id))
+            .ok_or_else(|| DomainError::EntityNotFound(self.entity_name().to_string(), id))
             .and_then(Self::map_row)
     }
 }
@@ -95,6 +109,10 @@ impl SoftDeletable for SqliteDocumentTypeRepository {
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
         let now = Utc::now().to_rfc3339();
+        let now_dt = Utc::now(); // For logging
+        let user_uuid = auth.user_id;
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+
         let result = query(
             "UPDATE document_types SET deleted_at = ?, deleted_by_user_id = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
         )
@@ -126,28 +144,33 @@ impl SoftDeletable for SqliteDocumentTypeRepository {
 #[async_trait]
 impl HardDeletable for SqliteDocumentTypeRepository {
     fn entity_name(&self) -> &'static str {
-        Self::entity_name()
+        "document_types"
     }
     async fn hard_delete_with_tx(
         &self,
         id: Uuid,
-        _auth: &AuthContext, // Auth context may not be needed for hard delete checks here
+        _auth: &AuthContext, // Auth context might be used for logging/checks later
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
-         let result = query("DELETE FROM document_types WHERE id = ?")
+        let now_dt = Utc::now(); // For logging
+        let user_uuid = _auth.user_id;
+        let device_uuid: Option<Uuid> = _auth.device_id.parse::<Uuid>().ok();
+
+        let result = query("DELETE FROM document_types WHERE id = ?")
             .bind(id.to_string())
             .execute(&mut **tx)
             .await
             .map_err(DbError::from)?;
 
         if result.rows_affected() == 0 {
-            Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id))
+            Err(DomainError::EntityNotFound(self.entity_name().to_string(), id))
         } else {
             Ok(())
         }
     }
     async fn hard_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        // Consider adding file system cleanup logic here or in the service calling this
         let result = self.hard_delete_with_tx(id, auth, &mut tx).await;
         match result {
             Ok(_) => { tx.commit().await.map_err(DbError::from)?; Ok(()) },
@@ -164,38 +187,79 @@ impl DocumentTypeRepository for SqliteDocumentTypeRepository {
         auth: &AuthContext,
     ) -> DomainResult<DocumentType> {
         let id = Uuid::new_v4();
-        let now = Utc::now().to_rfc3339();
-        let user_id = auth.user_id.to_string();
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
 
-        query(
-            r#"INSERT INTO document_types (
-                id, name, description, icon, color, default_priority, -- Added default_priority
-                created_at, updated_at, created_by_user_id, updated_by_user_id,
-                name_updated_at, name_updated_by, description_updated_at, description_updated_by,
-                icon_updated_at, icon_updated_by, color_updated_at, color_updated_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"# // Added placeholder for default_priority
-        )
-        .bind(id.to_string())
-        .bind(&new_type.name)
-        .bind(&new_type.description)
-        .bind(&new_type.icon)
-        .bind(&new_type.color)
-        .bind(&new_type.default_priority) // Bind default_priority
-        .bind(&now).bind(&now)
-        .bind(&user_id).bind(&user_id)
-        // LWW fields initialization
-        .bind(&now).bind(&user_id) // name
-        .bind(new_type.description.as_ref().map(|_| &now))
-        .bind(new_type.description.as_ref().map(|_| &user_id)) // description
-        .bind(new_type.icon.as_ref().map(|_| &now))
-        .bind(new_type.icon.as_ref().map(|_| &user_id)) // icon
-        .bind(new_type.color.as_ref().map(|_| &now))
-        .bind(new_type.color.as_ref().map(|_| &user_id)) // color
-        .execute(&self.pool)
-        .await
-        .map_err(DbError::from)?;
+        let result = async {
+            let now = Utc::now().to_rfc3339();
+            let now_dt = Utc::now(); // Use DateTime<Utc> for logging
+            let user_id = auth.user_id.to_string();
+            let user_uuid = auth.user_id;
+            let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
 
-        self.find_by_id(id).await // Fetch the created record
+            query(
+                r#"INSERT INTO document_types (
+                    id, name, description, icon, color, default_priority, -- Added default_priority
+                    created_at, updated_at, created_by_user_id, updated_by_user_id,
+                    name_updated_at, name_updated_by, description_updated_at, description_updated_by,
+                    icon_updated_at, icon_updated_by, color_updated_at, color_updated_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"# // Added placeholder for default_priority
+            )
+            .bind(id.to_string())
+            .bind(&new_type.name)
+            .bind(&new_type.description)
+            .bind(&new_type.icon)
+            .bind(&new_type.color)
+            .bind(&new_type.default_priority) // Bind default_priority
+            .bind(&now).bind(&now)
+            .bind(&user_id).bind(&user_id)
+            // LWW fields initialization
+            .bind(&now).bind(&user_id) // name
+            .bind(new_type.description.as_ref().map(|_| &now))
+            .bind(new_type.description.as_ref().map(|_| &user_id)) // description
+            .bind(new_type.icon.as_ref().map(|_| &now))
+            .bind(new_type.icon.as_ref().map(|_| &user_id)) // icon
+            .bind(new_type.color.as_ref().map(|_| &now))
+            .bind(new_type.color.as_ref().map(|_| &user_id)) // color
+            .execute(&mut *tx)
+            .await
+            .map_err(DbError::from)?;
+
+            // Log Create Operation within the transaction
+            let entry = ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: Self::entity_name().to_string(),
+                entity_id: id,
+                operation_type: ChangeOperationType::Create,
+                field_name: None,
+                old_value: None,
+                new_value: None, // Optionally serialize new_type
+                timestamp: now_dt,
+                user_id: user_uuid,
+                device_id: device_uuid,
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+            self.log_change_entry(entry, &mut tx).await?;
+
+            // Fetch within the transaction before commit might be slightly faster
+            // but requires careful handling if commit fails.
+            // Fetching after commit is safer.
+            Ok(id) // Return ID to fetch after commit
+        }.await;
+
+        match result {
+            Ok(created_id) => {
+                tx.commit().await.map_err(DbError::from)?;
+                // Fetch the newly created record outside the transaction
+                self.find_by_id(created_id).await
+            },
+            Err(e) => {
+                let _ = tx.rollback().await; // Ensure rollback on error
+                Err(e)
+            }
+        }
     }
 
     async fn update(
@@ -207,9 +271,12 @@ impl DocumentTypeRepository for SqliteDocumentTypeRepository {
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
         let result = async {
             // Fetch existing to ensure it exists and for potential LWW checks (though not implemented here)
-            let _existing = self.find_by_id_with_tx(id, &mut tx).await?;
+            let old_entity = self.find_by_id_with_tx(id, &mut tx).await?;
             let now = Utc::now().to_rfc3339();
+            let now_dt = Utc::now(); // For logging
             let user_id = auth.user_id.to_string();
+            let user_uuid = auth.user_id;
+            let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
 
             // Use dynamic query building for updates
             let mut sets: Vec<String> = Vec::new();
@@ -262,12 +329,45 @@ impl DocumentTypeRepository for SqliteDocumentTypeRepository {
             for bind_val in binds {
                 q = q.bind(bind_val);
             }
-            q = q.bind(id.to_string()); // Bind the WHERE clause ID
+            q = q.bind(id.to_string());
 
             q.execute(&mut *tx).await.map_err(DbError::from)?;
 
             // Fetch and return the updated record
-            self.find_by_id_with_tx(id, &mut tx).await
+            let new_entity = self.find_by_id_with_tx(id, &mut tx).await?;
+
+            // Log field-level updates
+            macro_rules! log_if_changed {
+                ($field:ident) => {
+                    if old_entity.$field != new_entity.$field {
+                        let entry = ChangeLogEntry {
+                            operation_id: Uuid::new_v4(),
+                            entity_table: Self::entity_name().to_string(),
+                            entity_id: id,
+                            operation_type: ChangeOperationType::Update,
+                            field_name: Some(stringify!($field).to_string()),
+                            old_value: Some(serde_json::to_string(&old_entity.$field).unwrap_or_default()),
+                            new_value: Some(serde_json::to_string(&new_entity.$field).unwrap_or_default()),
+                            timestamp: now_dt,
+                            user_id: user_uuid,
+                            device_id: device_uuid,
+                            document_metadata: None,
+                            sync_batch_id: None,
+                            processed_at: None,
+                            sync_error: None,
+                        };
+                        self.log_change_entry(entry, &mut tx).await?;
+                    }
+                };
+            }
+
+            log_if_changed!(name);
+            log_if_changed!(description);
+            log_if_changed!(icon);
+            log_if_changed!(color);
+            log_if_changed!(default_priority);
+
+            Ok(new_entity)
 
         }.await;
 
@@ -385,17 +485,26 @@ pub trait MediaDocumentRepository: DeleteServiceRepository<MediaDocument> + Send
 
 pub struct SqliteMediaDocumentRepository {
     pool: Pool<Sqlite>,
+    change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
 }
 
 impl SqliteMediaDocumentRepository {
-    pub fn new(pool: Pool<Sqlite>) -> Self {
-        Self { pool }
+    pub fn new(pool: Pool<Sqlite>, change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>) -> Self {
+        Self { pool, change_log_repo }
     }
     fn entity_name() -> &'static str {
         "media_documents" // Table name
     }
      fn map_row(row: MediaDocumentRow) -> DomainResult<MediaDocument> {
         row.into_entity() // Use the conversion method
+    }
+    // Helper to log changes consistently
+    async fn log_change_entry<'t>(
+        &self,
+        entry: ChangeLogEntry,
+        tx: &mut Transaction<'t, Sqlite>,
+    ) -> DomainResult<()> {
+        self.change_log_repo.create_change_log_with_tx(&entry, tx).await
     }
 }
 
@@ -425,6 +534,10 @@ impl SoftDeletable for SqliteMediaDocumentRepository {
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
         let now = Utc::now().to_rfc3339();
+        let now_dt = Utc::now(); // For logging
+        let user_uuid = auth.user_id;
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+
         let result = query(
             "UPDATE media_documents SET deleted_at = ?, deleted_by_user_id = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
         )
@@ -471,7 +584,7 @@ impl HardDeletable for SqliteMediaDocumentRepository {
             .map_err(DbError::from)?;
 
         if result.rows_affected() == 0 {
-            Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id))
+            Err(DomainError::EntityNotFound(self.entity_name().to_string(), id))
         } else {
             Ok(())
         }
@@ -500,7 +613,14 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
         let result = async {
             let now = Utc::now().to_rfc3339();
-            let user_id_str = new_doc.created_by_user_id.map(|id| id.to_string());
+            let now_dt = Utc::now(); // For logging
+            let user_uuid = new_doc.created_by_user_id;
+            // NOTE: NewMediaDocument does not have device_id. Logging will use None.
+            // If device_id logging is needed here, add it to NewMediaDocument DTO.
+            let device_uuid: Option<Uuid> = None;
+
+            // Use the user_uuid captured outside the async block for consistency
+            let user_id_str_bind = user_uuid.map(|id| id.to_string());
 
             // Determine related_table and related_id based on temp_related_id
             let (actual_related_table, actual_related_id_str) = if new_doc.temp_related_id.is_some() {
@@ -539,11 +659,9 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             .bind(actual_related_id_str) // Store actual ID or NULL if temp
             .bind(new_doc.type_id.to_string())
             .bind(&new_doc.original_filename)
-            // .bind(&new_doc.file_path) // REMOVED
              // compressed fields initialized as NULL
             .bind(&new_doc.field_identifier)
             .bind(&new_doc.title)
-            // .bind(&new_doc.description) // REMOVED
             .bind(&new_doc.mime_type)
             .bind(new_doc.size_bytes)
             .bind(CompressionStatus::Pending.as_str()) // Default status
@@ -555,7 +673,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             )
             .bind(temp_related_id_str) // Store temp ID if provided
             .bind(&now).bind(&now)
-            .bind(user_id_str.clone()).bind(user_id_str) // created_by, updated_by
+            .bind(user_id_str_bind.as_deref()).bind(user_id_str_bind.as_deref()) // Use Option<String> binding for both
             .execute(&mut *tx)
             .await
             .map_err(|e| {
@@ -576,6 +694,25 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
                  DomainError::Database(DbError::from(e))
              })?;
 
+            // Log Create Operation
+            let entry = ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: Self::entity_name().to_string(),
+                entity_id: new_doc.id,
+                operation_type: ChangeOperationType::Create,
+                field_name: None,
+                old_value: None,
+                new_value: None, // Optionally serialize new_doc
+                timestamp: now_dt,
+                user_id: user_uuid.unwrap_or_else(Uuid::nil), // Provide default if None
+                device_id: device_uuid,
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+            self.log_change_entry(entry, &mut tx).await?;
+
             self.find_by_id_with_tx(new_doc.id, &mut tx).await
         }.await;
 
@@ -584,8 +721,6 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             Err(e) => { let _ = tx.rollback().await; Err(e) }
         }
     }
-
-    // update/update_with_tx REMOVED
 
     async fn find_by_related_entity(
         &self,
@@ -619,21 +754,61 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         compressed_file_path: Option<&str>,
         compressed_size_bytes: Option<i64>, // ADDED size
     ) -> DomainResult<()> {
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let old_entity = self.find_by_id_with_tx(id, &mut tx).await.ok(); // Ignore error if not found for logging
+        let now = Utc::now();
+        let system_user_id = Uuid::nil(); // System operation
+        let device_uuid: Option<Uuid> = None;
+
         let result = query(
             "UPDATE media_documents SET compression_status = ?, compressed_file_path = ?, compressed_size_bytes = ?, updated_at = ? WHERE id = ?"
         )
         .bind(status.as_str())
         .bind(compressed_file_path)
         .bind(compressed_size_bytes) // Bind the size
-        .bind(Utc::now().to_rfc3339())
+        .bind(now.to_rfc3339())
         .bind(id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *tx) // Use transaction
         .await
         .map_err(DbError::from)?;
 
         if result.rows_affected() == 0 {
+            let _ = tx.rollback().await;
             Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id))
         } else {
+            // Log changes if old entity was found
+            if let Some(old) = old_entity {
+                // Fetch new state within the transaction
+                let new_entity = self.find_by_id_with_tx(id, &mut tx).await?;
+
+                macro_rules! log_if_changed {
+                    ($field_name:ident, $field_sql:literal) => {
+                        if old.$field_name != new_entity.$field_name {
+                            let entry = ChangeLogEntry {
+                                operation_id: Uuid::new_v4(),
+                                entity_table: Self::entity_name().to_string(),
+                                entity_id: id,
+                                operation_type: ChangeOperationType::Update,
+                                field_name: Some($field_sql.to_string()),
+                                old_value: serde_json::to_string(&old.$field_name).ok(),
+                                new_value: serde_json::to_string(&new_entity.$field_name).ok(),
+                                timestamp: now,
+                                user_id: system_user_id,
+                                device_id: device_uuid.clone(),
+                                document_metadata: None,
+                                sync_batch_id: None,
+                                processed_at: None,
+                                sync_error: None,
+                            };
+                            self.log_change_entry(entry, &mut tx).await?;
+                        }
+                    };
+                }
+                log_if_changed!(compression_status, "compression_status");
+                log_if_changed!(compressed_file_path, "compressed_file_path");
+                log_if_changed!(compressed_size_bytes, "compressed_size_bytes");
+            }
+            tx.commit().await.map_err(DbError::from)?;
             Ok(())
         }
     }
@@ -644,22 +819,60 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         status: BlobSyncStatus,
         blob_key: Option<&str>,
     ) -> DomainResult<()> {
-         let result = query(
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let old_entity = self.find_by_id_with_tx(id, &mut tx).await.ok();
+        let now = Utc::now();
+        let system_user_id = Uuid::nil(); // System operation
+        let device_uuid: Option<Uuid> = None;
+
+        let result = query(
             "UPDATE media_documents SET blob_status = ?, blob_key = ?, updated_at = ? WHERE id = ?"
         )
         .bind(status.as_str())
         .bind(blob_key)
-        .bind(Utc::now().to_rfc3339())
+        .bind(now.to_rfc3339())
         .bind(id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(DbError::from)?;
 
-         if result.rows_affected() == 0 {
-             Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id))
-         } else {
-             Ok(())
-         }
+        if result.rows_affected() == 0 {
+            let _ = tx.rollback().await;
+            Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id))
+        } else {
+            // Log changes if old entity was found
+            if let Some(old) = old_entity {
+                let new_entity = self.find_by_id_with_tx(id, &mut tx).await?;
+
+                macro_rules! log_if_changed {
+                    ($field_name:ident, $field_sql:literal) => {
+                        if old.$field_name != new_entity.$field_name {
+                            let entry = ChangeLogEntry {
+                                operation_id: Uuid::new_v4(),
+                                entity_table: Self::entity_name().to_string(),
+                                entity_id: id,
+                                operation_type: ChangeOperationType::Update,
+                                field_name: Some($field_sql.to_string()),
+                                old_value: serde_json::to_string(&old.$field_name).ok(),
+                                new_value: serde_json::to_string(&new_entity.$field_name).ok(),
+                                timestamp: now,
+                                user_id: system_user_id,
+                                device_id: device_uuid.clone(),
+                                document_metadata: None,
+                                sync_batch_id: None,
+                                processed_at: None,
+                                sync_error: None,
+                            };
+                            self.log_change_entry(entry, &mut tx).await?;
+                        }
+                    };
+                }
+                log_if_changed!(blob_status, "blob_status");
+                log_if_changed!(blob_key, "blob_key");
+            }
+            tx.commit().await.map_err(DbError::from)?;
+            Ok(())
+        }
     }
 
     async fn update_sync_priority(
@@ -672,8 +885,34 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             return Ok(0);
         }
 
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+
+        // --- Fetch Old Priorities ---
+        let id_strings: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+        let select_query = format!(
+            "SELECT id, sync_priority FROM media_documents WHERE id IN ({})",
+            vec!["?"; ids.len()].join(", ")
+        );
+        let mut select_builder = query_as::<_, (String, Option<i64>)>(&select_query); // Priority is nullable
+        for id_str in &id_strings {
+            select_builder = select_builder.bind(id_str);
+        }
+        let old_priorities: std::collections::HashMap<Uuid, SyncPriority> = select_builder
+            .fetch_all(&mut *tx) // Use the transaction
+            .await.map_err(DbError::from)?
+            .into_iter()
+            .filter_map(|(id_str, prio_int_opt)| {
+                match Uuid::parse_str(&id_str) {
+                    Ok(id) => Some((id, prio_int_opt.map(SyncPriority::from).unwrap_or(SyncPriority::Normal))),
+                    Err(_) => None, // Skip rows with invalid UUIDs
+                }
+            }).collect();
+
         let now = Utc::now().to_rfc3339();
+        let now_dt = Utc::now(); // For logging
         let user_id_str = auth.user_id.to_string();
+        let user_uuid = auth.user_id;
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
         let priority_val = priority as i64; // Store as integer
 
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
@@ -693,8 +932,36 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             query_builder = query_builder.bind(id.to_string());
         }
 
-        let result = query_builder.execute(&self.pool).await.map_err(DbError::from)?;
-        Ok(result.rows_affected())
+        let result = query_builder.execute(&mut *tx).await.map_err(DbError::from)?;
+        let rows_affected = result.rows_affected();
+
+        // --- Log Changes ---
+        for id in ids {
+            if let Some(old_priority) = old_priorities.get(id) {
+                if *old_priority != priority { // Compare SyncPriority enums
+                    let entry = ChangeLogEntry {
+                        operation_id: Uuid::new_v4(),
+                        entity_table: Self::entity_name().to_string(),
+                        entity_id: *id,
+                        operation_type: ChangeOperationType::Update,
+                        field_name: Some("sync_priority".to_string()),
+                        old_value: serde_json::to_string(&(*old_priority as i64)).ok(), // Log old priority as i64
+                        new_value: serde_json::to_string(&priority_val).ok(), // Log new priority as i64
+                        timestamp: now_dt,
+                        user_id: user_uuid,
+                        device_id: device_uuid.clone(),
+                        document_metadata: None,
+                        sync_batch_id: None,
+                        processed_at: None,
+                        sync_error: None,
+                    };
+                    self.log_change_entry(entry, &mut tx).await?;
+                }
+            }
+        }
+
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(rows_affected)
     }
 
     /// Internal method to find by ID within a transaction
@@ -742,6 +1009,42 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         final_related_id: Uuid,
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<u64> {
+        let now_dt = Utc::now(); // For logging
+        // Assume this is called by a system user or within a context without specific user/device
+        let system_user_id = Uuid::nil(); // Placeholder system user ID
+        let device_uuid: Option<Uuid> = None;
+
+        // --- Fetch IDs and old paths/state BEFORE updating ---
+        let temp_id_str_fetch = temp_related_id.to_string();
+        struct OldDocState {
+            id: Uuid,
+            file_path: Option<String>,
+            compressed_file_path: Option<String>,
+        }
+        let old_docs = query_as::<_, (String, Option<String>, Option<String>)>(r#"
+            SELECT id, file_path, compressed_file_path
+            FROM media_documents
+            WHERE temp_related_id = ? AND related_table = ?
+            "#)
+            .bind(&temp_id_str_fetch)
+            .bind(TEMP_RELATED_TABLE)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(DbError::from)?
+            .into_iter()
+            .filter_map(|(id_str, fp, cfp)| {
+                Uuid::parse_str(&id_str).ok().map(|id| OldDocState {
+                    id,
+                    file_path: fp,
+                    compressed_file_path: cfp,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        if old_docs.is_empty() {
+            return Ok(0); // No documents to link or log
+        }
+
         // First query to count how many documents will be updated
         let temp_id_str_count = temp_related_id.to_string(); // Store in variable
         let count = sqlx::query!(
@@ -790,59 +1093,124 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         })?
         .rows_affected() as u64;
 
-        // Update file paths if needed (if files were stored in a temp directory)
-        // This assumes a structure like "/base_path/TEMP/<temp_id>/file" -> "/base_path/<table_name>/<final_id>/file"
-        // Adjust the REPLACE patterns based on your actual storage structure.
-        let temp_id_str = temp_related_id.to_string();
-        let final_id_str = final_related_id.to_string();
-        
-        let temp_path_segment = format!("/TEMP/{}", temp_id_str);
-        let final_path_segment = format!("/{}/{}", final_related_table, final_id_str);
-        
-        // Update file_path
-        let _ = sqlx::query!(
-            r#"
-            UPDATE media_documents
-            SET file_path = REPLACE(file_path, ?, ?)
-            WHERE temp_related_id IS NULL -- Only update already linked docs in this TX
-              AND related_id = ? 
-              AND related_table = ?
-              AND file_path LIKE ('%' || ? || '%') -- Ensure we only replace if temp segment exists
-            "#,
-            temp_path_segment, // e.g., "/TEMP/uuid..."
-            final_path_segment, // e.g., "/strategic_goals/uuid..."
-            final_id_str,
-            final_related_table,
-            temp_path_segment // Only update if the path actually contains the temp segment
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| {
-            DomainError::Database(DbError::from(e)) // Simplified error mapping
-        })?;
+        // --- Log Field Changes ---
+        // Fetch new paths after update
+        let ids_to_fetch: Vec<String> = old_docs.iter().map(|d| d.id.to_string()).collect();
+        let query_fetch_new_paths = format!(
+            "SELECT id, file_path, compressed_file_path FROM media_documents WHERE id IN ({})",
+            vec!["?"; ids_to_fetch.len()].join(", ")
+        );
+        let mut new_paths_builder = query_as::<_, (String, Option<String>, Option<String>)>(&query_fetch_new_paths);
+        for id_str in &ids_to_fetch {
+            new_paths_builder = new_paths_builder.bind(id_str);
+        }
+        let new_paths_map: HashMap<Uuid, (Option<String>, Option<String>)> = new_paths_builder
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(DbError::from)?
+            .into_iter()
+            .filter_map(|(id_str, fp, cfp)| Uuid::parse_str(&id_str).ok().map(|id| (id, (fp, cfp))))
+            .collect();
 
-        // Repeat for compressed file paths if they exist
-        let _ = sqlx::query!(
-            r#"
-            UPDATE media_documents
-            SET compressed_file_path = REPLACE(compressed_file_path, ?, ?)
-            WHERE temp_related_id IS NULL -- Only update already linked docs in this TX
-              AND related_id = ? 
-              AND related_table = ? 
-              AND compressed_file_path IS NOT NULL
-              AND compressed_file_path LIKE ('%' || ? || '%') -- Ensure we only replace if temp segment exists
-            "#,
-            temp_path_segment,
-            final_path_segment,
-            final_id_str,
-            final_related_table,
-            temp_path_segment // Only update if the path actually contains the temp segment
-        )
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| {
-            DomainError::Database(DbError::from(e)) // Simplified error mapping
-        })?;
+        for old_doc in old_docs {
+            let new_paths = new_paths_map.get(&old_doc.id);
+            let new_file_path = new_paths.and_then(|(fp, _)| fp.clone());
+            let new_compressed_path = new_paths.and_then(|(_, cfp)| cfp.clone());
+
+            // Log related_id change
+            self.log_change_entry(ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: Self::entity_name().to_string(),
+                entity_id: old_doc.id,
+                operation_type: ChangeOperationType::Update,
+                field_name: Some("related_id".to_string()),
+                old_value: serde_json::to_string(&Option::<Uuid>::None).ok(), // Was implicitly null when temp_related_id was set
+                new_value: serde_json::to_string(&Some(final_related_id)).ok(),
+                timestamp: now_dt,
+                user_id: system_user_id,
+                device_id: device_uuid.clone(),
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            }, tx).await?;
+
+            // Log related_table change
+            self.log_change_entry(ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: Self::entity_name().to_string(),
+                entity_id: old_doc.id,
+                operation_type: ChangeOperationType::Update,
+                field_name: Some("related_table".to_string()),
+                old_value: Some(TEMP_RELATED_TABLE.to_string()),
+                new_value: Some(final_related_table.to_string()),
+                timestamp: now_dt,
+                user_id: system_user_id,
+                device_id: device_uuid.clone(),
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            }, tx).await?;
+
+            // Log temp_related_id change (becoming NULL)
+            self.log_change_entry(ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: Self::entity_name().to_string(),
+                entity_id: old_doc.id,
+                operation_type: ChangeOperationType::Update,
+                field_name: Some("temp_related_id".to_string()),
+                old_value: serde_json::to_string(&Some(temp_related_id)).ok(),
+                new_value: serde_json::to_string(&Option::<Uuid>::None).ok(),
+                timestamp: now_dt,
+                user_id: system_user_id,
+                device_id: device_uuid.clone(),
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            }, tx).await?;
+
+            // Log file_path change if it changed
+            if old_doc.file_path != new_file_path {
+                self.log_change_entry(ChangeLogEntry {
+                    operation_id: Uuid::new_v4(),
+                    entity_table: Self::entity_name().to_string(),
+                    entity_id: old_doc.id,
+                    operation_type: ChangeOperationType::Update,
+                    field_name: Some("file_path".to_string()),
+                    old_value: serde_json::to_string(&old_doc.file_path).ok(),
+                    new_value: serde_json::to_string(&new_file_path).ok(),
+                    timestamp: now_dt,
+                    user_id: system_user_id,
+                    device_id: device_uuid.clone(),
+                    document_metadata: None,
+                    sync_batch_id: None,
+                    processed_at: None,
+                    sync_error: None,
+                }, tx).await?;
+            }
+
+            // Log compressed_file_path change if it changed
+            if old_doc.compressed_file_path != new_compressed_path {
+                self.log_change_entry(ChangeLogEntry {
+                    operation_id: Uuid::new_v4(),
+                    entity_table: Self::entity_name().to_string(),
+                    entity_id: old_doc.id,
+                    operation_type: ChangeOperationType::Update,
+                    field_name: Some("compressed_file_path".to_string()),
+                    old_value: serde_json::to_string(&old_doc.compressed_file_path).ok(),
+                    new_value: serde_json::to_string(&new_compressed_path).ok(),
+                    timestamp: now_dt,
+                    user_id: system_user_id,
+                    device_id: device_uuid.clone(),
+                    document_metadata: None,
+                    sync_batch_id: None,
+                    processed_at: None,
+                    sync_error: None,
+                }, tx).await?;
+            }
+        }
 
         Ok(rows_affected) // Return rows affected by the main linking update
     }
@@ -856,71 +1224,121 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
          compressed_size_bytes: Option<i64>,
          compression_status: Option<CompressionStatus>,
      ) -> DomainResult<()> {
-          let mut sets: Vec<String> = Vec::new();
-          let mut binds: Vec<String> = Vec::new(); // Using String for simplicity
-          let mut binds_i64: HashMap<String, i64> = HashMap::new(); // For integer binds
+          let mut tx = self.pool.begin().await.map_err(DbError::from)?;
 
-          // Use macro to simplify adding updates
-          macro_rules! add_update {
-             ($field:ident, $value:expr, $bind_vec:ident) => {
+          // --- Fetch Old State ---
+          let old_entity = match self.find_by_id_with_tx(document_id, &mut tx).await {
+             Ok(entity) => entity,
+             Err(e) => {
+                 let _ = tx.rollback().await;
+                 return Err(e);
+             }
+         };
+
+         let mut sets: Vec<String> = Vec::new();
+         let mut binds: Vec<String> = Vec::new(); // Using String for simplicity
+         let mut binds_i64: HashMap<String, i64> = HashMap::new(); // For integer binds
+
+         let now = Utc::now(); // For logging and timestamp
+         // Assuming system operation - no specific user/device ID
+         let system_user_id = Uuid::nil();
+         let device_uuid: Option<Uuid> = None;
+
+         // Use macro to simplify adding updates
+         macro_rules! add_update {
+            ($field:ident, $value:expr, $bind_vec:ident) => {
+               if let Some(val) = $value {
+                   sets.push(format!("{} = ?", stringify!($field)));
+                   $bind_vec.push(val.to_string());
+               }
+            };
+             ($field:ident, $value:expr, $bind_map:ident, $type:ty) => {
                 if let Some(val) = $value {
                     sets.push(format!("{} = ?", stringify!($field)));
-                    $bind_vec.push(val.to_string());
+                    $bind_map.insert(stringify!($field).to_string(), val as $type);
                 }
-             };
-              ($field:ident, $value:expr, $bind_map:ident, $type:ty) => {
-                 if let Some(val) = $value {
-                     sets.push(format!("{} = ?", stringify!($field)));
-                     $bind_map.insert(stringify!($field).to_string(), val as $type);
-                 }
-             };
-          }
-
-         // Add fields to update
-         add_update!(file_path, file_path, binds);
-         add_update!(compressed_file_path, compressed_file_path, binds);
-         add_update!(compressed_size_bytes, compressed_size_bytes, binds_i64, i64);
-         if let Some(status) = compression_status {
-             sets.push("compression_status = ?".to_string());
-             binds.push(status.as_str().to_string());
+            };
          }
 
+        // Add fields to update
+        add_update!(file_path, file_path, binds);
+        add_update!(compressed_file_path, compressed_file_path, binds);
+        add_update!(compressed_size_bytes, compressed_size_bytes, binds_i64, i64);
+        if let Some(status) = compression_status {
+            sets.push("compression_status = ?".to_string());
+            binds.push(status.as_str().to_string());
+        }
 
-         if sets.is_empty() {
-             return Ok(()); // Nothing to update
-         }
 
-         // Always update updated_at
-         sets.push("updated_at = ?".to_string());
-         binds.push(Utc::now().to_rfc3339());
-         // Optionally update updated_by_user_id if tracking sync agent ID
-         // sets.push("updated_by_user_id = ?".to_string());
-         // binds.push(SYSTEM_USER_ID.to_string());
+        if sets.is_empty() {
+            return Ok(()); // Nothing to update
+        }
 
-         let query_str = format!("UPDATE media_documents SET {} WHERE id = ?", sets.join(", "));
+        // Always update updated_at
+        sets.push("updated_at = ?".to_string());
+        binds.push(now.to_rfc3339()); // Use captured 'now'
+        // Optionally update updated_by_user_id if tracking sync agent ID
+        // sets.push("updated_by_user_id = ?".to_string());
+        // binds.push(SYSTEM_USER_ID.to_string());
 
-         // Build and execute the query
-         let mut q = query(&query_str);
-         for bind_val in binds { // Bind strings first
-             q = q.bind(bind_val);
-         }
-         // Bind integers (order matters if placeholders are mixed)
-         // Assuming integer placeholders come after string ones based on SET order
-         if let Some(val) = binds_i64.get("compressed_size_bytes") {
-             q = q.bind(val);
-         }
-         // Add binds for other i64 fields if needed
+        let query_str = format!("UPDATE media_documents SET {} WHERE id = ?", sets.join(", "));
 
-         q = q.bind(document_id.to_string()); // Bind the WHERE clause ID
+        // Build and execute the query
+        let mut q = query(&query_str);
+        for bind_val in binds { // Bind strings first
+            q = q.bind(bind_val);
+        }
+        // Bind integers (order matters if placeholders are mixed)
+        // Assuming integer placeholders come after string ones based on SET order
+        if let Some(val) = binds_i64.get("compressed_size_bytes") {
+            q = q.bind(val);
+        }
+        // Add binds for other i64 fields if needed
 
-         let result = q.execute(&self.pool).await.map_err(DbError::from)?;
+        q = q.bind(document_id.to_string()); // Bind the WHERE clause ID
 
-         if result.rows_affected() == 0 {
-             Err(DomainError::EntityNotFound(Self::entity_name().to_string(), document_id))
-         } else {
-             Ok(())
-         }
-     }
+        let result = q.execute(&mut *tx).await.map_err(DbError::from)?;
+
+        if result.rows_affected() == 0 {
+            let _ = tx.rollback().await;
+            Err(DomainError::EntityNotFound(Self::entity_name().to_string(), document_id))
+        } else {
+            // --- Log Field Changes ---
+            let new_entity = self.find_by_id_with_tx(document_id, &mut tx).await?;
+
+            macro_rules! log_if_changed {
+                ($field_name:ident, $field_sql:literal) => {
+                    if old_entity.$field_name != new_entity.$field_name {
+                        let entry = ChangeLogEntry {
+                            operation_id: Uuid::new_v4(),
+                            entity_table: Self::entity_name().to_string(),
+                            entity_id: document_id,
+                            operation_type: ChangeOperationType::Update,
+                            field_name: Some($field_sql.to_string()),
+                            old_value: serde_json::to_string(&old_entity.$field_name).ok(),
+                            new_value: serde_json::to_string(&new_entity.$field_name).ok(),
+                            timestamp: now,
+                            user_id: system_user_id,
+                            device_id: device_uuid.clone(),
+                            document_metadata: None,
+                            sync_batch_id: None,
+                            processed_at: None,
+                            sync_error: None,
+                        };
+                        self.log_change_entry(entry, &mut tx).await?;
+                    }
+                };
+            }
+
+            log_if_changed!(file_path, "file_path");
+            log_if_changed!(compressed_file_path, "compressed_file_path");
+            log_if_changed!(compressed_size_bytes, "compressed_size_bytes");
+            log_if_changed!(compression_status, "compression_status");
+
+            tx.commit().await.map_err(DbError::from)?;
+            Ok(())
+        }
+    }
 }
 
 
@@ -943,12 +1361,13 @@ pub trait DocumentVersionRepository: Send + Sync {
 }
 
 pub struct SqliteDocumentVersionRepository {
-    pool: Pool<Sqlite>
+    pool: Pool<Sqlite>,
+    change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
 }
 
 impl SqliteDocumentVersionRepository {
-    pub fn new(pool: Pool<Sqlite>) -> Self {
-        Self { pool }
+    pub fn new(pool: Pool<Sqlite>, change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>) -> Self {
+        Self { pool, change_log_repo }
     }
     fn map_row(row: DocumentVersionRow) -> DomainResult<DocumentVersion> {
         row.into_entity()
@@ -969,31 +1388,68 @@ impl DocumentVersionRepository for SqliteDocumentVersionRepository {
     ) -> DomainResult<DocumentVersion> {
         let id = Uuid::new_v4();
         let now = Utc::now().to_rfc3339();
+        let now_dt = Utc::now(); // For logging
         let user_id_str = auth.user_id.to_string();
+        let user_uuid = auth.user_id;
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
 
-        query(
-            r#"INSERT INTO document_versions (
-                id, document_id, version_number, file_path, file_size, mime_type, blob_storage_key,
-                created_at, created_by_user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#
-        )
-        .bind(id.to_string())
-        .bind(doc_id.to_string())
-        .bind(version_number)
-        .bind(file_path)
-        .bind(file_size)
-        .bind(mime_type)
-        .bind(blob_key)
-        .bind(&now)
-        .bind(user_id_str) // Use user ID from AuthContext
-        .execute(&self.pool)
-        .await
-        .map_err(DbError::from)?;
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
 
-        // Fetch the created record
-        let row = query_as::<_, DocumentVersionRow>("SELECT * FROM document_versions WHERE id = ?")
-            .bind(id.to_string()).fetch_one(&self.pool).await.map_err(DbError::from)?;
-        Self::map_row(row)
+        let result = async {
+            query(
+                r#"INSERT INTO document_versions (
+                    id, document_id, version_number, file_path, file_size, mime_type, blob_storage_key,
+                    created_at, created_by_user_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+            )
+            .bind(id.to_string())
+            .bind(doc_id.to_string())
+            .bind(version_number)
+            .bind(file_path)
+            .bind(file_size)
+            .bind(mime_type)
+            .bind(blob_key)
+            .bind(&now)
+            .bind(user_id_str) // Use user ID from AuthContext
+            .execute(&mut *tx)
+            .await
+            .map_err(DbError::from)?;
+
+            // Log Create Operation within the transaction
+            let entry = ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: "document_versions".to_string(),
+                entity_id: id,
+                operation_type: ChangeOperationType::Create,
+                field_name: None,
+                old_value: None,
+                new_value: None,
+                timestamp: now_dt,
+                user_id: user_uuid,
+                device_id: device_uuid,
+                document_metadata: None,
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+            self.change_log_repo.create_change_log_with_tx(&entry, &mut tx).await?;
+
+            Ok(id) // Return ID to fetch after commit
+        }.await;
+
+        match result {
+            Ok(created_id) => {
+                tx.commit().await.map_err(DbError::from)?;
+                // Fetch the newly created record outside the transaction
+                let row = query_as::<_, DocumentVersionRow>("SELECT * FROM document_versions WHERE id = ?")
+                   .bind(created_id.to_string()).fetch_one(&self.pool).await.map_err(DbError::from)?;
+                Self::map_row(row)
+            },
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e)
+            }
+        }
     }
 
     async fn find_by_document_id(&self, doc_id: Uuid) -> DomainResult<Vec<DocumentVersion>> {

@@ -2,12 +2,13 @@ use crate::auth::AuthContext;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::document_linking::DocumentLinkable;
-use crate::domains::donor::types::{Donor, NewDonor, UpdateDonor, DonorRow};
+use crate::domains::donor::types::{Donor, NewDonor, UpdateDonor, DonorRow, UserDonorRole, DonorStatsSummary};
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{Pool, Sqlite, Transaction, query, query_as, query_scalar, QueryBuilder};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Trait defining donor repository operations
@@ -35,14 +36,43 @@ pub trait DonorRepository:
 
     async fn find_all(&self, params: PaginationParams) -> DomainResult<PaginatedResult<Donor>>;
 
-    // Add the document reference method
-    async fn set_document_reference(
+    // Add new method signatures here
+    /// Count donors by type
+    async fn count_by_type(&self) -> DomainResult<Vec<(Option<String>, i64)>>;
+
+    /// Count donors by country
+    async fn count_by_country(&self) -> DomainResult<Vec<(Option<String>, i64)>>;
+
+    /// Get aggregate statistics for donors
+    async fn get_donation_stats(&self) -> DomainResult<DonorStatsSummary>;
+
+    /// Find donors by type
+    async fn find_by_type(
         &self,
-        donor_id: Uuid,
-        field_name: &str, // e.g., "donor_agreement"
-        document_id: Uuid,
-        auth: &AuthContext,
-    ) -> DomainResult<()>;
+        donor_type: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>>;
+
+    /// Find donors by country
+    async fn find_by_country(
+        &self,
+        country: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>>;
+
+    /// Find donors with recent donations since a specific date
+    async fn find_with_recent_donations(
+        &self,
+        since_date: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>>;
+
+    /// Find donors created or updated by a specific user
+    async fn find_ids_by_user_role(
+        &self,
+        user_id: Uuid,
+        role: UserDonorRole,
+    ) -> DomainResult<Vec<Uuid>>;
 }
 
 /// SQLite implementation for DonorRepository
@@ -350,44 +380,255 @@ impl DonorRepository for SqliteDonorRepository {
         Ok(PaginatedResult::new(entities, total as u64, params))
     }
 
-    async fn set_document_reference(
+    async fn count_by_type(&self) -> DomainResult<Vec<(Option<String>, i64)>> {
+        let counts = query_as::<_, (Option<String>, i64)>(
+            "SELECT type_, COUNT(*) 
+             FROM donors 
+             WHERE deleted_at IS NULL 
+             GROUP BY type_"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        Ok(counts)
+    }
+
+    async fn count_by_country(&self) -> DomainResult<Vec<(Option<String>, i64)>> {
+        let counts = query_as::<_, (Option<String>, i64)>(
+            "SELECT country, COUNT(*) 
+             FROM donors 
+             WHERE deleted_at IS NULL 
+             GROUP BY country"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        Ok(counts)
+    }
+
+    async fn get_donation_stats(&self) -> DomainResult<DonorStatsSummary> {
+        // Get total donor count
+        let total_donors: i64 = query_scalar(
+            "SELECT COUNT(*) FROM donors WHERE deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Get active donors (those with active fundings)
+        let active_donors: i64 = query_scalar(
+            "SELECT COUNT(DISTINCT d.id) 
+             FROM donors d
+             JOIN project_funding pf ON d.id = pf.donor_id
+             WHERE d.deleted_at IS NULL
+             AND pf.deleted_at IS NULL
+             AND (pf.status = 'Committed' OR pf.status = 'Received')" // Adjust status check as needed
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Get funding amounts
+        // Note: SUM/AVG might return NULL if no matching rows, hence Option<f64>
+        let (total_amount, avg_amount): (Option<f64>, Option<f64>) = query_as(
+            "SELECT SUM(amount), AVG(amount)
+             FROM project_funding
+             WHERE deleted_at IS NULL
+             AND donor_id IN (SELECT id FROM donors WHERE deleted_at IS NULL)"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Get donor counts by type
+        let type_counts = self.count_by_type().await?;
+        let mut donor_count_by_type = HashMap::new();
+        for (type_opt, count) in type_counts {
+            let type_name = type_opt.unwrap_or_else(|| "Unspecified".to_string());
+            donor_count_by_type.insert(type_name, count);
+        }
+
+        // Get donor counts by country
+        let country_counts = self.count_by_country().await?;
+        let mut donor_count_by_country = HashMap::new();
+        for (country_opt, count) in country_counts {
+            let country_name = country_opt.unwrap_or_else(|| "Unspecified".to_string());
+            donor_count_by_country.insert(country_name, count);
+        }
+
+        Ok(DonorStatsSummary {
+            total_donors,
+            active_donors,
+            total_donation_amount: total_amount,
+            avg_donation_amount: avg_amount,
+            donor_count_by_type,
+            donor_count_by_country,
+        })
+    }
+
+    async fn find_by_type(
         &self,
-        donor_id: Uuid,
-        field_name: &str,
-        document_id: Uuid,
-        auth: &AuthContext,
-    ) -> DomainResult<()> {
-        let column_name = format!("{}_ref", field_name);
+        donor_type: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>> {
+        let offset = (params.page - 1) * params.per_page;
 
-        // Validate the field name against Donor metadata
-        if !Donor::field_metadata().iter().any(|m| m.field_name == field_name && m.is_document_reference_only) {
-            return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid document reference field for Donor: {}", field_name))));
-        }
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM donors WHERE type_ = ? AND deleted_at IS NULL"
+        )
+        .bind(donor_type)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
 
-        let now = Utc::now().to_rfc3339();
-        let user_id_str = auth.user_id.to_string();
-        let document_id_str = document_id.to_string();
-        let donor_id_str = donor_id.to_string();
+        // Fetch paginated rows
+        let rows = query_as::<_, DonorRow>(
+            "SELECT * FROM donors WHERE type_ = ? AND deleted_at IS NULL 
+             ORDER BY name ASC LIMIT ? OFFSET ?"
+        )
+        .bind(donor_type)
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
 
-        let mut builder = sqlx::QueryBuilder::new("UPDATE donors SET ");
-        builder.push(&column_name);
-        builder.push(" = ");
-        builder.push_bind(document_id_str);
-        builder.push(", updated_at = ");
-        builder.push_bind(now);
-        builder.push(", updated_by_user_id = ");
-        builder.push_bind(user_id_str);
-        builder.push(" WHERE id = ");
-        builder.push_bind(donor_id_str);
-        builder.push(" AND deleted_at IS NULL");
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Donor>>>()?;
 
-        let query = builder.build();
-        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
 
-        if result.rows_affected() == 0 {
-            Err(DomainError::EntityNotFound("Donor".to_string(), donor_id))
-        } else {
-            Ok(())
-        }
+    async fn find_by_country(
+        &self,
+        country: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM donors WHERE country = ? AND deleted_at IS NULL"
+        )
+        .bind(country)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, DonorRow>(
+            "SELECT * FROM donors WHERE country = ? AND deleted_at IS NULL 
+             ORDER BY name ASC LIMIT ? OFFSET ?"
+        )
+        .bind(country)
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Donor>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    async fn find_with_recent_donations(
+        &self,
+        since_date: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count of donors with recent donations
+        // Ensure date format matches DB storage (assuming TEXT YYYY-MM-DD for start_date)
+        let total: i64 = query_scalar(
+            "SELECT COUNT(DISTINCT d.id) 
+             FROM donors d
+             JOIN project_funding pf ON d.id = pf.donor_id
+             WHERE d.deleted_at IS NULL
+             AND pf.deleted_at IS NULL
+             AND pf.start_date >= ?" // Direct comparison assumes compatible date formats
+        )
+        .bind(since_date)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, DonorRow>(
+            "SELECT DISTINCT d.* 
+             FROM donors d
+             JOIN project_funding pf ON d.id = pf.donor_id
+             WHERE d.deleted_at IS NULL
+             AND pf.deleted_at IS NULL
+             AND pf.start_date >= ?
+             ORDER BY d.name ASC
+             LIMIT ? OFFSET ?"
+        )
+        .bind(since_date)
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Donor>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    async fn find_ids_by_user_role(
+        &self,
+        user_id: Uuid,
+        role: UserDonorRole,
+    ) -> DomainResult<Vec<Uuid>> {
+        let user_id_str = user_id.to_string();
+        
+        // Build query based on role
+        let query_str = match role {
+            UserDonorRole::Created => {
+                "SELECT id FROM donors WHERE created_by_user_id = ? AND deleted_at IS NULL"
+            }
+            UserDonorRole::Updated => {
+                "SELECT id FROM donors WHERE updated_by_user_id = ? AND deleted_at IS NULL"
+            }
+        };
+
+        let id_strings: Vec<String> = query_scalar(query_str)
+            .bind(&user_id_str)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        // Convert string IDs to UUIDs, handling potential errors
+        let ids = id_strings
+            .into_iter()
+            .map(|id_str| Uuid::parse_str(&id_str).map_err(|_| DomainError::InvalidUuid(id_str)))
+            .collect::<Result<Vec<Uuid>, DomainError>>()?;
+
+        Ok(ids)
     }
 }

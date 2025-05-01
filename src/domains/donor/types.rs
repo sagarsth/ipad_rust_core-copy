@@ -6,7 +6,9 @@ use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use std::fmt;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
+use crate::domains::funding::types::ProjectFundingSummary;
+use crate::domains::document::types::MediaDocumentResponse;
 
 /// Donor type enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -417,5 +419,72 @@ impl DonorResponse {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DonorInclude {
     FundingStats,
+    Documents,
+    FundingDetails,
     All,
+}
+
+/// Role a user can have in relation to a donor
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UserDonorRole {
+    Created,    // User created the donor
+    Updated,    // User last updated the donor
+}
+
+/// Summary of aggregate statistics for donors
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonorStatsSummary {
+    pub total_donors: i64,
+    pub active_donors: i64,
+    pub total_donation_amount: Option<f64>,
+    pub avg_donation_amount: Option<f64>,
+    pub donor_count_by_type: HashMap<String, i64>,
+    pub donor_count_by_country: HashMap<String, i64>,
+}
+
+/// Funding statistics for a donor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonorFundingStats {
+    pub active_fundings_count: i64,
+    pub total_fundings_count: i64,
+    pub total_funding_amount: f64,
+    pub active_funding_amount: f64,
+    pub avg_funding_amount: f64,
+    pub largest_funding_amount: f64,
+    pub currency_distribution: HashMap<String, f64>,
+}
+
+/// Donor with detailed funding information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonorWithFundingDetails {
+    pub donor: DonorResponse,
+    pub funding_stats: DonorFundingStats,
+    pub recent_fundings: Vec<ProjectFundingSummary>,
+}
+
+/// Donor with document timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonorWithDocumentTimeline {
+    pub donor: DonorResponse,
+    pub documents_by_month: HashMap<String, Vec<MediaDocumentResponse>>,
+    pub total_document_count: u64,
+}
+
+/// Dashboard statistics for donors
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonorDashboardStats {
+    pub total_donors: i64,
+    pub donors_by_type: HashMap<String, i64>,
+    pub donors_by_country: HashMap<String, i64>,
+    pub recent_donors_count: i64,
+    pub funding_summary: FundingSummaryStats,
+}
+
+/// Funding summary statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundingSummaryStats {
+    pub total_active_fundings: i64,
+    pub total_funding_amount: f64,
+    pub avg_funding_amount: f64,
+    pub funding_by_currency: HashMap<String, f64>,
 }

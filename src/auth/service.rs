@@ -102,8 +102,18 @@ impl AuthService {
     
     /// Verify an access token and create an auth context
     pub async fn verify_token(&self, token: &str) -> ServiceResult<AuthContext> {
-        // Verify token using the jwt module
+        // Verify token signature and standard claims (like expiry)
         let claims = jwt::verify_token(token)?;
+
+        // Check blocklist
+        let is_revoked = self.auth_repo.is_token_revoked(&claims.jti)
+            .await
+            .map_err(|db_err| ServiceError::Domain(DomainError::Database(db_err)))?; // Map DbError to ServiceError
+
+        if is_revoked {
+            log::warn!("Attempted to use revoked token JTI: {}", claims.jti);
+            return Err(ServiceError::Authentication("Token has been revoked".to_string()));
+        }
         
         // Extract necessary information from claims
         let user_id = Uuid::parse_str(&claims.sub)
@@ -165,12 +175,40 @@ impl AuthService {
             .map_err(|_| ServiceError::Authentication("Invalid password".to_string()))
     }
     
-    /// Log out a user (potentially revoking tokens)
+    /// Log out a user (revoking tokens by adding JTI to blocklist)
     pub async fn logout(&self, auth_context: &AuthContext, access_token: &str, refresh_token: Option<&str>) -> ServiceResult<()> {
-        // Use jwt module to attempt revocation (e.g., add to blocklist)
-        let _ = jwt::revoke_token(access_token); // Ignore result for now, as it's a placeholder
+        // Decode access token to get JTI and expiry
+        // We use decode_unverified here as we don't need to check expiry/signature again, just get claims.
+        // If decode fails, we still log the user out but log an error.
+        match jwt::decode_unverified(access_token) {
+            Ok(claims) => {
+                if let Err(e) = self.auth_repo.add_revoked_token(&claims.jti, claims.exp).await {
+                    log::error!("Failed to add access token JTI {} to blocklist: {}", claims.jti, e);
+                }
+            },
+            Err(e) => {
+                 log::error!("Failed to decode access token during logout for user {}: {}", auth_context.user_id, e);
+            }
+        }
+        
+        // Revoke refresh token if provided
         if let Some(rt) = refresh_token {
-             let _ = jwt::revoke_token(rt); // Ignore result for now
+             match jwt::decode_unverified(rt) {
+                 Ok(claims) => {
+                    if let Some(refresh_exp) = claims.refresh_exp {
+                        // Use refresh_exp if available, otherwise fall back to exp (though refresh should always have refresh_exp)
+                        let expiry = refresh_exp;
+                        if let Err(e) = self.auth_repo.add_revoked_token(&claims.jti, expiry).await {
+                            log::error!("Failed to add refresh token JTI {} to blocklist: {}", claims.jti, e);
+                        }
+                    } else {
+                        log::error!("Refresh token missing refresh_exp claim during logout for user {}", auth_context.user_id);
+                    }
+                 },
+                 Err(e) => {
+                    log::error!("Failed to decode refresh token during logout for user {}: {}", auth_context.user_id, e);
+                 }
+             }
         }
         
         // Log the logout action in the database

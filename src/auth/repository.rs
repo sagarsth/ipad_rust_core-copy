@@ -4,6 +4,8 @@ use sqlx::{SqlitePool, query_as};
 use uuid::Uuid;
 use chrono::Utc;
 use async_trait::async_trait;
+use crate::types::UserRole;
+use chrono::DateTime;
 
 #[async_trait]
 pub(crate) trait AuthRepository: Send + Sync {
@@ -11,6 +13,9 @@ pub(crate) trait AuthRepository: Send + Sync {
     async fn update_last_login(&self, user_id: Uuid) -> DbResult<()>;
     async fn log_login_attempt(&self, email: &str, success: bool, user_id: Option<Uuid>, device_id: &str) -> DbResult<()>;
     async fn log_logout(&self, user_id: Uuid, device_id: &str) -> DbResult<()>;
+    async fn add_revoked_token(&self, jti: &str, expiry: i64) -> DbResult<()>;
+    async fn is_token_revoked(&self, jti: &str) -> DbResult<bool>;
+    async fn delete_expired_revoked_tokens(&self) -> DbResult<u64>;
 }
 
 pub(crate) struct SqliteAuthRepository {
@@ -96,5 +101,34 @@ impl AuthRepository for SqliteAuthRepository {
             .map_err(DbError::from)?;
             
         Ok(())
+    }
+
+    async fn add_revoked_token(&self, jti: &str, expiry: i64) -> DbResult<()> {
+        sqlx::query("INSERT OR IGNORE INTO revoked_tokens (jti, expiry) VALUES (?, ?)")
+            .bind(jti)
+            .bind(expiry)
+            .execute(&self.pool)
+            .await
+            .map_err(DbError::from)?; // Ignore potential unique constraint violation if already revoked
+        Ok(())
+    }
+
+    async fn is_token_revoked(&self, jti: &str) -> DbResult<bool> {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM revoked_tokens WHERE jti = ?")
+            .bind(jti)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+        Ok(count > 0)
+    }
+
+    async fn delete_expired_revoked_tokens(&self) -> DbResult<u64> {
+        let now = Utc::now().timestamp();
+        let result = sqlx::query("DELETE FROM revoked_tokens WHERE expiry < ?")
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+        Ok(result.rows_affected())
     }
 }

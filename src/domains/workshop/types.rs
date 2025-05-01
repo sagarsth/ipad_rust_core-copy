@@ -12,7 +12,7 @@ use rust_decimal_macros::dec;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 
 /// Workshop entity - represents a workshop in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -522,6 +522,9 @@ pub enum WorkshopInclude {
     Project,
     Participants,
     Documents,
+    ParticipantDetails,
+    DocumentCounts,
+    BudgetDetails,
     All,
 }
 
@@ -669,4 +672,91 @@ impl WorkshopParticipantRow {
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
         })
     }
+}
+
+// --- New Types Added ---
+
+/// Workshop statistics for dashboard views
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkshopStatistics {
+    pub total_workshops: i64,
+    pub past_workshops: i64,
+    pub upcoming_workshops: i64,
+    pub total_participants: i64,
+    pub avg_participants_per_workshop: f64,
+    pub total_budget: Decimal,
+    pub total_actuals: Decimal,
+    pub avg_budget_variance: Decimal,
+    pub by_location: HashMap<String, i64>,
+    pub by_month: HashMap<String, i64>,
+    pub by_project: HashMap<Uuid, i64>,
+}
+
+/// Workshop with full participant details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkshopWithParticipants {
+    pub workshop: WorkshopResponse,
+    pub participants: Vec<ParticipantDetail>,
+    pub total_participants: i64,
+    pub evaluation_completion_rate: f64,
+}
+
+/// Detailed participant information for workshops
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantDetail {
+    pub id: Uuid,
+    pub name: String,
+    pub gender: Option<String>,
+    pub age_group: Option<String>,
+    pub disability: bool,
+    pub disability_type: Option<String>,
+    pub pre_evaluation: Option<String>,
+    pub post_evaluation: Option<String>,
+    pub evaluation_complete: bool,
+}
+
+/// Participant attendance record
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantAttendance {
+    pub participant_id: Uuid,
+    pub participant_name: String,
+    pub workshops_attended: i64,
+    pub workshops_upcoming: i64,
+    pub evaluation_completion_rate: f64,
+    pub recent_workshops: Vec<WorkshopSummary>,
+}
+
+/// Workshop with document timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkshopWithDocumentTimeline {
+    pub workshop: WorkshopResponse,
+    pub documents_by_category: HashMap<String, Vec<MediaDocumentResponse>>,
+    pub total_document_count: u64,
+}
+
+/// Workshop budget summary
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkshopBudgetSummary {
+    pub workshop_id: Uuid,
+    pub purpose: Option<String>,
+    pub event_date: Option<String>,
+    pub budget: Option<Decimal>,
+    pub actuals: Option<Decimal>,
+    pub variance: Option<Decimal>,
+    pub variance_percentage: Option<Decimal>,
+}
+
+/// Project with workshop metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectWorkshopMetrics {
+    pub project_id: Uuid,
+    pub project_name: String,
+    pub total_workshops: i64,
+    pub completed_workshops: i64,
+    pub upcoming_workshops: i64,
+    pub total_participants: i64,
+    pub total_budget: Decimal,
+    pub total_actuals: Decimal,
+    pub budget_variance: Decimal,
+    pub workshops_by_month: HashMap<String, i64>,
 }

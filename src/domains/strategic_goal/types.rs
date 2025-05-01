@@ -9,6 +9,7 @@ use sqlx::FromRow;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
 use std::collections::{HashSet, HashMap};
 use std::str::FromStr;
+use crate::domains::project::types::ProjectSummary;
 
 /// Role a user can have in relation to a strategic goal
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -44,6 +45,7 @@ pub enum StrategicGoalInclude {
     Documents,
     Status,          // Include status information
     Projects,        // Include related projects
+    ProjectCount,    // New: Include count of related projects
     Activities,      // Include activities (via projects)
     Participants,    // Include participants (via workshops)
     DocumentCounts,  // Include just document counts
@@ -57,9 +59,10 @@ impl FromStr for StrategicGoalInclude {
             "documents" => Ok(Self::Documents),
             "status" => Ok(Self::Status),
             "projects" => Ok(Self::Projects),
+            "projectcount" | "project_count" => Ok(Self::ProjectCount),
             "activities" => Ok(Self::Activities),
             "participants" => Ok(Self::Participants),
-            "document_counts" => Ok(Self::DocumentCounts),
+            "documentcounts" | "document_counts" => Ok(Self::DocumentCounts),
             _ => Err(format!("Unknown include option: {}", s)),
         }
     }
@@ -344,29 +347,34 @@ pub struct StrategicGoalResponse {
     pub sync_priority: SyncPriority,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Vec<MediaDocumentResponse>>,
-    // Add any document error states if needed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub document_upload_errors: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projects: Option<Vec<ProjectSummary>>,
 }
 
 impl From<StrategicGoal> for StrategicGoalResponse {
     fn from(goal: StrategicGoal) -> Self {
-        let progress = goal.progress_percentage(); 
+        let progress = goal.progress_percentage();
         Self {
-            id: goal.id, 
-            objective_code: goal.objective_code.clone(), 
-            outcome: goal.outcome.clone(),
-            kpi: goal.kpi.clone(),
+            id: goal.id,
+            objective_code: goal.objective_code,
+            outcome: goal.outcome,
+            kpi: goal.kpi,
             target_value: goal.target_value,
             actual_value: goal.actual_value,
             progress_percentage: progress,
             status_id: goal.status_id,
-            responsible_team: goal.responsible_team.clone(),
+            responsible_team: goal.responsible_team,
             created_at: goal.created_at.to_rfc3339(),
             updated_at: goal.updated_at.to_rfc3339(),
             sync_priority: goal.sync_priority,
             documents: None,
             document_upload_errors: None,
+            project_count: None,
+            projects: None,
         }
     }
 }

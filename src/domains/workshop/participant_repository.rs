@@ -1,13 +1,16 @@
 use crate::auth::AuthContext;
 use sqlx::{Executor, Pool, Row, Sqlite, Transaction, SqlitePool, query, query_as};
 use crate::domains::workshop::types::{
-    NewWorkshopParticipant, UpdateWorkshopParticipant, WorkshopParticipant, WorkshopParticipantRow, ParticipantSummary
+    NewWorkshopParticipant, UpdateWorkshopParticipant, WorkshopParticipant, WorkshopParticipantRow, ParticipantSummary, ParticipantDetail, WorkshopSummary, ParticipantAttendance
 };
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams}; // Might need pagination later
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Utc, Local}; // Added Local
 use uuid::Uuid;
+use std::collections::HashMap; // Added HashMap
+use crate::change_log::{ChangeLogEntry, ChangeLogRepository, ChangeOperation, EntityType}; // Added Change Log
+use serde_json; // Added serde_json for serialization
 
 /// Trait defining workshop-participant relationship repository operations
 #[async_trait]
@@ -51,6 +54,52 @@ pub trait WorkshopParticipantRepository: Send + Sync {
         participant_id: Uuid,
     ) -> DomainResult<Option<WorkshopParticipant>>;
     
+    /// Find all participants with detailed information for a workshop
+    async fn find_participants_with_details(
+        &self,
+        workshop_id: Uuid,
+    ) -> DomainResult<Vec<ParticipantDetail>>;
+    
+    /// Get evaluation completion counts for a workshop
+    async fn get_evaluation_completion_counts(
+        &self,
+        workshop_id: Uuid,
+    ) -> DomainResult<(i64, i64, i64)>; // (total, pre_eval_count, post_eval_count)
+    
+    /// Find all workshops a participant has attended
+    async fn find_workshops_for_participant(
+        &self,
+        participant_id: Uuid,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<WorkshopSummary>>;
+    
+    /// Get participant attendance metrics
+    async fn get_participant_attendance(
+        &self,
+        participant_id: Uuid,
+    ) -> DomainResult<ParticipantAttendance>;
+    
+    /// Get evaluation statistics for a workshop
+    async fn get_workshop_evaluation_stats(
+        &self,
+        workshop_id: Uuid,
+    ) -> DomainResult<HashMap<String, i64>>; // Map of rating -> count
+    
+    /// Batch add participants to a workshop
+    async fn batch_add_participants(
+        &self,
+        workshop_id: Uuid,
+        participant_ids: &[Uuid],
+        auth: &AuthContext,
+    ) -> DomainResult<Vec<(Uuid, Result<(), DomainError>)>>; // Returns results by participant ID
+    
+    /// Find participants with missing evaluations
+    async fn find_participants_with_missing_evaluations(
+        &self,
+        workshop_id: Uuid,
+        eval_type: &str, // "pre" or "post"
+    ) -> DomainResult<Vec<ParticipantSummary>>;
+    
     // Hard delete might be needed for cleanup or admin tasks
     // async fn hard_delete_relationship(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()>;
 }
@@ -59,11 +108,12 @@ pub trait WorkshopParticipantRepository: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct SqliteWorkshopParticipantRepository {
     pool: SqlitePool,
+    change_log_repo: Box<dyn ChangeLogRepository>, // Added ChangeLog repo
 }
 
 impl SqliteWorkshopParticipantRepository {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, change_log_repo: Box<dyn ChangeLogRepository>) -> Self { // Updated constructor
+        Self { pool, change_log_repo }
     }
 
     fn map_row_to_entity(row: WorkshopParticipantRow) -> DomainResult<WorkshopParticipant> {
@@ -91,6 +141,26 @@ impl SqliteWorkshopParticipantRepository {
             workshop_id // Use one ID for the error, or create a composite key representation
         ))?;
         Self::map_row_to_entity(row)
+    }
+
+    /// Helper to log changes
+    async fn log_change(
+        &self,
+        entity_id: Uuid,
+        operation: ChangeOperation,
+        details: Option<serde_json::Value>,
+        auth: &AuthContext,
+    ) -> DomainResult<()> {
+        let log_entry = ChangeLogEntry {
+            id: Uuid::new_v4(),
+            entity_type: EntityType::WorkshopParticipant, // Specific entity type
+            entity_id,
+            operation,
+            user_id: auth.user_id,
+            timestamp: Utc::now(),
+            details,
+        };
+        self.change_log_repo.log_change(&log_entry).await
     }
 }
 
@@ -161,7 +231,18 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
              .fetch_one(&self.pool)
              .await
              .map_err(DbError::from)?;
-             Self::map_row_to_entity(row)
+             let entity = Self::map_row_to_entity(row)?;
+
+             // Log change
+             let details = serde_json::json!({
+                 "workshop_id": entity.workshop_id,
+                 "participant_id": entity.participant_id,
+                 "pre_evaluation": entity.pre_evaluation,
+                 "post_evaluation": entity.post_evaluation,
+             });
+             self.log_change(entity.id, ChangeOperation::Create, Some(details), auth).await?;
+
+             Ok(entity)
         } else {
              // Link already exists (potentially soft-deleted), try fetching it
              // Or return a specific conflict error
@@ -216,6 +297,19 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
                  Err(e) => Err(e), // Propagate DB error
              }
         } else {
+            // Log change - use the composite key for identification if ID isn't readily available
+            // Or fetch the ID before updating if needed for logging
+            // For simplicity, logging with composite key info if ID is unknown
+             let details = serde_json::json!({
+                 "workshop_id": workshop_id,
+                 "participant_id": participant_id,
+                 "reason": "Soft deleted"
+             });
+             // We don't have the link's specific UUID here easily without another query.
+             // Log against one of the known IDs or a placeholder if necessary.
+             // Using workshop_id as a stand-in entity ID for the log for now.
+             // A better approach might be to fetch the link ID first.
+             self.log_change(workshop_id, ChangeOperation::Delete, Some(details), auth).await?;
             Ok(())
         }
     }
@@ -229,9 +323,15 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
     ) -> DomainResult<WorkshopParticipant> {
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
         
+        // Capture initial state *before* update for comparison (optional, for detailed logging)
+        let initial_state = self.find_link_by_ids_with_tx(workshop_id, participant_id, &mut tx).await;
+        
         let result = async {
              // Fetch the link first to ensure it exists (not soft-deleted)
-             let _current_link = self.find_link_by_ids_with_tx(workshop_id, participant_id, &mut tx).await?;
+             let current_link = match initial_state {
+                 Ok(link) => link,
+                 Err(e) => return Err(e), // Propagate error if fetch failed
+             };
              
              let now = Utc::now();
              let now_str = now.to_rfc3339();
@@ -262,7 +362,7 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
              
              if set_clauses.is_empty() {
                   // No fields to update, just return current state
-                  return Ok(_current_link);
+                  return Ok(current_link);
              }
              
              // Always update main timestamp and user
@@ -296,9 +396,18 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
         }.await;
 
         match result {
-            Ok(link) => {
+            Ok(updated_link) => {
+                // Log change on successful commit
+                let details = serde_json::json!({
+                    "workshop_id": workshop_id,
+                    "participant_id": participant_id,
+                    "updated_fields": update_data, // Log what was attempted to be updated
+                    // Optionally include before/after state if `initial_state` was captured successfully
+                });
+                self.log_change(updated_link.id, ChangeOperation::Update, Some(details), auth).await?;
+                
                 tx.commit().await.map_err(DbError::from)?;
-                Ok(link)
+                Ok(updated_link)
             }
             Err(e) => {
                 let _ = tx.rollback().await;
@@ -315,7 +424,8 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
         let rows = sqlx::query(
             r#"
             SELECT 
-                p.id, p.name, p.gender, p.age_group, p.disability
+                p.id, p.name, p.gender, p.age_group, p.disability,
+                wp.pre_evaluation, wp.post_evaluation -- <-- Also select evaluations
             FROM workshop_participants wp
             JOIN participants p ON wp.participant_id = p.id
             WHERE wp.workshop_id = ? AND wp.deleted_at IS NULL AND p.deleted_at IS NULL
@@ -332,15 +442,16 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
             .into_iter()
             .map(|row| {
                 let id_str: String = row.get("id");
+                let disability_val: i64 = row.get("disability"); // Read as integer
                 Ok(ParticipantSummary {
                     id: Uuid::parse_str(&id_str)
                         .map_err(|_| DomainError::InvalidUuid(id_str))?,
                     name: row.get("name"),
                     gender: row.get("gender"),
                     age_group: row.get("age_group"),
-                    disability: row.get("disability"),
-                    pre_evaluation: None,  // These columns don't exist yet in DB
-                    post_evaluation: None, // These columns don't exist yet in DB
+                    disability: disability_val != 0, // Convert to bool
+                    pre_evaluation: row.get("pre_evaluation"), // <-- Map pre_evaluation
+                    post_evaluation: row.get("post_evaluation"), // <-- Map post_evaluation
                 })
             })
             .collect::<DomainResult<Vec<_>>>()?;
@@ -363,5 +474,441 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
         .map_err(DbError::from)?;
         
         row.map(Self::map_row_to_entity).transpose()
+    }
+
+    async fn find_participants_with_details(
+        &self,
+        workshop_id: Uuid,
+    ) -> DomainResult<Vec<ParticipantDetail>> {
+        let workshop_id_str = workshop_id.to_string();
+        
+        // Join tables to get participant details with evaluation data
+        let rows = sqlx::query(
+            r#"
+            SELECT 
+                p.id, 
+                p.name, 
+                p.gender, 
+                p.age_group, 
+                p.disability,
+                p.disability_type,
+                wp.pre_evaluation,
+                wp.post_evaluation
+            FROM 
+                participants p
+            JOIN 
+                workshop_participants wp ON p.id = wp.participant_id
+            WHERE 
+                wp.workshop_id = ? 
+                AND wp.deleted_at IS NULL 
+                AND p.deleted_at IS NULL
+            ORDER BY 
+                p.name ASC
+            "#
+        )
+        .bind(&workshop_id_str)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Map rows to ParticipantDetail objects
+        let mut details = Vec::new();
+        for row in rows {
+            let id_str: String = row.get("id");
+            let id = Uuid::parse_str(&id_str)
+                .map_err(|_| DomainError::Internal(format!("Invalid UUID format: {}", id_str)))?;
+                
+            let pre_evaluation: Option<String> = row.get("pre_evaluation");
+            let post_evaluation: Option<String> = row.get("post_evaluation");
+            let disability: i64 = row.get("disability");
+            
+            details.push(ParticipantDetail {
+                id,
+                name: row.get("name"),
+                gender: row.get("gender"),
+                age_group: row.get("age_group"),
+                disability: disability != 0,
+                disability_type: row.get("disability_type"),
+                pre_evaluation: pre_evaluation.clone(),
+                post_evaluation: post_evaluation.clone(),
+                evaluation_complete: pre_evaluation.is_some() && post_evaluation.is_some(),
+            });
+        }
+        
+        Ok(details)
+    }
+    
+    async fn get_evaluation_completion_counts(
+        &self,
+        workshop_id: Uuid,
+    ) -> DomainResult<(i64, i64, i64)> {
+        let workshop_id_str = workshop_id.to_string();
+        
+        let counts = query_as::<_, (i64, i64, i64)>(
+            r#"
+            SELECT 
+                COUNT(*) as total,
+                COUNT(CASE WHEN pre_evaluation IS NOT NULL THEN 1 END) as pre_eval_count,
+                COUNT(CASE WHEN post_evaluation IS NOT NULL THEN 1 END) as post_eval_count
+            FROM 
+                workshop_participants
+            WHERE 
+                workshop_id = ? AND deleted_at IS NULL
+            "#
+        )
+        .bind(&workshop_id_str)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        Ok(counts)
+    }
+    
+    async fn find_workshops_for_participant(
+        &self,
+        participant_id: Uuid,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<WorkshopSummary>> {
+        let offset = (params.page - 1) * params.per_page;
+        let participant_id_str = participant_id.to_string();
+        
+        // Get total count
+        let total: i64 = query_scalar(
+            r#"
+            SELECT COUNT(*) 
+            FROM workshop_participants wp
+            JOIN workshops w ON wp.workshop_id = w.id
+            WHERE wp.participant_id = ? 
+            AND wp.deleted_at IS NULL 
+            AND w.deleted_at IS NULL
+            "#
+        )
+        .bind(&participant_id_str)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Fetch workshops with pagination
+        let rows = query(
+            r#"
+            SELECT 
+                w.id, 
+                w.purpose, 
+                w.event_date, 
+                w.location, 
+                w.participant_count
+            FROM 
+                workshop_participants wp
+            JOIN 
+                workshops w ON wp.workshop_id = w.id
+            WHERE 
+                wp.participant_id = ? 
+                AND wp.deleted_at IS NULL 
+                AND w.deleted_at IS NULL
+            ORDER BY 
+                w.event_date DESC
+            LIMIT ? OFFSET ?
+            "#
+        )
+        .bind(&participant_id_str)
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Map results to workshop summaries
+        let mut summaries = Vec::new();
+        for row in rows {
+            let id_str: String = row.get("id");
+            let id = Uuid::parse_str(&id_str)
+                .map_err(|_| DomainError::Internal(format!("Invalid UUID format: {}", id_str)))?;
+                
+            summaries.push(WorkshopSummary {
+                id,
+                purpose: row.get("purpose"),
+                event_date: row.get("event_date"),
+                location: row.get("location"),
+                participant_count: row.get("participant_count"),
+            });
+        }
+        
+        Ok(PaginatedResult::new(
+            summaries,
+            total as u64,
+            params,
+        ))
+    }
+    
+    async fn get_participant_attendance(
+        &self,
+        participant_id: Uuid,
+    ) -> DomainResult<ParticipantAttendance> {
+        let participant_id_str = participant_id.to_string();
+        let today = Local::now().naive_local().date().format("%Y-%m-%d").to_string();
+        
+        // Get participant name
+        let participant_name = query_scalar::<_, String>(
+            "SELECT name FROM participants WHERE id = ? AND deleted_at IS NULL"
+        )
+        .bind(&participant_id_str)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(DbError::from)?
+        .ok_or_else(|| DomainError::EntityNotFound("Participant".to_string(), participant_id))?;
+        
+        // Get attendance stats
+        let (workshops_attended, workshops_upcoming, total_workshops, completed_evals) = 
+            query_as::<_, (i64, i64, i64, i64)>(
+                r#"
+                SELECT 
+                    COUNT(CASE WHEN w.event_date < ? THEN 1 END) as attended,
+                    COUNT(CASE WHEN w.event_date >= ? THEN 1 END) as upcoming,
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN wp.pre_evaluation IS NOT NULL AND wp.post_evaluation IS NOT NULL THEN 1 END) as completed_evals
+                FROM 
+                    workshop_participants wp
+                JOIN 
+                    workshops w ON wp.workshop_id = w.id
+                WHERE 
+                    wp.participant_id = ? 
+                    AND wp.deleted_at IS NULL 
+                    AND w.deleted_at IS NULL
+                "#
+            )
+            .bind(&today)
+            .bind(&today)
+            .bind(&participant_id_str)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+        
+        // Calculate evaluation completion rate
+        let evaluation_completion_rate = if workshops_attended > 0 {
+            (completed_evals as f64 / workshops_attended as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        // Get recent workshops (most recent 3)
+        let recent_workshops = query(
+            r#"
+            SELECT 
+                w.id, 
+                w.purpose, 
+                w.event_date, 
+                w.location, 
+                w.participant_count
+            FROM 
+                workshop_participants wp
+            JOIN 
+                workshops w ON wp.workshop_id = w.id
+            WHERE 
+                wp.participant_id = ? 
+                AND wp.deleted_at IS NULL 
+                AND w.deleted_at IS NULL
+            ORDER BY 
+                w.event_date DESC
+            LIMIT 3
+            "#
+        )
+        .bind(&participant_id_str)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Map to workshop summaries
+        let mut recent_workshop_summaries = Vec::new();
+        for row in recent_workshops {
+            let id_str: String = row.get("id");
+            let id = Uuid::parse_str(&id_str)
+                .map_err(|_| DomainError::Internal(format!("Invalid UUID format: {}", id_str)))?;
+                
+            recent_workshop_summaries.push(WorkshopSummary {
+                id,
+                purpose: row.get("purpose"),
+                event_date: row.get("event_date"),
+                location: row.get("location"),
+                participant_count: row.get("participant_count"),
+            });
+        }
+        
+        Ok(ParticipantAttendance {
+            participant_id,
+            participant_name,
+            workshops_attended,
+            workshops_upcoming,
+            evaluation_completion_rate, // Rate as percentage
+            recent_workshops: recent_workshop_summaries,
+        })
+    }
+
+    async fn get_workshop_evaluation_stats(
+        &self,
+        workshop_id: Uuid,
+    ) -> DomainResult<HashMap<String, i64>> {
+        let workshop_id_str = workshop_id.to_string();
+        // Assuming evaluations are stored as text like '1', '2', '3', '4', '5'
+        // This aggregates counts for pre-evaluations. Adapt if post-eval or other fields needed.
+        let rows = query_as::<_, (Option<String>, i64)>(
+            r#"
+            SELECT 
+                pre_evaluation as rating, 
+                COUNT(*) as count
+            FROM 
+                workshop_participants
+            WHERE 
+                workshop_id = ? 
+                AND deleted_at IS NULL 
+                AND pre_evaluation IS NOT NULL
+            GROUP BY 
+                pre_evaluation
+            "#
+        )
+        .bind(&workshop_id_str)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let mut stats = HashMap::new();
+        for (rating_opt, count) in rows {
+            if let Some(rating) = rating_opt {
+                stats.insert(rating, count);
+            }
+        }
+
+        Ok(stats)
+    }
+
+    async fn batch_add_participants(
+        &self,
+        workshop_id: Uuid,
+        participant_ids: &[Uuid],
+        auth: &AuthContext,
+    ) -> DomainResult<Vec<(Uuid, Result<(), DomainError>)>> {
+        if participant_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let mut results = Vec::new();
+        let workshop_id_str = workshop_id.to_string();
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+
+        for &participant_id in participant_ids {
+            let participant_id_str = participant_id.to_string();
+            let link_id = Uuid::new_v4();
+
+            let insert_result = query(
+                r#"
+                INSERT INTO workshop_participants (
+                    id, workshop_id, participant_id,
+                    pre_evaluation, pre_evaluation_updated_at, pre_evaluation_updated_by,
+                    post_evaluation, post_evaluation_updated_at, post_evaluation_updated_by,
+                    created_at, updated_at, created_by_user_id, updated_by_user_id,
+                    deleted_at, deleted_by_user_id
+                ) VALUES (
+                    ?, ?, ?, 
+                    NULL, NULL, NULL, 
+                    NULL, NULL, NULL, 
+                    ?, ?, ?, ?, 
+                    NULL, NULL
+                ) ON CONFLICT(workshop_id, participant_id) DO UPDATE SET
+                    deleted_at = NULL, -- Undelete if previously deleted
+                    deleted_by_user_id = NULL,
+                    updated_at = excluded.updated_at,
+                    updated_by_user_id = excluded.updated_by_user_id
+                    -- Optionally update evaluations if they were passed in batch, currently NULLed
+                "#,
+            )
+            .bind(link_id.to_string())
+            .bind(&workshop_id_str)
+            .bind(&participant_id_str)
+            .bind(&now_str) // created_at / updated_at for excluded
+            .bind(&now_str)
+            .bind(&user_id_str) // created_by / updated_by for excluded
+            .bind(&user_id_str)
+            .execute(&mut *tx)
+            .await;
+
+            match insert_result {
+                Ok(_) => results.push((participant_id, Ok(()))),
+                Err(sqlx::Error::Database(db_err)) if db_err.message().contains("UNIQUE constraint failed") => {
+                    // This case should theoretically be handled by ON CONFLICT, but check just in case.
+                    results.push((participant_id, Err(DbError::Conflict("Workshop participant link already exists".into()).into())))
+                }
+                Err(e) => results.push((participant_id, Err(DbError::from(e).into()))),
+            }
+        }
+
+        match tx.commit().await {
+            Ok(_) => Ok(results),
+            Err(e) => {
+                // Commit failed, return errors for all as uncertain
+                let commit_error = DbError::Transaction(format!("Commit failed after batch add: {}", e)).into();
+                Ok(participant_ids.iter().map(|&pid| (pid, Err(commit_error.clone()))).collect())
+            }
+        }
+    }
+
+    async fn find_participants_with_missing_evaluations(
+        &self,
+        workshop_id: Uuid,
+        eval_type: &str, // "pre" or "post"
+    ) -> DomainResult<Vec<ParticipantSummary>> {
+        let workshop_id_str = workshop_id.to_string();
+        
+        let condition = match eval_type {
+            "pre" => "wp.pre_evaluation IS NULL",
+            "post" => "wp.post_evaluation IS NULL",
+            _ => return Err(DomainError::Validation(ValidationError::invalid_value(
+                "eval_type", "must be 'pre' or 'post'"
+            ))),
+        };
+
+        let query_str = format!(
+            r#"
+            SELECT 
+                p.id, p.name, p.gender, p.age_group, p.disability,
+                wp.pre_evaluation, wp.post_evaluation
+            FROM workshop_participants wp
+            JOIN participants p ON wp.participant_id = p.id
+            WHERE wp.workshop_id = ? 
+            AND {} 
+            AND wp.deleted_at IS NULL 
+            AND p.deleted_at IS NULL
+            ORDER BY p.name ASC
+            "#,
+            condition
+        );
+
+        let rows = sqlx::query(&query_str)
+            .bind(&workshop_id_str)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        // Map to ParticipantSummary
+        let summaries = rows
+            .into_iter()
+            .map(|row| {
+                let id_str: String = row.get("id");
+                let disability_val: i64 = row.get("disability");
+                Ok(ParticipantSummary {
+                    id: Uuid::parse_str(&id_str)
+                        .map_err(|_| DomainError::InvalidUuid(id_str))?,
+                    name: row.get("name"),
+                    gender: row.get("gender"),
+                    age_group: row.get("age_group"),
+                    disability: disability_val != 0,
+                    pre_evaluation: row.get("pre_evaluation"),
+                    post_evaluation: row.get("post_evaluation"),
+                })
+            })
+            .collect::<DomainResult<Vec<_>>>()?;
+
+        Ok(summaries)
     }
 } 

@@ -2,15 +2,16 @@ use crate::auth::AuthContext;
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::document_linking::DocumentLinkable;
-use crate::domains::livelihood::types::{Livelihood, LivelihoodRow, NewLivelihood, SubsequentGrant, SubsequentGrantRow, UpdateLivelihood, NewSubsequentGrant, UpdateSubsequentGrant};
+use crate::domains::livelihood::types::{Livelihood, LivelihoodRow, NewLivelihood, SubsequentGrant, SubsequentGrantRow, UpdateLivelihood, NewSubsequentGrant, UpdateSubsequentGrant, LivelioodStatsSummary};
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::PaginatedResult;
 use crate::types::PaginationParams;
 use chrono::{DateTime, Utc};
-use sqlx::{Pool, Sqlite, Transaction, query_as, query, Row, QueryBuilder};
+use sqlx::{Pool, Sqlite, Transaction, query_as, query, Row, QueryBuilder, query_scalar};
 use uuid::Uuid;
 use crate::validation::Validate;
 use async_trait::async_trait;
+use std::collections::HashMap;
 
 /// Repository for livelihood entities and their subsequent grants
 #[async_trait]
@@ -71,14 +72,52 @@ pub trait LivehoodRepository:
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Livelihood>>;
 
-    /// Set a document reference for a livelihood
-    async fn set_document_reference(
+    /// Count livelihoods with grants above a certain amount
+    async fn count_by_min_grant_amount(
         &self,
-        livelihood_id: Uuid,
-        field_name: &str, // e.g., "business_plan"
-        document_id: Uuid,
-        auth: &AuthContext,
-    ) -> DomainResult<()>;
+        min_amount: f64,
+    ) -> DomainResult<i64>;
+
+    /// Get livelihood statistics summary
+    async fn get_livelihood_stats(&self) -> DomainResult<LivelioodStatsSummary>;
+
+    /// Find livelihoods with outcome data
+    async fn find_with_outcome(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>>;
+
+    /// Find livelihoods needing outcome tracking
+    async fn find_without_outcome(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>>;
+
+    /// Find livelihoods with multiple subsequent grants
+    async fn find_with_multiple_grants(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>>;
+
+    /// Get document counts for livelihoods
+    async fn get_document_counts(
+        &self,
+        livelihood_ids: &[Uuid],
+    ) -> DomainResult<HashMap<Uuid, i64>>;
+    
+    /// Get total grant amount including subsequent grants
+    async fn get_total_grant_amount(&self, id: Uuid) -> DomainResult<f64>;
+    
+    /// Get outcome status distribution
+    async fn get_outcome_status_distribution(&self) -> DomainResult<HashMap<String, i64>>;
+    
+    /// Find livelihoods by creation date range
+    async fn find_by_date_range(
+        &self,
+        start_date: &str,
+        end_date: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>>;
 }
 
 /// Repository for subsequent grants
@@ -141,6 +180,31 @@ pub trait SubsequentGrantRepository: Send + Sync {
         document_id: Uuid,
         auth: &AuthContext,
     ) -> DomainResult<()>;
+    
+    /// Get total subsequent grant amount for a livelihood
+    async fn get_total_grant_amount(
+        &self,
+        livelihood_id: Uuid,
+    ) -> DomainResult<f64>;
+    
+    /// Get subsequent grant counts by livelihood
+    async fn get_grant_counts_by_livelihood(
+        &self,
+        livelihood_ids: &[Uuid],
+    ) -> DomainResult<HashMap<Uuid, i64>>;
+    
+    /// Find by date range
+    async fn find_by_date_range(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> DomainResult<Vec<SubsequentGrant>>;
+    
+    /// Get monthly grant statistics
+    async fn get_monthly_grant_stats(
+        &self,
+        months_back: i32,
+    ) -> DomainResult<Vec<(String, i64, f64)>>;
 }
 
 /// SQLite implementation of the livelihood repository
@@ -583,45 +647,408 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         self.find_all(params, None, Some(participant_id)).await
     }
 
-    /// Set a document reference for a livelihood
-    async fn set_document_reference(
+    /// Count livelihoods with grants above a certain amount
+    async fn count_by_min_grant_amount(
         &self,
-        livelihood_id: Uuid,
-        field_name: &str, // e.g., "business_plan"
-        document_id: Uuid,
-        auth: &AuthContext,
-    ) -> DomainResult<()> {
-        let column_name = format!("{}_ref", field_name); 
-        
-        // Validate the field name
-        if !Livelihood::field_metadata().iter().any(|m| m.field_name == field_name && m.is_document_reference_only) {
-             return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid document reference field for Livelihood: {}", field_name))));
+        min_amount: f64,
+    ) -> DomainResult<i64> {
+        let count = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM livelihoods 
+             WHERE grant_amount >= ? 
+             AND deleted_at IS NULL"
+        )
+        .bind(min_amount)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        Ok(count)
+    }
+
+    /// Get livelihood statistics summary
+    async fn get_livelihood_stats(&self) -> DomainResult<LivelioodStatsSummary> {
+        // 1. Get basic counts and amounts
+        let (total_livelihoods, total_amount, avg_amount) = query_as::<_, (i64, f64, f64)>(
+            r#"
+            SELECT 
+                COUNT(*) as total,
+                COALESCE(SUM(grant_amount), 0) as total_amount,
+                CASE WHEN COUNT(*) > 0 THEN COALESCE(AVG(grant_amount), 0) ELSE 0 END as avg_amount
+            FROM livelihoods
+            WHERE deleted_at IS NULL
+            "#
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // 2. Get project distribution
+        let project_distribution = query_as::<_, (Option<String>, i64, f64)>(
+            r#"
+            SELECT 
+                p.name as project_name,
+                COUNT(l.id) as livelihood_count,
+                COALESCE(SUM(l.grant_amount), 0) as total_amount
+            FROM livelihoods l
+            LEFT JOIN projects p ON l.project_id = p.id
+            WHERE l.deleted_at IS NULL
+            GROUP BY l.project_id
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // 3. Get subsequent grants stats
+        let (total_subsequent_grants, total_subsequent_amount) = query_as::<_, (i64, f64)>(
+            r#"
+            SELECT 
+                COUNT(*) as total_grants,
+                COALESCE(SUM(amount), 0) as total_amount
+            FROM subsequent_grants
+            WHERE deleted_at IS NULL
+            "#
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // 4. Build the response
+        let mut livelihoods_by_project = HashMap::new();
+        let mut grant_amounts_by_project = HashMap::new();
+
+        for (project_name, count, amount) in project_distribution {
+            let name = project_name.unwrap_or_else(|| "No Project".to_string());
+            livelihoods_by_project.insert(name.clone(), count);
+            grant_amounts_by_project.insert(name, amount);
         }
 
-        let now = Utc::now().to_rfc3339();
-        let user_id_str = auth.user_id.to_string();
-        let document_id_str = document_id.to_string();
+        Ok(LivelioodStatsSummary {
+            total_livelihoods,
+            active_livelihoods: total_livelihoods, // All non-deleted livelihoods are considered active
+            total_grant_amount: total_amount,
+            average_grant_amount: avg_amount,
+            total_subsequent_grants,
+            total_subsequent_grant_amount: total_subsequent_amount,
+            livelihoods_by_project,
+            grant_amounts_by_project,
+        })
+    }
+
+    /// Find livelihoods with outcome data
+    async fn find_with_outcome(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM livelihoods 
+             WHERE outcome IS NOT NULL AND outcome != '' 
+             AND deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, LivelihoodRow>(
+            "SELECT * FROM livelihoods 
+             WHERE outcome IS NOT NULL AND outcome != '' 
+             AND deleted_at IS NULL 
+             ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        )
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Livelihood>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    /// Find livelihoods needing outcome tracking
+    async fn find_without_outcome(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM livelihoods 
+             WHERE (outcome IS NULL OR outcome = '') 
+             AND deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, LivelihoodRow>(
+            "SELECT * FROM livelihoods 
+             WHERE (outcome IS NULL OR outcome = '')
+             AND deleted_at IS NULL 
+             ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        )
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Livelihood>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    /// Find livelihoods with multiple subsequent grants
+    async fn find_with_multiple_grants(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            r#"
+            SELECT COUNT(DISTINCT l.id) 
+            FROM livelihoods l
+            INNER JOIN (
+                SELECT livelihood_id
+                FROM subsequent_grants
+                WHERE deleted_at IS NULL
+                GROUP BY livelihood_id
+                HAVING COUNT(*) > 0
+            ) sg ON l.id = sg.livelihood_id
+            WHERE l.deleted_at IS NULL
+            "#
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, LivelihoodRow>(
+            r#"
+            SELECT l.* 
+            FROM livelihoods l
+            INNER JOIN (
+                SELECT livelihood_id
+                FROM subsequent_grants
+                WHERE deleted_at IS NULL
+                GROUP BY livelihood_id
+                HAVING COUNT(*) > 0
+            ) sg ON l.id = sg.livelihood_id
+            WHERE l.deleted_at IS NULL
+            ORDER BY l.updated_at DESC LIMIT ? OFFSET ?
+            "#
+        )
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Livelihood>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    /// Get document counts for livelihoods
+    async fn get_document_counts(
+        &self,
+        livelihood_ids: &[Uuid],
+    ) -> DomainResult<HashMap<Uuid, i64>> {
+        let mut counts = HashMap::new();
         
-        let mut builder = sqlx::QueryBuilder::new("UPDATE livelihoods SET ");
-        builder.push(&column_name);
-        builder.push(" = ");
-        builder.push_bind(document_id_str);
-        builder.push(", updated_at = ");
-        builder.push_bind(now);
-        builder.push(", updated_by_user_id = ");
-        builder.push_bind(user_id_str);
-        builder.push(" WHERE id = ");
-        builder.push_bind(livelihood_id.to_string());
-        builder.push(" AND deleted_at IS NULL");
-
-        let query = builder.build();
-        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
-
-        if result.rows_affected() == 0 {
-            Err(DomainError::EntityNotFound("Livelihood".to_string(), livelihood_id))
-        } else {
-            Ok(())
+        if livelihood_ids.is_empty() {
+            return Ok(counts);
         }
+
+        // Convert UUIDs to strings for SQL query
+        let id_strings: Vec<String> = livelihood_ids.iter().map(|id| id.to_string()).collect();
+        
+        // Use IN clause with the collected strings
+        let placeholders = id_strings.iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let query_str = format!(
+            r#"
+            SELECT parent_entity_id, COUNT(*) as doc_count
+            FROM media_documents
+            WHERE parent_entity_type = 'livelihoods'
+            AND parent_entity_id IN ({})
+            AND deleted_at IS NULL
+            GROUP BY parent_entity_id
+            "#,
+            placeholders
+        );
+
+        let mut query = sqlx::query(&query_str);
+        
+        // Bind all the ID strings
+        for id in &id_strings {
+            query = query.bind(id);
+        }
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        for row in rows {
+            let id_str: String = row.get("parent_entity_id");
+            let count: i64 = row.get("doc_count");
+            
+            if let Ok(id) = Uuid::parse_str(&id_str) {
+                counts.insert(id, count);
+            }
+        }
+
+        // Ensure all requested IDs have an entry, even if no documents
+        for id in livelihood_ids {
+            counts.entry(*id).or_insert(0);
+        }
+
+        Ok(counts)
+    }
+    
+    async fn get_total_grant_amount(&self, id: Uuid) -> DomainResult<f64> {
+        // Get initial grant amount
+        let initial_amount: f64 = query_scalar(
+            "SELECT COALESCE(grant_amount, 0) FROM livelihoods WHERE id = ? AND deleted_at IS NULL"
+        )
+        .bind(id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Get sum of subsequent grants
+        let subsequent_amount: f64 = query_scalar(
+            "SELECT COALESCE(SUM(amount), 0) FROM subsequent_grants 
+             WHERE livelihood_id = ? AND deleted_at IS NULL"
+        )
+        .bind(id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        Ok(initial_amount + subsequent_amount)
+    }
+    
+    async fn get_outcome_status_distribution(&self) -> DomainResult<HashMap<String, i64>> {
+        let mut distribution = HashMap::new();
+        
+        // No outcome or empty outcome = Not Started
+        let not_started: i64 = query_scalar(
+            "SELECT COUNT(*) FROM livelihoods 
+             WHERE (outcome IS NULL OR outcome = '') 
+             AND deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Has progress1 but no outcome = In Progress
+        let in_progress: i64 = query_scalar(
+            "SELECT COUNT(*) FROM livelihoods 
+             WHERE (progress1 IS NOT NULL AND progress1 != '')
+             AND (outcome IS NULL OR outcome = '')
+             AND deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Has outcome = Completed
+        let completed: i64 = query_scalar(
+            "SELECT COUNT(*) FROM livelihoods 
+             WHERE outcome IS NOT NULL AND outcome != '' 
+             AND deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        distribution.insert("Not Started".to_string(), not_started - in_progress);
+        distribution.insert("In Progress".to_string(), in_progress);
+        distribution.insert("Completed".to_string(), completed);
+        
+        Ok(distribution)
+    }
+    
+    async fn find_by_date_range(
+        &self,
+        start_date: &str,
+        end_date: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM livelihoods 
+             WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)
+             AND deleted_at IS NULL"
+        )
+        .bind(start_date)
+        .bind(end_date)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, LivelihoodRow>(
+            "SELECT * FROM livelihoods 
+             WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)
+             AND deleted_at IS NULL 
+             ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        .bind(start_date)
+        .bind(end_date)
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Livelihood>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
     }
 }
 
@@ -959,5 +1386,156 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         } else {
             Ok(())
         }
+    }
+
+    /// Get total subsequent grant amount for a livelihood
+    async fn get_total_grant_amount(
+        &self,
+        livelihood_id: Uuid,
+    ) -> DomainResult<f64> {
+        let total: f64 = query_scalar(
+            "SELECT COALESCE(SUM(amount), 0) FROM subsequent_grants 
+             WHERE livelihood_id = ? AND deleted_at IS NULL"
+        )
+        .bind(livelihood_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        Ok(total)
+    }
+    
+    async fn get_grant_counts_by_livelihood(
+        &self,
+        livelihood_ids: &[Uuid],
+    ) -> DomainResult<HashMap<Uuid, i64>> {
+        let mut counts = HashMap::new();
+        
+        if livelihood_ids.is_empty() {
+            return Ok(counts);
+        }
+
+        // Convert UUIDs to strings for SQL query
+        let id_strings: Vec<String> = livelihood_ids.iter().map(|id| id.to_string()).collect();
+        
+        // Use IN clause with the collected strings
+        let placeholders = id_strings.iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let query_str = format!(
+            r#"
+            SELECT livelihood_id, COUNT(*) as grant_count
+            FROM subsequent_grants
+            WHERE livelihood_id IN ({})
+            AND deleted_at IS NULL
+            GROUP BY livelihood_id
+            "#,
+            placeholders
+        );
+
+        let mut query = sqlx::query(&query_str);
+        
+        // Bind all the ID strings
+        for id in &id_strings {
+            query = query.bind(id);
+        }
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        for row in rows {
+            let id_str: String = row.get("livelihood_id");
+            let count: i64 = row.get("grant_count");
+            
+            if let Ok(id) = Uuid::parse_str(&id_str) {
+                counts.insert(id, count);
+            }
+        }
+
+        // Ensure all requested IDs have an entry, even if no subsequent grants
+        for id in livelihood_ids {
+            counts.entry(*id).or_insert(0);
+        }
+
+        Ok(counts)
+    }
+    
+    async fn find_by_date_range(
+        &self,
+        start_date: &str,
+        end_date: &str,
+    ) -> DomainResult<Vec<SubsequentGrant>> {
+        let rows = query_as::<_, SubsequentGrantRow>(
+            "SELECT * FROM subsequent_grants 
+             WHERE 
+                (grant_date BETWEEN ? AND ?) OR
+                (DATE(created_at) BETWEEN DATE(?) AND DATE(?))
+             AND deleted_at IS NULL 
+             ORDER BY created_at DESC"
+        )
+        .bind(start_date)
+        .bind(end_date)
+        .bind(start_date)
+        .bind(end_date)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<SubsequentGrant>>>()?;
+
+        Ok(entities)
+    }
+    
+    async fn get_monthly_grant_stats(
+        &self,
+        months_back: i32,
+    ) -> DomainResult<Vec<(String, i64, f64)>> {
+        // Generate date range that includes all months back from current month
+        let query_str = format!(
+            r#"
+            WITH RECURSIVE months(date) AS (
+                SELECT DATE(DATETIME('now', 'start of month', '{} months')) 
+                UNION ALL
+                SELECT DATE(DATETIME(date, '+1 month'))
+                FROM months
+                WHERE date < DATE('now', 'start of month')
+            )
+            SELECT 
+                strftime('%Y-%m', months.date) as month,
+                COUNT(sg.id) as grant_count,
+                COALESCE(SUM(sg.amount), 0) as total_amount
+            FROM months
+            LEFT JOIN subsequent_grants sg ON 
+                (sg.grant_date IS NOT NULL AND strftime('%Y-%m', sg.grant_date) = strftime('%Y-%m', months.date)) OR
+                (sg.grant_date IS NULL AND strftime('%Y-%m', sg.created_at) = strftime('%Y-%m', months.date))
+            WHERE sg.deleted_at IS NULL OR sg.deleted_at IS NULL
+            GROUP BY month
+            ORDER BY month
+            "#,
+            -months_back
+        );
+
+        let rows = sqlx::query(&query_str)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        let mut stats = Vec::new();
+        for row in rows {
+            let month: String = row.get("month");
+            let count: i64 = row.get("grant_count");
+            let amount: f64 = row.get("total_amount");
+            
+            stats.push((month, count, amount));
+        }
+
+        Ok(stats)
     }
 }

@@ -5,9 +5,13 @@ use crate::domains::core::delete_service::{BaseDeleteService, DeleteOptions, Del
 use crate::domains::core::repository::{DeleteResult, FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::permission::Permission;
-use crate::domains::project::repository::ProjectRepository; // Assuming this has create_with_tx
-use crate::domains::project::types::{NewProject, Project, ProjectResponse, UpdateProject, ProjectInclude};
-use crate::domains::strategic_goal::repository::StrategicGoalRepository; // Needed for validation
+use crate::domains::project::repository::ProjectRepository;
+use crate::domains::project::types::{ // Added new types
+    NewProject, Project, ProjectResponse, UpdateProject, ProjectInclude, 
+    ProjectStatistics, ProjectStatusBreakdown, ProjectMetadataCounts, ProjectDocumentReference,
+    ProjectWithDocumentTimeline
+};
+use crate::domains::strategic_goal::repository::StrategicGoalRepository;
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
 use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, ValidationError, DbError};
 use crate::types::{PaginatedResult, PaginationParams};
@@ -16,6 +20,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
 use std::str::FromStr;
+use std::collections::HashMap;
 
 // Import necessary types related to documents and sync/compression
 use crate::domains::document::repository::MediaDocumentRepository;
@@ -95,6 +100,67 @@ pub trait ProjectService: DeleteService<Project> + Send + Sync {
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
     ) -> ServiceResult<Vec<MediaDocumentResponse>>;
+
+    // --- New Methods ---
+    
+    /// Get comprehensive project statistics for dashboard
+    async fn get_project_statistics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<ProjectStatistics>;
+    
+    /// Get project status breakdown
+    async fn get_project_status_breakdown(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<ProjectStatusBreakdown>>;
+    
+    /// Get project metadata counts
+    async fn get_project_metadata_counts(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<ProjectMetadataCounts>;
+    
+    /// Find projects by status
+    async fn find_projects_by_status(
+        &self,
+        status_id: i64,
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>>;
+    
+    /// Find projects by responsible team
+    async fn find_projects_by_responsible_team(
+        &self,
+        team: &str,
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>>;
+    
+    /// Get project with document timeline
+    async fn get_project_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ProjectWithDocumentTimeline>;
+    
+    /// Get project document references
+    async fn get_project_document_references(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<ProjectDocumentReference>>;
+    
+    /// Search projects by name, objective, or outcome
+    async fn search_projects(
+        &self,
+        query: &str,
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>>;
 }
 
 /// Implementation of the project service
@@ -542,23 +608,25 @@ impl ProjectService for ProjectServiceImpl {
         ).await?;
 
         // 5. --- NEW: Update entity reference if it was a document-only field ---
-        if let Some(field_name) = linked_field {
-            if let Some(metadata) = Project::get_field_metadata(&field_name) {
-                if metadata.is_document_reference_only {
-                    self.repo.set_document_reference(
-                        project_id, 
-                        &field_name, // e.g., "proposal_document"
-                        document.id, // The ID of the newly created MediaDocument
-                        auth
-                    ).await?;
-                }
-            }
-        }
+        // REMOVED INCORRECT BLOCK: The document service already handles the linked_field correctly
+        // by storing it in media_documents.field_identifier. No direct update to the
+        // project table is needed or possible according to the schema.
+        // if let Some(field_name) = linked_field {
+        //     if let Some(metadata) = Project::get_field_metadata(&field_name) {
+        //         if metadata.is_document_reference_only {
+        //             self.repo.set_document_reference(
+        //                 project_id,
+        //                 &field_name, // e.g., "proposal_document"
+        //                 document.id, // The ID of the newly created MediaDocument
+        //                 auth
+        //             ).await?;
+        //         }
+        //     }
+        // }
 
         Ok(document)
     }
 
-    // Copied from StrategicGoalService, adapted for Project
     async fn bulk_upload_documents_for_project(
         &self,
         project_id: Uuid,
@@ -569,30 +637,237 @@ impl ProjectService for ProjectServiceImpl {
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
     ) -> ServiceResult<Vec<MediaDocumentResponse>> {
-        // 1. Verify project exists
-        let _project = self.repo.find_by_id(project_id).await
-             .map_err(ServiceError::Domain)?;
+        auth.authorize(Permission::UploadDocuments)?;
 
-        // 2. Check permissions
-        if !auth.has_permission(Permission::UploadDocuments) {
-            return Err(ServiceError::PermissionDenied(
-                "User does not have permission to upload documents".to_string(),
+        let _project = self.repo.find_by_id(project_id).await.map_err(ServiceError::Domain)?;
+
+        let mut results = Vec::new();
+        for (file_data, original_filename) in files {
+            let result = self.document_service.upload_document(
+                auth,
+                file_data,
+                original_filename,
+                title.clone(),
+                document_type_id,
+                project_id,
+                "projects".to_string(),
+                None, // No specific linked field for bulk uploads
+                sync_priority,
+                compression_priority,
+                None, // No transaction needed here, handled by document service
+            ).await?;
+            results.push(result);
+        }
+        Ok(results)
+    }
+
+    // --- New Method Implementations ---
+
+    async fn get_project_statistics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<ProjectStatistics> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Get statistics from repository
+        let statistics = self.repo.get_project_statistics().await
+            .map_err(ServiceError::Domain)?;
+        
+        Ok(statistics)
+    }
+    
+    async fn get_project_status_breakdown(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<ProjectStatusBreakdown>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Get breakdown from repository
+        let breakdown = self.repo.get_project_status_breakdown().await
+            .map_err(ServiceError::Domain)?;
+        
+        Ok(breakdown)
+    }
+    
+    async fn get_project_metadata_counts(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<ProjectMetadataCounts> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Get counts from repository
+        let counts = self.repo.get_project_metadata_counts().await
+            .map_err(ServiceError::Domain)?;
+        
+        Ok(counts)
+    }
+    
+    async fn find_projects_by_status(
+        &self,
+        status_id: i64,
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Find projects by status
+        let paginated_result = self.repo.find_by_status(status_id, params).await
+            .map_err(ServiceError::Domain)?;
+
+        // 3. Convert and enrich each project
+        let mut enriched_items = Vec::new();
+        for project in paginated_result.items {
+            let response = ProjectResponse::from_project(project);
+            let enriched = self.enrich_response(response, include, auth).await?; // Pass auth
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+    
+    async fn find_projects_by_responsible_team(
+        &self,
+        team: &str,
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Find projects by team
+        let paginated_result = self.repo.find_by_responsible_team(team, params).await
+            .map_err(ServiceError::Domain)?;
+
+        // 3. Convert and enrich each project
+        let mut enriched_items = Vec::new();
+        for project in paginated_result.items {
+            let response = ProjectResponse::from_project(project);
+            let enriched = self.enrich_response(response, include, auth).await?; // Pass auth
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+    
+    async fn get_project_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ProjectWithDocumentTimeline> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+        auth.authorize(Permission::ViewDocuments)?;
+
+        // 2. Get the project
+        let project = self.repo.find_by_id(id).await
+            .map_err(ServiceError::Domain)?;
+            
+        let project_response = ProjectResponse::from_project(project);
+        
+        // 3. Get all documents for this project
+        let documents = self.document_service.list_media_documents_by_related_entity(
+            auth,
+            "projects",
+            id,
+            PaginationParams { page: 1, per_page: 100 }, // Use correct field name 'per_page'
+            None,
+        ).await?.items;
+        
+        // 4. Organize documents by type/category
+        let mut documents_by_type: HashMap<String, Vec<MediaDocumentResponse>> = HashMap::new();
+        let mut total_document_count = 0;
+        
+        for doc in documents {
+            // Use field_identifier if available, otherwise use a default category
+            let document_type: String = match &doc.field_identifier {
+                Some(field) => field.clone(), // Clone here for owned String
+                None => "General".to_string(), // Also creates owned String
+            };
+            
+            documents_by_type
+                .entry(document_type) // Using owned String is fine
+                .or_insert_with(Vec::new)
+                .push(doc);
+            total_document_count += 1;
+        }
+        
+        // 5. Create and return combined response
+        Ok(ProjectWithDocumentTimeline {
+            project: project_response,
+            documents_by_type,
+            total_document_count: total_document_count as u64,
+        })
+    }
+    
+    async fn get_project_document_references(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<ProjectDocumentReference>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Verify project exists
+        let _project = self.repo.find_by_id(id).await
+            .map_err(ServiceError::Domain)?;
+            
+        // 3. Get document references from repository
+        let references = self.repo.get_project_document_references(id).await
+            .map_err(ServiceError::Domain)?;
+            
+        Ok(references)
+    }
+    
+    async fn search_projects(
+        &self,
+        query: &str,
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Validate query length
+        if query.trim().len() < 2 {
+            return Err(ServiceError::Domain(
+                DomainError::Validation(ValidationError::custom("Search query must be at least 2 characters"))
             ));
         }
 
-        // 3. Delegate to document service
-        let documents = self.document_service.bulk_upload_documents(
-            auth,
-            files,
-            title,
-            document_type_id,
-            project_id,
-            "projects".to_string(), // Correct entity type
-            sync_priority,
-            compression_priority,
-            None, // No temp ID for direct uploads
-        ).await?;
+        // 3. Search projects
+        let paginated_result = self.repo.search_projects(query, params).await
+            .map_err(ServiceError::Domain)?;
 
-        Ok(documents)
+        // 4. Convert and enrich each project
+        let mut enriched_items = Vec::new();
+        for project in paginated_result.items {
+            let response = ProjectResponse::from_project(project);
+            let enriched = self.enrich_response(response, include, auth).await?; // Pass auth
+            enriched_items.push(enriched);
+        }
+
+        // 5. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
     }
 }

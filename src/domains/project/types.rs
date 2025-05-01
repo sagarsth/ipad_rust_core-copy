@@ -7,7 +7,7 @@ use sqlx::FromRow;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::types::SyncPriority;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 
 /// Project entity - represents a project in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,11 +249,13 @@ pub struct ProjectSummary {
 
 impl From<Project> for ProjectSummary {
     fn from(project: Project) -> Self {
+        // Clone String fields to avoid partial move
+        let status_name = project.status_name().to_string();
         Self {
             id: project.id,
             name: project.name.clone(),
             status_id: project.status_id,
-            status_name: project.status_name().to_string(),
+            status_name,
             responsible_team: project.responsible_team.clone(),
         }
     }
@@ -274,16 +276,19 @@ pub struct StrategicGoalSummary {
     pub outcome: Option<String>,
 }
 
-/// Enum to specify related data to include in Project responses
+/// Expanded ProjectInclude options
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectInclude {
-    StrategicGoal,
-    Status,
-    CreatedBy,
-    ActivityCount,
-    WorkshopCount,
-    Documents,
-    All,
+    StrategicGoal,       // Already existing
+    Status,              // Already existing
+    CreatedBy,           // Already existing
+    ActivityCount,       // Already existing
+    WorkshopCount,       // Already existing
+    Documents,           // Already existing
+    DocumentReferences,  // Include document reference fields
+    ActivityTimeline,    // Include recent activities
+    StatusDetails,       // Include detailed status information
+    All,                 // Already existing
 }
 
 /// ProjectResponse DTO - used for API responses
@@ -371,4 +376,80 @@ impl ProjectResponse {
         self.documents = Some(documents);
         self
     }
+}
+
+/// Project statistics for dashboard views
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectStatistics {
+    pub total_projects: i64,
+    pub by_status: HashMap<String, i64>,
+    pub by_strategic_goal: HashMap<String, i64>,
+    pub by_responsible_team: HashMap<String, i64>,
+    pub document_count: i64,
+}
+
+/// Project status breakdown for reporting
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectStatusBreakdown {
+    pub status_id: i64,
+    pub status_name: String,
+    pub count: i64,
+    pub percentage: f64,
+}
+
+/// Project with document timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectWithDocumentTimeline {
+    pub project: ProjectResponse,
+    pub documents_by_type: HashMap<String, Vec<MediaDocumentResponse>>,
+    pub total_document_count: u64,
+}
+
+/// Project metadata counts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMetadataCounts {
+    pub projects_by_team: HashMap<String, i64>,
+    pub projects_by_status: HashMap<String, i64>,
+    pub projects_by_goal: HashMap<String, i64>,
+}
+
+/// Extended status information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtendedStatusInfo {
+    pub id: i64,
+    pub value: String,
+    pub color_code: String,
+    pub description: Option<String>,
+    pub sort_order: i64,
+}
+
+/// Project activity timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectActivitySummary {
+    pub project_id: Uuid,
+    pub project_name: String,
+    pub activities: Vec<ProjectActivity>,
+    pub last_updated: DateTime<Utc>,
+}
+
+/// Single project activity entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectActivity {
+    pub timestamp: DateTime<Utc>,
+    pub user_id: Uuid,
+    pub username: Option<String>,
+    pub action_type: String,
+    pub field_name: Option<String>,
+    pub description: String,
+}
+
+/// Document reference summary for a project
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectDocumentReference {
+    pub field_name: String,
+    pub display_name: String,
+    pub document_id: Option<Uuid>,
+    pub filename: Option<String>,
+    pub upload_date: Option<DateTime<Utc>>,
+    pub file_size: Option<u64>,
 }

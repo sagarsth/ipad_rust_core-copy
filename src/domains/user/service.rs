@@ -6,17 +6,23 @@ use crate::types::Permission;
 use crate::validation::Validate;
 use uuid::Uuid;
 use std::sync::Arc;
+use crate::domains::core::delete_service::{DeleteService, DeleteOptions};
+use crate::domains::core::repository::DeleteResult;
+use crate::domains::core::delete_service::DeleteServiceRepository;
+use crate::domains::core::repository::HardDeletable;
+use crate::domains::core::repository::SoftDeletable;
 
 /// Service for user-related operations
 pub struct UserService {
     user_repo: Arc<dyn UserRepository>,
     auth_service: Arc<AuthService>,
+    delete_service: Arc<dyn DeleteService<User>>,
 }
 
 impl UserService {
     /// Create a new user service
-    pub fn new(user_repo: Arc<dyn UserRepository>, auth_service: Arc<AuthService>) -> Self {
-        Self { user_repo, auth_service }
+    pub fn new(user_repo: Arc<dyn UserRepository>, auth_service: Arc<AuthService>, delete_service: Arc<dyn DeleteService<User>>) -> Self {
+        Self { user_repo, auth_service, delete_service }
     }
     
     /// Get a user by ID
@@ -130,17 +136,28 @@ impl UserService {
             ));
         }
         
-        // Hard delete user in repository
-        self.user_repo.hard_delete(id, auth)
-            .await
-            .map_err(|e| match e {
-                DomainError::DependentRecordsExist { dependencies, .. } => {
-                    ServiceError::DependenciesPreventDeletion(dependencies)
-                },
-                other => ServiceError::Domain(other)
-            })?;
-            
-        Ok(())
+        // Use DeleteService
+        let options = DeleteOptions {
+            allow_hard_delete: true,
+            fallback_to_soft_delete: false,
+            force: false,
+        };
+
+        match self.delete_service.delete(id, auth, options).await {
+            Ok(DeleteResult::HardDeleted) => Ok(()),
+            Ok(DeleteResult::SoftDeleted { dependencies }) => {
+                log::warn!("User {} was soft-deleted unexpectedly during hard delete attempt due to dependencies: {:?}", id, dependencies);
+                Err(ServiceError::DependenciesPreventDeletion(dependencies))
+            }
+            Ok(DeleteResult::DependenciesPrevented { dependencies }) => {
+                Err(ServiceError::DependenciesPreventDeletion(dependencies))
+            }
+            Err(e @ DomainError::EntityNotFound(_, entity_id)) => {
+                log::warn!("Attempted to delete non-existent user {}", entity_id);
+                Err(ServiceError::Domain(DomainError::EntityNotFound("User".to_string(), entity_id)))
+            }
+            Err(e) => Err(ServiceError::Domain(e)),
+        }
     }
     
     /// Check if email is unique

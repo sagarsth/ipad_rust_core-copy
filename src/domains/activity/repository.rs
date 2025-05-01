@@ -1,15 +1,19 @@
 use crate::auth::AuthContext;
-use sqlx::{Executor, Row, Sqlite, Transaction, SqlitePool};
+use sqlx::{Executor, Row, Sqlite, Transaction, SqlitePool, QueryBuilder};
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::activity::types::{NewActivity, Activity, ActivityRow, UpdateActivity};
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
-use crate::types::{PaginatedResult, PaginationParams};
+use crate::types::{PaginatedResult, PaginationParams, SyncPriority};
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{query, query_as, query_scalar};
 use uuid::Uuid;
+use std::sync::Arc;
+use serde_json;
+use crate::domains::sync::repository::ChangeLogRepository;
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
 
 /// Trait defining activity repository operations
 #[async_trait]
@@ -45,25 +49,18 @@ pub trait ActivityRepository: DeleteServiceRepository<Activity> + Send + Sync {
         project_id: Uuid,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Activity>>;
-
-    async fn set_document_reference(
-        &self,
-        activity_id: Uuid,
-        field_name: &str,
-        document_id: Uuid,
-        auth: &AuthContext,
-    ) -> DomainResult<()>;
 }
 
 /// SQLite implementation for ActivityRepository
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SqliteActivityRepository {
     pool: SqlitePool,
+    change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
 }
 
 impl SqliteActivityRepository {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>) -> Self {
+        Self { pool, change_log_repo }
     }
 
     fn map_row_to_entity(row: ActivityRow) -> DomainResult<Activity> {
@@ -71,7 +68,10 @@ impl SqliteActivityRepository {
             .map_err(|e| DomainError::Internal(format!("Failed to map row to entity: {}", e)))
     }
 
-    // Helper to find by ID within a transaction
+    fn entity_name(&self) -> &'static str {
+        "activities"
+    }
+
     async fn find_by_id_with_tx<'t>(
         &self,
         id: Uuid,
@@ -87,6 +87,14 @@ impl SqliteActivityRepository {
         .ok_or_else(|| DomainError::EntityNotFound("Activity".to_string(), id))?;
 
         Self::map_row_to_entity(row)
+    }
+
+    async fn log_change_entry<'t>(
+        &self,
+        entry: ChangeLogEntry,
+        tx: &mut Transaction<'t, Sqlite>,
+    ) -> DomainResult<()> {
+        self.change_log_repo.create_change_log_with_tx(&entry, tx).await
     }
 }
 
@@ -114,16 +122,19 @@ impl SoftDeletable for SqliteActivityRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
-        let now = Utc::now().to_rfc3339();
-        let deleted_by = auth.user_id.to_string();
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let user_id = auth.user_id;
+        let user_id_str = user_id.to_string();
+     
         
         let result = query(
             "UPDATE activities SET deleted_at = ?, deleted_by_user_id = ? WHERE id = ? AND deleted_at IS NULL"
         )
-        .bind(now)
-        .bind(deleted_by)
+        .bind(now_str)
+        .bind(user_id_str)
         .bind(id.to_string())
-        .execute(&mut **tx) 
+        .execute(&mut **tx)
         .await
         .map_err(DbError::from)?;
 
@@ -158,7 +169,7 @@ impl HardDeletable for SqliteActivityRepository {
     async fn hard_delete_with_tx(
         &self,
         id: Uuid,
-        _auth: &AuthContext, 
+        auth: &AuthContext,
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
         let result = query("DELETE FROM activities WHERE id = ?")
@@ -220,7 +231,9 @@ impl ActivityRepository for SqliteActivityRepository {
         let id = Uuid::new_v4();
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        let user_id_str = auth.user_id.to_string();
+        let user_id = auth.user_id; // Get Uuid directly
+        let user_id_str = user_id.to_string();
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
         let project_id_str = new_activity.project_id.map(|id| id.to_string());
 
         query(
@@ -252,6 +265,25 @@ impl ActivityRepository for SqliteActivityRepository {
         .await
         .map_err(DbError::from)?;
 
+        // Log Create Operation
+        let entry = ChangeLogEntry {
+            operation_id: Uuid::new_v4(),
+            entity_table: self.entity_name().to_string(),
+            entity_id: id,
+            operation_type: ChangeOperationType::Create,
+            field_name: None,
+            old_value: None,
+            new_value: None,
+            timestamp: now, // Use DateTime<Utc>
+            user_id: user_id,
+            device_id: device_uuid,
+            document_metadata: None,
+            sync_batch_id: None,
+            processed_at: None,
+            sync_error: None,
+        };
+        self.log_change_entry(entry, tx).await?; // Add log call here
+
         self.find_by_id_with_tx(id, tx).await
     }
 
@@ -281,79 +313,107 @@ impl ActivityRepository for SqliteActivityRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<Activity> {
-        let _current_activity = self.find_by_id_with_tx(id, tx).await?;
+        // Fetch old state first
+        let old_entity = self.find_by_id_with_tx(id, tx).await?;
 
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        let user_id_str = auth.user_id.to_string();
+        let user_id = auth.user_id;
+        let user_id_str = user_id.to_string();
+        let id_str = id.to_string();
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
 
-        let mut set_clauses = Vec::new();
-        let mut params: Vec<Option<String>> = Vec::new();
+        let mut builder = QueryBuilder::new("UPDATE activities SET ");
+        let mut separated = builder.separated(", ");
+        let mut fields_updated = false;
 
-        macro_rules! add_lww_update {
-            ($field:ident, $value:expr, string) => {
-                if let Some(val) = $value {
-                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
-                    params.push(Some(val.to_string()));
-                    params.push(Some(now_str.clone()));
-                    params.push(Some(user_id_str.clone()));
+        macro_rules! add_lww {
+            ($field_name:ident, $field_sql:literal, $value:expr) => {
+                if let Some(val) = $value { // Check if update DTO contains field
+                    separated.push(concat!($field_sql, " = "));
+                    separated.push_bind_unseparated(val.clone()); // Bind value
+                    separated.push(concat!(" ", $field_sql, "_updated_at = "));
+                    separated.push_bind_unseparated(now_str.clone()); // Bind timestamp
+                    separated.push(concat!(" ", $field_sql, "_updated_by = "));
+                    separated.push_bind_unseparated(user_id_str.clone()); // Bind user
+                    fields_updated = true; // Mark SQL update needed
                 }
             };
-             ($field:ident, $value:expr, numeric) => {
-                 if let Some(val) = $value {
-                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
-                    params.push(Some(val.to_string()));
-                    params.push(Some(now_str.clone()));
-                    params.push(Some(user_id_str.clone()));
-                 }
-             };
-             ($field:ident, $value:expr, optional_uuid) => {
-                if let Some(opt_val) = $value {
-                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
-                    params.push(opt_val.map(|id| id.to_string()));
-                    params.push(Some(now_str.clone()));
-                    params.push(Some(user_id_str.clone()));
+            // Variant for Option<Uuid> like project_id
+            ($field_name:ident, $field_sql:literal, $value:expr, uuid_opt) => {
+                if let Some(opt_val) = $value { // Check if update DTO contains field (even if inner value is None)
+                    let val_str = opt_val.map(|id| id.to_string());
+                    separated.push(concat!($field_sql, " = "));
+                    separated.push_bind_unseparated(val_str); // Bind Option<String>
+                    // FK changes don't have specific LWW columns in schema, rely on main updated_at
+                    fields_updated = true; // Mark SQL update needed
                 }
             };
         }
-        
-        add_lww_update!(project_id, &update_data.project_id, optional_uuid);
-        add_lww_update!(description, &update_data.description, string);
-        add_lww_update!(kpi, &update_data.kpi, string);
-        add_lww_update!(target_value, &update_data.target_value, numeric);
-        add_lww_update!(actual_value, &update_data.actual_value, numeric);
-        add_lww_update!(status_id, &update_data.status_id, numeric);
 
-        set_clauses.push("updated_at = ?".to_string());
-        params.push(Some(now_str.clone()));
-        set_clauses.push("updated_by_user_id = ?".to_string());
-        params.push(Some(user_id_str.clone()));
-        
-        if set_clauses.len() <= 2 { 
-             return Ok(_current_activity);
+        // Apply updates using macros
+        add_lww!(project_id, "project_id", &update_data.project_id, uuid_opt);
+        add_lww!(description, "description", &update_data.description.as_ref());
+        add_lww!(kpi, "kpi", &update_data.kpi.as_ref());
+        add_lww!(target_value, "target_value", &update_data.target_value.as_ref());
+        add_lww!(actual_value, "actual_value", &update_data.actual_value.as_ref());
+        add_lww!(status_id, "status_id", &update_data.status_id.as_ref());
+
+        if !fields_updated {
+            return Ok(old_entity); // No fields present in DTO
         }
 
-        let query_str = format!(
-            "UPDATE activities SET {} WHERE id = ? AND deleted_at IS NULL",
-            set_clauses.join(", ")
-        );
-        
-        let mut query_builder = query(&query_str);
-        for param in params {
-            query_builder = query_builder.bind(param);
-        }
-        query_builder = query_builder.bind(id.to_string());
+        // Always update main timestamps
+        separated.push("updated_at = ");
+        separated.push_bind_unseparated(now_str.clone());
+        separated.push("updated_by_user_id = ");
+        separated.push_bind_unseparated(user_id_str.clone());
 
-        let result = query_builder
-            .execute(&mut **tx)
-            .await
-            .map_err(DbError::from)?;
-
+        // Finalize and Execute SQL
+        builder.push(" WHERE id = ");
+        builder.push_bind(id_str);
+        builder.push(" AND deleted_at IS NULL");
+        let query = builder.build();
+        let result = query.execute(&mut **tx).await.map_err(DbError::from)?;
         if result.rows_affected() == 0 {
-            return Err(DomainError::EntityNotFound("Activity".to_string(), id));
+            return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
         }
+
+        // Fetch New State & Log Field Changes
+        let new_entity = self.find_by_id_with_tx(id, tx).await?;
+
+        macro_rules! log_if_changed {
+            ($field_name:ident, $field_sql:literal) => {
+                if old_entity.$field_name != new_entity.$field_name {
+                    let entry = ChangeLogEntry {
+                        operation_id: Uuid::new_v4(),
+                        entity_table: self.entity_name().to_string(),
+                        entity_id: id,
+                        operation_type: ChangeOperationType::Update,
+                        field_name: Some($field_sql.to_string()),
+                        old_value: serde_json::to_string(&old_entity.$field_name).ok(),
+                        new_value: serde_json::to_string(&new_entity.$field_name).ok(),
+                        timestamp: now,
+                        user_id: user_id,
+                        device_id: device_uuid.clone(),
+                        document_metadata: None,
+                        sync_batch_id: None,
+                        processed_at: None,
+                        sync_error: None,
+                    };
+                    self.log_change_entry(entry, tx).await?;
+                }
+            };
+        }
+
+        log_if_changed!(project_id, "project_id");
+        log_if_changed!(description, "description");
+        log_if_changed!(kpi, "kpi");
+        log_if_changed!(target_value, "target_value");
+        log_if_changed!(actual_value, "actual_value");
+        log_if_changed!(status_id, "status_id");
         
-        self.find_by_id_with_tx(id, tx).await
+        Ok(new_entity)
     }
 
     async fn find_by_project_id(
@@ -392,45 +452,5 @@ impl ActivityRepository for SqliteActivityRepository {
             total as u64,
             params,
         ))
-    }
-
-    async fn set_document_reference(
-        &self,
-        activity_id: Uuid,
-        field_name: &str,
-        document_id: Uuid,
-        auth: &AuthContext,
-    ) -> DomainResult<()> {
-        let column_name = format!("{}_ref", field_name); 
-        
-        if !Activity::field_metadata().iter().any(|m| m.field_name == field_name && m.is_document_reference_only) {
-             return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid document reference field for Activity: {}", field_name))));
-        }
-
-        let now = Utc::now().to_rfc3339();
-        let user_id_str = auth.user_id.to_string();
-        let document_id_str = document_id.to_string();
-        let activity_id_str = activity_id.to_string();
-        
-        let mut builder = sqlx::QueryBuilder::new("UPDATE activities SET ");
-        builder.push(&column_name);
-        builder.push(" = ");
-        builder.push_bind(document_id_str);
-        builder.push(", updated_at = ");
-        builder.push_bind(now);
-        builder.push(", updated_by_user_id = ");
-        builder.push_bind(user_id_str);
-        builder.push(" WHERE id = ");
-        builder.push_bind(activity_id_str);
-        builder.push(" AND deleted_at IS NULL");
-
-        let query = builder.build();
-        let result = query.execute(&self.pool).await.map_err(DbError::from)?;
-
-        if result.rows_affected() == 0 {
-            Err(DomainError::EntityNotFound("Activity".to_string(), activity_id))
-        } else {
-            Ok(())
-        }
     }
 }

@@ -1,5 +1,5 @@
 use crate::auth::AuthContext;
-use sqlx::{SqlitePool, Transaction, Sqlite};
+use sqlx::{SqlitePool, Transaction, Sqlite, query_scalar, query_as};
 use crate::domains::core::dependency_checker::DependencyChecker;
 use crate::domains::core::delete_service::{BaseDeleteService, DeleteOptions, DeleteService, DeleteServiceRepository};
 use crate::domains::core::repository::{DeleteResult, FindById, HardDeletable, SoftDeletable};
@@ -7,12 +7,15 @@ use crate::domains::permission::Permission;
 use crate::domains::funding::repository::ProjectFundingRepository;
 use crate::domains::funding::types::{
     ProjectFunding, NewProjectFunding, ProjectFundingResponse, UpdateProjectFunding, 
-    FundingInclude, ProjectSummary, DonorSummary
+    FundingInclude, ProjectSummary,
+    FundingStatsSummary, DonorFundingMetrics, DonorWithFundingDetails, 
+    FundingWithDocumentTimeline
 };
 use crate::domains::project::repository::ProjectRepository;
 use crate::domains::donor::repository::DonorRepository;
+use crate::domains::donor::types::DonorSummary;
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
-use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, ValidationError};
+use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, ValidationError, DbError};
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::validation::Validate;
 use async_trait::async_trait;
@@ -23,6 +26,8 @@ use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
 use crate::domains::core::document_linking::DocumentLinkable;
+use chrono::{self, Datelike};
+use std::collections::HashMap;
 
 /// Trait defining project funding service operations
 #[async_trait]
@@ -115,6 +120,63 @@ pub trait ProjectFundingService: DeleteService<ProjectFunding> + Send + Sync {
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
     ) -> ServiceResult<Vec<MediaDocumentResponse>>;
+
+    /// Get comprehensive funding statistics for dashboard
+    async fn get_funding_statistics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<FundingStatsSummary>;
+
+    /// Get distribution of fundings by status
+    async fn get_status_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+
+    /// Get distribution of fundings by currency
+    async fn get_currency_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, f64>>;
+
+    /// Find fundings by status
+    async fn find_fundings_by_status(
+        &self,
+        status: &str,
+        params: PaginationParams,
+        include: Option<&[FundingInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectFundingResponse>>;
+
+    /// Get upcoming fundings (future start date)
+    async fn get_upcoming_fundings(
+        &self,
+        params: PaginationParams,
+        include: Option<&[FundingInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectFundingResponse>>;
+
+    /// Get overdue fundings (past end date, not completed)
+    async fn get_overdue_fundings(
+        &self,
+        params: PaginationParams,
+        include: Option<&[FundingInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectFundingResponse>>;
+
+    /// Get detailed funding information for a donor
+    async fn get_donor_funding_details(
+        &self,
+        donor_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorWithFundingDetails>;
+
+    /// Get funding with document timeline
+    async fn get_funding_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<FundingWithDocumentTimeline>;
 }
 
 /// Implementation of the project funding service
@@ -244,6 +306,7 @@ impl ProjectFundingServiceImpl {
                             id: donor.id,
                             name: donor.name,
                             type_: donor.type_,
+                            country: donor.country,
                         });
                     },
                     Err(_) => {
@@ -616,5 +679,362 @@ impl ProjectFundingService for ProjectFundingServiceImpl {
         }
         
         Ok(results)
+    }
+
+    // === NEW METHOD IMPLEMENTATIONS ===
+
+    async fn get_funding_statistics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<FundingStatsSummary> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewFunding)?;
+
+        // 2. Get today's date for calculations
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+        // 3. Get basic funding summary from repo
+        let (active_count, total_amount, avg_amount, funding_by_currency) = 
+            self.repo.get_funding_summary().await?;
+
+        // 4. Get status distribution from repo
+        let status_counts = self.repo.count_by_status().await?;
+        let mut funding_by_status = HashMap::new();
+        for (status_opt, count) in status_counts {
+            let status_name = status_opt.unwrap_or_else(|| "Unspecified".to_string());
+            funding_by_status.insert(status_name, count);
+        }
+
+        // 5. Calculate completed, upcoming, and overdue counts
+        let completed_count = funding_by_status
+            .get("completed")
+            .copied()
+            .unwrap_or(0);
+        
+        // Directly query counts for upcoming/overdue as it might be simpler than complex repo calls
+        // Ensure necessary imports: use sqlx::query_scalar;
+        
+        // Get upcoming count (start date in future, not cancelled)
+        let upcoming_count: i64 = query_scalar(
+            "SELECT COUNT(*) FROM project_funding 
+             WHERE deleted_at IS NULL 
+             AND (status IS NULL OR status != 'cancelled')
+             AND start_date > ?"
+        )
+        .bind(&today)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ServiceError::Domain(DbError::from(e).into()))?;
+
+        // Get overdue count (end date in past, not completed/cancelled)
+        let overdue_count: i64 = query_scalar(
+            "SELECT COUNT(*) FROM project_funding 
+             WHERE deleted_at IS NULL 
+             AND (status IS NULL OR status NOT IN ('completed', 'cancelled'))
+             AND end_date < ?"
+        )
+        .bind(&today)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ServiceError::Domain(DbError::from(e).into()))?;
+
+        // 6. Get active funding amount (query similar to get_funding_summary but just SUM)
+        let active_amount: f64 = query_scalar(
+            "SELECT COALESCE(SUM(amount), 0) FROM project_funding 
+             WHERE deleted_at IS NULL 
+             AND (status IS NULL OR status NOT IN ('completed', 'cancelled'))
+             AND (start_date IS NULL OR DATE(start_date) <= ?)
+             AND (end_date IS NULL OR DATE(end_date) >= ?)"
+        )
+        .bind(&today)
+        .bind(&today)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ServiceError::Domain(DbError::from(e).into()))?;
+
+        // 7. Calculate total funding count
+        let total_count: i64 = query_scalar(
+            "SELECT COUNT(*) FROM project_funding WHERE deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ServiceError::Domain(DbError::from(e).into()))?;
+
+        // 8. Create and return the summary
+        Ok(FundingStatsSummary {
+            total_fundings: total_count,
+            active_fundings: active_count,
+            completed_fundings: completed_count,
+            upcoming_fundings: upcoming_count,
+            overdue_fundings: overdue_count,
+            total_funding_amount: total_amount,
+            active_funding_amount: active_amount,
+            average_funding_amount: avg_amount,
+            funding_by_currency,
+            funding_by_status,
+        })
+    }
+
+    async fn get_status_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewFunding)?;
+
+        // 2. Get status counts from repository
+        let status_counts = self.repo.count_by_status().await?;
+
+        // 3. Convert to user-friendly HashMap
+        let mut distribution = HashMap::new();
+        for (status_opt, count) in status_counts {
+            let status_name = match status_opt {
+                Some(s) => s,
+                None => "Unspecified".to_string(),
+            };
+            distribution.insert(status_name, count);
+        }
+
+        Ok(distribution)
+    }
+
+    async fn get_currency_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, f64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewFunding)?;
+
+        // 2. Get amounts by currency using repo method
+        // Simpler to use repo method if it calculates sums
+        let (_, _, _, funding_by_currency) = self.repo.get_funding_summary().await?;
+
+        Ok(funding_by_currency)
+    }
+
+    async fn find_fundings_by_status(
+        &self,
+        status: &str,
+        params: PaginationParams,
+        include: Option<&[FundingInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectFundingResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewFunding)?;
+
+        // 2. Find fundings by status
+        let paginated_result = self.repo.find_by_status(status, params).await?;
+
+        // 3. Convert and enrich each funding
+        let mut enriched_items = Vec::new();
+        for funding in paginated_result.items {
+            let response = ProjectFundingResponse::from(funding);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn get_upcoming_fundings(
+        &self,
+        params: PaginationParams,
+        include: Option<&[FundingInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectFundingResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewFunding)?;
+
+        // 2. Find upcoming fundings
+        let paginated_result = self.repo.find_upcoming_fundings(params).await?;
+
+        // 3. Convert and enrich each funding
+        let mut enriched_items = Vec::new();
+        for funding in paginated_result.items {
+            let response = ProjectFundingResponse::from(funding);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn get_overdue_fundings(
+        &self,
+        params: PaginationParams,
+        include: Option<&[FundingInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectFundingResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewFunding)?;
+
+        // 2. Find overdue fundings
+        let paginated_result = self.repo.find_overdue_fundings(params).await?;
+
+        // 3. Convert and enrich each funding
+        let mut enriched_items = Vec::new();
+        for funding in paginated_result.items {
+            let response = ProjectFundingResponse::from(funding);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn get_donor_funding_details(
+        &self,
+        donor_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorWithFundingDetails> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewFunding)?;
+        auth.authorize(Permission::ViewDonors)?;
+
+        // 2. Verify donor exists and get summary
+        let donor = self.donor_repo.find_by_id(donor_id).await?;
+        let donor_summary = DonorSummary {
+            id: donor.id,
+            name: donor.name.clone(), // Clone name here
+            type_: donor.type_, // Clone Option<String>
+            country: donor.country, // Clone Option<String>
+        };
+
+        // 3. Get detailed funding statistics from repo
+        let (
+            _active_count, // We calculate status distribution separately
+            _total_count, // We calculate project_count separately
+            total_amount,
+            active_amount,
+            avg_amount,
+            _largest_amount, // Not used in DonorFundingMetrics
+            currency_distribution
+        ) = self.repo.get_donor_detailed_funding_stats(donor_id).await?;
+
+        // 4. Get status distribution for this donor
+        let status_distribution = query_as::<_, (Option<String>, i64)>(
+            "SELECT status, COUNT(*) 
+             FROM project_funding 
+             WHERE donor_id = ? 
+             AND deleted_at IS NULL 
+             GROUP BY status"
+        )
+        .bind(donor_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| ServiceError::Domain(DbError::from(e).into()))?;
+
+        let mut funding_by_status = HashMap::new();
+        for (status_opt, count) in status_distribution {
+            let status_name = status_opt.unwrap_or_else(|| "Unspecified".to_string());
+            funding_by_status.insert(status_name, count);
+        }
+
+        // 5. Count distinct projects for this donor
+        let project_count: i64 = query_scalar(
+            "SELECT COUNT(DISTINCT project_id) 
+             FROM project_funding 
+             WHERE donor_id = ? 
+             AND deleted_at IS NULL"
+        )
+        .bind(donor_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| ServiceError::Domain(DbError::from(e).into()))?;
+
+        // 6. Get recent fundings from repo
+        let recent_fundings = self.repo.get_recent_fundings_for_donor(donor_id, 5).await?;
+
+        // 7. Create metrics
+        let metrics = DonorFundingMetrics {
+            donor_id,
+            donor_name: donor.name, // Use cloned name
+            total_funded_amount: total_amount,
+            active_funded_amount: active_amount,
+            project_count,
+            average_grant_size: avg_amount,
+            funding_by_currency: currency_distribution,
+            funding_by_status,
+        };
+
+        // 8. Create and return the detailed response
+        Ok(DonorWithFundingDetails {
+            donor: donor_summary,
+            metrics,
+            recent_fundings,
+        })
+    }
+
+    async fn get_funding_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<FundingWithDocumentTimeline> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewFunding)?;
+        auth.authorize(Permission::ViewDocuments)?;
+
+        // 2. Get the funding and enrich it
+        let funding = self.repo.find_by_id(id).await?;
+        let funding_response = self.enrich_response(
+            ProjectFundingResponse::from(funding),
+            Some(&[FundingInclude::Project, FundingInclude::Donor]),
+            auth
+        ).await?;
+
+        // 3. Get all documents for this funding
+        let docs_result = self.document_service.list_media_documents_by_related_entity(
+            auth,
+            "project_funding", // Correct entity type
+            id,
+            PaginationParams { page: 1, per_page: 100 }, // Use struct literal, adjust limits
+            None,
+        ).await?;
+        
+        let documents = docs_result.items;
+        let total_document_count = docs_result.total;
+
+        // 4. Organize documents by month (YYYY-MM)
+        let mut documents_by_month: HashMap<String, Vec<MediaDocumentResponse>> = HashMap::new();
+        // Ensure Datelike is imported: use chrono::Datelike;
+        for doc in documents {
+            // Parse the created_at string into a DateTime<Utc>
+            if let Ok(created_at_dt) = chrono::DateTime::parse_from_rfc3339(&doc.created_at) {
+                let utc_dt = created_at_dt.with_timezone(&chrono::Utc);
+                // Format as YYYY-MM for grouping using Datelike methods
+                let month_key = format!("{}-{:02}", utc_dt.year(), utc_dt.month());
+                
+                documents_by_month
+                    .entry(month_key)
+                    .or_default()
+                    .push(doc);
+            } else {
+                eprintln!("Failed to parse document created_at date: {}", doc.created_at);
+                // Optionally group unparsable dates under a special key, e.g., "unknown_date"
+                // documents_by_month.entry("unknown_date".to_string()).or_default().push(doc);
+            }
+        }
+
+        // 5. Create and return the response
+        Ok(FundingWithDocumentTimeline {
+            funding: funding_response,
+            documents_by_month,
+            total_document_count, // Use total from pagination result
+        })
     }
 }

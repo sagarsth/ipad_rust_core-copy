@@ -486,23 +486,8 @@ impl ActivityService for ActivityServiceImpl {
             linked_field.clone(), // Pass validated field
             sync_priority,
             compression_priority,
-            None, 
+            None, // No temp ID needed here
         ).await?;
-
-        // 5. --- NEW: Update entity reference if it was a document-only field ---
-        if let Some(field_name) = linked_field {
-            if let Some(metadata) = Activity::get_field_metadata(&field_name) { // Use Activity::...
-                if metadata.is_document_reference_only {
-                    // Call repo method to update the specific reference column
-                    self.repo.set_document_reference(
-                        activity_id, 
-                        &field_name, // e.g., "photo_evidence"
-                        document.id, // The ID of the newly created MediaDocument
-                        auth
-                    ).await?;
-                }
-            }
-        }
 
         Ok(document)
     }

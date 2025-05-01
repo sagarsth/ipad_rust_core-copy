@@ -6,7 +6,9 @@ use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use std::fmt;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
+use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::donor::types::DonorSummary;
 
 /// Funding status enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,14 +499,6 @@ pub struct ProjectSummary {
     pub name: String,
 }
 
-/// DonorSummary for funding responses
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DonorSummary {
-    pub id: Uuid,
-    pub name: String,
-    pub type_: Option<String>,
-}
-
 /// ProjectFundingResponse DTO - used for API responses
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectFundingResponse {
@@ -580,5 +574,65 @@ impl ProjectFundingResponse {
 pub enum FundingInclude {
     Project,
     Donor,
+    Documents,
+    DocumentCounts,
     All,
+}
+
+/// Funding stats summary for dashboards and reports
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundingStatsSummary {
+    pub total_fundings: i64,
+    pub active_fundings: i64,
+    pub completed_fundings: i64,
+    pub upcoming_fundings: i64,
+    pub overdue_fundings: i64,
+    pub total_funding_amount: f64,
+    pub active_funding_amount: f64,
+    pub average_funding_amount: f64,
+    pub funding_by_currency: HashMap<String, f64>,
+    pub funding_by_status: HashMap<String, i64>,
+}
+
+/// Project funding summary for use in donor responses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectFundingSummary {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub project_name: String,
+    pub amount: Option<f64>,
+    pub currency: String,
+    pub status: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub is_active: bool,
+}
+
+/// Funding summary metrics for donors
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonorFundingMetrics {
+    pub donor_id: Uuid,
+    pub donor_name: String,
+    pub total_funded_amount: f64,
+    pub active_funded_amount: f64,
+    pub project_count: i64,
+    pub average_grant_size: f64,
+    pub funding_by_currency: HashMap<String, f64>,
+    pub funding_by_status: HashMap<String, i64>,
+}
+
+/// Detailed funding information for a donor
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DonorWithFundingDetails {
+    pub donor: DonorSummary,
+    pub metrics: DonorFundingMetrics,
+    pub recent_fundings: Vec<ProjectFundingSummary>,
+}
+
+/// Funding with document timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FundingWithDocumentTimeline {
+    pub funding: ProjectFundingResponse, // Assume ProjectFundingResponse exists
+    pub documents_by_month: HashMap<String, Vec<MediaDocumentResponse>>,
+    pub total_document_count: u64,
 }

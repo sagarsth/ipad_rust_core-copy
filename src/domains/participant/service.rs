@@ -6,7 +6,11 @@ use crate::domains::core::repository::{DeleteResult, FindById, HardDeletable, So
 use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::permission::Permission;
 use crate::domains::participant::repository::ParticipantRepository;
-use crate::domains::participant::types::{NewParticipant, Participant, ParticipantResponse, UpdateParticipant, ParticipantInclude};
+use crate::domains::participant::types::{
+    NewParticipant, Participant, ParticipantResponse, UpdateParticipant, ParticipantInclude,
+    ParticipantDemographics, WorkshopSummary, LivelihoodSummary, ParticipantWithWorkshops,
+    ParticipantWithLivelihoods, ParticipantWithDocumentTimeline
+};
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
 use crate::domains::document::service::DocumentService;
 use crate::domains::document::types::MediaDocumentResponse;
@@ -16,8 +20,10 @@ use crate::errors::{DbError, DomainError, DomainResult, ServiceError, ServiceRes
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::validation::Validate;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
+use chrono::Datelike;
 
 /// Trait defining participant service operations
 #[async_trait]
@@ -88,9 +94,101 @@ pub trait ParticipantService: DeleteService<Participant> + Send + Sync {
         auth: &AuthContext,
     ) -> ServiceResult<(ParticipantResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)>;
     
-    // Add methods for workshop/livelihood management if needed
-    // async fn add_participant_to_workshop(...)
-    // async fn remove_participant_from_workshop(...)
+    /// Get comprehensive participant demographics for dashboards
+    async fn get_participant_demographics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantDemographics>;
+
+    /// Get distribution of participants by gender
+    async fn get_gender_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+
+    /// Get distribution of participants by age group
+    async fn get_age_group_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+
+    /// Get distribution of participants by location
+    async fn get_location_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+
+    /// Get distribution of participants by disability status
+    async fn get_disability_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+
+    /// Find participants by gender
+    async fn find_participants_by_gender(
+        &self,
+        gender: &str,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>>;
+
+    /// Find participants by age group
+    async fn find_participants_by_age_group(
+        &self,
+        age_group: &str,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>>;
+
+    /// Find participants by location
+    async fn find_participants_by_location(
+        &self,
+        location: &str,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>>;
+
+    /// Find participants by disability status
+    async fn find_participants_by_disability(
+        &self,
+        has_disability: bool,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>>;
+
+    /// Get participants for a specific workshop
+    async fn get_workshop_participants(
+        &self,
+        workshop_id: Uuid,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>>;
+
+    /// Get participant with detailed workshop information
+    async fn get_participant_with_workshops(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantWithWorkshops>;
+
+    /// Get participant with detailed livelihood information
+    async fn get_participant_with_livelihoods(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantWithLivelihoods>;
+
+    /// Get participant with document timeline
+    async fn get_participant_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantWithDocumentTimeline>;
 }
 
 /// Implementation of the participant service
@@ -458,21 +556,6 @@ impl ParticipantService for ParticipantServiceImpl {
             None, 
         ).await?;
 
-        // 5. --- NEW: Update entity reference if it was a document-only field ---
-        if let Some(field_name) = linked_field {
-            if let Some(metadata) = Participant::get_field_metadata(&field_name) {
-                if metadata.is_document_reference_only {
-                    // Call repo method to update the specific reference column
-                    self.repo.set_document_reference(
-                        participant_id, 
-                        &field_name, // e.g., "profile_photo"
-                        document.id, // The ID of the newly created MediaDocument
-                        auth
-                    ).await?;
-                }
-            }
-        }
-
         Ok(document)
     }
 
@@ -572,5 +655,363 @@ impl ParticipantService for ParticipantServiceImpl {
         // 7. Convert to Response DTO and return with document results
         let response = ParticipantResponse::from(created_participant);
         Ok((response, document_results))
+    }
+
+    async fn get_participant_demographics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantDemographics> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Get demographics from repository
+        let demographics = self.repo.get_participant_demographics().await?;
+        
+        Ok(demographics)
+    }
+
+    async fn get_gender_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Get gender counts from repository
+        let gender_counts = self.repo.count_by_gender().await?;
+
+        // 3. Convert to a more user-friendly HashMap
+        let mut distribution = HashMap::new();
+        for (gender_opt, count) in gender_counts {
+            let gender_name = match gender_opt {
+                Some(g) => g,
+                None => "Unspecified".to_string(),
+            };
+            distribution.insert(gender_name, count);
+        }
+
+        Ok(distribution)
+    }
+
+    async fn get_age_group_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Get age group counts from repository
+        let age_group_counts = self.repo.count_by_age_group().await?;
+
+        // 3. Convert to a more user-friendly HashMap
+        let mut distribution = HashMap::new();
+        for (age_group_opt, count) in age_group_counts {
+            let age_group_name = match age_group_opt {
+                Some(a) => a,
+                None => "Unspecified".to_string(),
+            };
+            distribution.insert(age_group_name, count);
+        }
+
+        Ok(distribution)
+    }
+
+    async fn get_location_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Get location counts from repository
+        let location_counts = self.repo.count_by_location().await?;
+
+        // 3. Convert to a more user-friendly HashMap
+        let mut distribution = HashMap::new();
+        for (location_opt, count) in location_counts {
+            let location_name = match location_opt {
+                Some(l) => l,
+                None => "Unspecified".to_string(),
+            };
+            distribution.insert(location_name, count);
+        }
+
+        Ok(distribution)
+    }
+
+    async fn get_disability_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Get disability counts from repository
+        let disability_counts = self.repo.count_by_disability().await?;
+
+        // 3. Convert to a more user-friendly HashMap
+        let mut distribution = HashMap::new();
+        for (has_disability, count) in disability_counts {
+            let disability_name = if has_disability { "Yes" } else { "No" }.to_string();
+            distribution.insert(disability_name, count);
+        }
+
+        Ok(distribution)
+    }
+
+    async fn find_participants_by_gender(
+        &self,
+        gender: &str,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Find participants by gender
+        let paginated_result = self.repo.find_by_gender(gender, params).await?;
+
+        // 3. Convert and enrich participants
+        let mut enriched_items = Vec::new();
+        for participant in paginated_result.items {
+            let response = ParticipantResponse::from(participant);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn find_participants_by_age_group(
+        &self,
+        age_group: &str,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Find participants by age group
+        let paginated_result = self.repo.find_by_age_group(age_group, params).await?;
+
+        // 3. Convert and enrich participants
+        let mut enriched_items = Vec::new();
+        for participant in paginated_result.items {
+            let response = ParticipantResponse::from(participant);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn find_participants_by_location(
+        &self,
+        location: &str,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Find participants by location
+        let paginated_result = self.repo.find_by_location(location, params).await?;
+
+        // 3. Convert and enrich participants
+        let mut enriched_items = Vec::new();
+        for participant in paginated_result.items {
+            let response = ParticipantResponse::from(participant);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn find_participants_by_disability(
+        &self,
+        has_disability: bool,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Find participants by disability status
+        let paginated_result = self.repo.find_by_disability(has_disability, params).await?;
+
+        // 3. Convert and enrich participants
+        let mut enriched_items = Vec::new();
+        for participant in paginated_result.items {
+            let response = ParticipantResponse::from(participant);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn get_workshop_participants(
+        &self,
+        workshop_id: Uuid,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+        auth.authorize(Permission::ViewWorkshops)?;
+
+        // 2. Find participants for this workshop
+        let paginated_result = self.repo.find_workshop_participants(workshop_id, params).await?;
+
+        // 3. Convert and enrich participants
+        let mut enriched_items = Vec::new();
+        for participant in paginated_result.items {
+            let response = ParticipantResponse::from(participant);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn get_participant_with_workshops(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantWithWorkshops> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+        auth.authorize(Permission::ViewWorkshops)?;
+
+        // 2. Get participant
+        let participant = self.repo.find_by_id(id).await?;
+        let participant_response = ParticipantResponse::from(participant);
+        
+        // 3. Get workshops for participant
+        let workshops = self.repo.get_participant_workshops(id).await?;
+        
+        // 4. Get workshop counts
+        let (total_workshops, completed_workshops, upcoming_workshops) = 
+            self.repo.count_participant_workshops(id).await?;
+        
+        // 5. Create and return combined response
+        Ok(ParticipantWithWorkshops {
+            participant: participant_response,
+            workshops,
+            total_workshops,
+            completed_workshops,
+            upcoming_workshops,
+        })
+    }
+
+    async fn get_participant_with_livelihoods(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantWithLivelihoods> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+        auth.authorize(Permission::ViewLivelihoods)?;
+
+        // 2. Get participant
+        let participant = self.repo.find_by_id(id).await?;
+        let participant_response = ParticipantResponse::from(participant);
+        
+        // 3. Get livelihoods for participant
+        let livelihoods = self.repo.get_participant_livelihoods(id).await?;
+        
+        // 4. Get livelihood counts
+        let (total_livelihoods, active_livelihoods) = 
+            self.repo.count_participant_livelihoods(id).await?;
+        
+        // 5. Create and return combined response
+        Ok(ParticipantWithLivelihoods {
+            participant: participant_response,
+            livelihoods,
+            total_livelihoods,
+            active_livelihoods,
+        })
+    }
+
+    async fn get_participant_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<ParticipantWithDocumentTimeline> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+        auth.authorize(Permission::ViewDocuments)?;
+
+        // 2. Get participant
+        let participant = self.repo.find_by_id(id).await?;
+        let participant_response = ParticipantResponse::from(participant);
+
+        // 3. Get all documents for this participant
+        let docs_result = self.document_service.list_media_documents_by_related_entity(
+            auth,
+            "participants",
+            id,
+            PaginationParams { page: 1, per_page: 100 }, // Use struct literal
+            None,
+        ).await?;
+        
+        let documents = docs_result.items;
+        let total_document_count = docs_result.total;
+
+        // 4. Organize documents by month (YYYY-MM)
+        let mut documents_by_month: HashMap<String, Vec<MediaDocumentResponse>> = HashMap::new();
+        
+        for doc in documents {
+            if let Ok(created_at) = chrono::DateTime::parse_from_rfc3339(&doc.created_at) {
+                // Format as YYYY-MM for grouping
+                let utc_dt = created_at.with_timezone(&chrono::Utc);
+                let month_key = format!("{}-{:02}", utc_dt.year(), utc_dt.month());
+                
+                documents_by_month
+                    .entry(month_key)
+                    .or_default()
+                    .push(doc);
+            } else {
+                 eprintln!("Failed to parse document created_at date: {}", doc.created_at);
+            }
+        }
+
+        // 5. Create and return combined response
+        Ok(ParticipantWithDocumentTimeline {
+            participant: participant_response,
+            documents_by_month,
+            total_document_count,
+        })
     }
 }

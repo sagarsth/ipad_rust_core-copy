@@ -286,7 +286,7 @@ where
                     let doc_id_str = doc_id.to_string();
                     let now_str = Utc::now().to_rfc3339();
                     let user_id_str = auth.user_id.to_string();
-                    let file_queue_entry = sqlx::query!(
+                    sqlx::query!(
                         r#"
                         INSERT INTO file_deletion_queue (
                             id, 
@@ -308,13 +308,9 @@ where
                         86400 // 24 hour grace period
                     )
                     .execute(&mut **tx)
-                    .await;
-                    
-                    // Log but don't fail if queuing fails
-                    if let Err(e) = file_queue_entry {
-                        eprintln!("Failed to queue file for deletion: {}", e);
-                    }
-    
+                    .await
+                    .map_err(DbError::from)?; // Propagate error instead of just logging
+
                     // 6. Perform the actual hard delete of the document record
                     media_repo.hard_delete_with_tx(doc_id, auth, tx).await?;
                     
@@ -333,7 +329,7 @@ where
                     let log_user_id_str = auth.user_id.to_string();
                     let log_timestamp_str = Utc::now().to_rfc3339();
                     let log_details_str = format!("Cascade soft delete from parent: {}/{}", parent_table_name, parent_id);
-                    let access_log_query = sqlx::query!(
+                    sqlx::query!(
                         r#"
                         INSERT INTO document_access_logs (
                             id,
@@ -352,14 +348,11 @@ where
                         log_timestamp_str, // Use variable
                         log_details_str    // Use variable
                     )
-                    .execute(&mut **tx);
-                    
-                    // Log but don't fail if access logging fails
-                    if let Err(e) = access_log_query.await {
-                        eprintln!("Failed to log document soft delete: {}", e);
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(DbError::from)?; // Propagate error instead of just logging
                 }
             }
-        }
         }
         
         Ok(())

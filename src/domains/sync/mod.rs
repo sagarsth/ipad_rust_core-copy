@@ -2,6 +2,8 @@ pub mod types;
 pub mod repository;
 pub mod conflict_resolver;
 
+pub mod complete_change_log_tombstone_repo;
+
 // Re-exports
 
 // Re-export key types/traits if needed

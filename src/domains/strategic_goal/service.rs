@@ -26,6 +26,10 @@ use chrono::{Utc, DateTime};
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
 
+// --- ADDED: Import ProjectRepository and ProjectSummary --- 
+use crate::domains::project::repository::ProjectRepository;
+use crate::domains::project::types::ProjectSummary;
+
 /// Trait defining strategic goal service operations
 #[async_trait]
 pub trait StrategicGoalService: DeleteService<StrategicGoal> + Send + Sync {
@@ -168,6 +172,8 @@ pub struct StrategicGoalServiceImpl {
     repo: Arc<dyn StrategicGoalRepository + Send + Sync>,
     delete_service: Arc<BaseDeleteService<StrategicGoal>>,
     document_service: Arc<dyn DocumentService>,
+    // --- ADDED: Project Repository --- 
+    project_repo: Arc<dyn ProjectRepository + Send + Sync>,
 }
 
 impl StrategicGoalServiceImpl {
@@ -178,6 +184,8 @@ impl StrategicGoalServiceImpl {
         change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         document_service: Arc<dyn DocumentService>,
+        // --- ADDED: Inject Project Repository --- 
+        project_repo: Arc<dyn ProjectRepository + Send + Sync>,
     ) -> Self {
         // Define a local wrapper struct that implements DeleteServiceRepository
         struct RepoAdapter(Arc<dyn StrategicGoalRepository + Send + Sync>);
@@ -243,6 +251,8 @@ impl StrategicGoalServiceImpl {
             repo: strategic_goal_repo, // Keep the original repo for other methods
             delete_service,
             document_service,
+            // --- ADDED: Store Project Repository --- 
+            project_repo,
         }
     }
 
@@ -254,25 +264,72 @@ impl StrategicGoalServiceImpl {
         auth: &AuthContext,
     ) -> ServiceResult<StrategicGoalResponse> {
         if let Some(includes) = include {
-            let include_docs = includes.contains(&StrategicGoalInclude::Documents);
+            let include_set: HashSet<StrategicGoalInclude> = includes.iter().cloned().collect();
+            
+            // Include documents
+            if include_set.contains(&StrategicGoalInclude::Documents) {
+                let doc_params = PaginationParams::default();
+                match self.document_service.list_media_documents_by_related_entity(
+                    auth,
+                    "strategic_goals",
+                    response.id,
+                    doc_params,
+                    None
+                ).await {
+                    Ok(docs_result) => {
+                        response.documents = Some(docs_result.items);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch documents for goal {}: {}", response.id, e);
+                        // Decide if this should be a hard error or just skip enrichment
+                        // return Err(e); // Option 1: Return error
+                        response.document_upload_errors = Some(vec![format!("Failed to fetch documents: {}", e)]); // Option 2: Report error, continue
+                    }
+                }
+            }
 
-            // Enrich with documents if requested
-            if include_docs {
-                let doc_params = PaginationParams::default(); 
-                let docs_result = self.document_service
-                    .list_media_documents_by_related_entity(
-                        auth,
-                        "strategic_goals", // Correct entity type
-                        response.id,
-                        doc_params,
-                        None // No nested includes for docs needed
-                    ).await?;
-                response.documents = Some(docs_result.items);
+            // --- ADDED: Include Project Count --- 
+            if include_set.contains(&StrategicGoalInclude::ProjectCount) {
+                 match self.project_repo.count_by_strategic_goal().await {
+                    Ok(counts) => {
+                        let count = counts.iter()
+                            .find(|(sg_id, _)| sg_id.is_some() && sg_id.unwrap() == response.id)
+                            .map(|(_, count)| *count)
+                            .unwrap_or(0);
+                        response.project_count = Some(count);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch project count for goal {}: {}", response.id, e);
+                        // Handle error appropriately
+                    }
+                }
+            }
+
+            // --- ADDED: Include Projects (Summaries) --- 
+            if include_set.contains(&StrategicGoalInclude::Projects) {
+                // Fetch a limited number of projects for summary view
+                let project_params = PaginationParams { page: 1, per_page: 10 }; 
+                match self.project_repo.find_by_strategic_goal(response.id, project_params).await {
+                    Ok(paginated_projects) => {
+                        let project_summaries = paginated_projects.items
+                            .into_iter()
+                            .map(ProjectSummary::from) // Convert Project to ProjectSummary
+                            .collect::<Vec<_>>();
+                        response.projects = Some(project_summaries);
+                        // If project_count wasn't explicitly requested, set it from this result
+                        if response.project_count.is_none() {
+                            response.project_count = Some(paginated_projects.total as i64);
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch projects for goal {}: {}", response.id, e);
+                        // Handle error appropriately
+                    }
+                }
             }
             
-            // TODO: Add enrichment for other includes like Status, etc.
+            // TODO: Implement enrichment for Status, Activities, Participants, DocumentCounts
         }
-        
         Ok(response)
     }
 }
@@ -426,21 +483,11 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         include: Option<&[StrategicGoalInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<StrategicGoalResponse> {
-        // 1. Check Permissions - explicit permission check
-        if !auth.has_permission(Permission::ViewStrategicGoals) {
-            return Err(ServiceError::PermissionDenied(
-                "User does not have permission to view strategic goals".to_string(),
-            ));
-        }
+        auth.authorize(Permission::ViewStrategicGoals)?;
 
-        // 2. Fetch from Repository
-        let goal = self.repo.find_by_id(id).await?;
-
-        // 3. Convert to Response DTO
+        let goal = self.repo.find_by_id(id).await.map_err(ServiceError::Domain)?;
         let response = StrategicGoalResponse::from(goal);
-        
-        // 4. Enrich with includes if requested
-        self.enrich_response(response, include, auth).await
+        self.enrich_response(response, include, auth).await // Call enrich
     }
 
     // UPDATED: Using enrich_response helper
@@ -450,25 +497,17 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         include: Option<&[StrategicGoalInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<StrategicGoalResponse>> {
-        // 1. Check Permissions - explicit permission check
-        if !auth.has_permission(Permission::ViewStrategicGoals) {
-            return Err(ServiceError::PermissionDenied(
-                "User does not have permission to list strategic goals".to_string(),
-            ));
-        }
+        auth.authorize(Permission::ViewStrategicGoals)?;
 
-        // 2. Fetch Paginated Data
-        let paginated_result = self.repo.find_all(params).await?;
-
-        // 3. Convert items to Response DTOs and enrich them
+        let paginated_result = self.repo.find_all(params).await.map_err(ServiceError::Domain)?;
+        
         let mut enriched_items = Vec::new();
         for item in paginated_result.items {
             let response = StrategicGoalResponse::from(item);
-            let enriched = self.enrich_response(response, include, auth).await?;
+            let enriched = self.enrich_response(response, include, auth).await?; // Call enrich
             enriched_items.push(enriched);
         }
 
-        // 4. Create Paginated Response
         Ok(PaginatedResult::new(
             enriched_items,
             paginated_result.total,
@@ -624,20 +663,6 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
             None,
         ).await?;
 
-        // 5. Update entity reference if it was a document-only field
-        if let Some(field_name) = linked_field {
-            if let Some(metadata) = StrategicGoal::get_field_metadata(&field_name) {
-                if metadata.is_document_reference_only {
-                    self.repo.set_document_reference(
-                        goal_id, 
-                        &field_name,
-                        document.id,
-                        auth
-                    ).await?;
-                }
-            }
-        }
-
         Ok(document)
     }
 
@@ -686,25 +711,20 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         include: Option<&[StrategicGoalInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<StrategicGoalResponse>> {
-        // 1. Check permissions
-        if !auth.has_permission(Permission::ViewStrategicGoals) {
-            return Err(ServiceError::PermissionDenied(
-                "User does not have permission to view strategic goals".to_string(),
-            ));
-        }
+        auth.authorize(Permission::ViewStrategicGoals)?;
 
-        // 2. Fetch goals from repository
-        let paginated_result = self.repo.find_by_status_id(status_id, params).await?;
+        let paginated_result = self.repo
+            .find_by_status(status_id, params)
+            .await
+            .map_err(ServiceError::Domain)?;
 
-        // 3. Convert to response DTOs and enrich them
         let mut enriched_items = Vec::new();
         for item in paginated_result.items {
             let response = StrategicGoalResponse::from(item);
-            let enriched = self.enrich_response(response, include, auth).await?;
+            let enriched = self.enrich_response(response, include, auth).await?; // Call enrich
             enriched_items.push(enriched);
         }
 
-        // 4. Return paginated result
         Ok(PaginatedResult::new(
             enriched_items,
             paginated_result.total,
@@ -719,25 +739,20 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         include: Option<&[StrategicGoalInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<StrategicGoalResponse>> {
-        // 1. Check permissions
-        if !auth.has_permission(Permission::ViewStrategicGoals) {
-            return Err(ServiceError::PermissionDenied(
-                "User does not have permission to view strategic goals".to_string(),
-            ));
-        }
+        auth.authorize(Permission::ViewStrategicGoals)?;
 
-        // 2. Fetch goals from repository
-        let paginated_result = self.repo.find_by_responsible_team(team_name, params).await?;
+        let paginated_result = self.repo
+            .find_by_responsible_team(team_name, params)
+            .await
+            .map_err(ServiceError::Domain)?;
 
-        // 3. Convert to response DTOs and enrich them
         let mut enriched_items = Vec::new();
         for item in paginated_result.items {
             let response = StrategicGoalResponse::from(item);
-            let enriched = self.enrich_response(response, include, auth).await?;
+            let enriched = self.enrich_response(response, include, auth).await?; // Call enrich
             enriched_items.push(enriched);
         }
 
-        // 4. Return paginated result
         Ok(PaginatedResult::new(
             enriched_items,
             paginated_result.total,
@@ -753,61 +768,23 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         include: Option<&[StrategicGoalInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<StrategicGoalResponse>> {
-        // 1. Check permissions
-        if !auth.has_permission(Permission::ViewStrategicGoals) {
-            // Potentially allow users to view their own associated goals even without global view perm?
-            // if user_id != auth.user_id { ... return Err(...) }
-            return Err(ServiceError::PermissionDenied(
-                "User does not have permission to view strategic goals by user role".to_string(),
-            ));
+        auth.authorize(Permission::ViewStrategicGoals)?;
+
+        let paginated_result = self.repo
+            .find_by_user_role(user_id, role, params)
+            .await
+            .map_err(ServiceError::Domain)?;
+
+        let mut enriched_items = Vec::new();
+        for item in paginated_result.items {
+            let response = StrategicGoalResponse::from(item);
+            let enriched = self.enrich_response(response, include, auth).await?; // Call enrich
+            enriched_items.push(enriched);
         }
 
-        // 2. Get IDs of goals associated with the user in the specified role
-        let goal_ids = self.repo.find_ids_by_user_role(user_id, role).await?;
-        
-        // 3. If no goals found, return empty result
-        if goal_ids.is_empty() {
-            return Ok(PaginatedResult::new(
-                Vec::new(),
-                0,
-                params,
-            ));
-        }
-        
-        // 4. Calculate pagination
-        let total = goal_ids.len() as u64;
-        let offset = ((params.page - 1) * params.per_page) as usize;
-        let limit = params.per_page as usize;
-        
-        // 5. Get the subset of IDs for this page
-        let page_ids: Vec<Uuid> = goal_ids
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect();
-            
-        // 6. Fetch goals and enrich them
-        let mut enriched_items = Vec::new();
-        for id in page_ids {
-            match self.repo.find_by_id(id).await {
-                Ok(goal) => {
-                    // Ensure the found goal hasn't been deleted in the meantime
-                    if goal.deleted_at.is_none() {
-                        let response = StrategicGoalResponse::from(goal);
-                        let enriched = self.enrich_response(response, include, auth).await?;
-                        enriched_items.push(enriched);
-                    }
-                },
-                // Ignore EntityNotFound errors, as the ID list might be slightly stale
-                Err(DomainError::EntityNotFound(_, _)) => continue, 
-                Err(e) => return Err(e.into()), // Propagate other errors
-            }
-        }
-        
-        // 7. Return paginated result
         Ok(PaginatedResult::new(
             enriched_items,
-            total,
+            paginated_result.total,
             params,
         ))
     }
@@ -889,34 +866,25 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         include: Option<&[StrategicGoalInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<StrategicGoalResponse>> {
-        // 1. Check permissions
-        if !auth.has_permission(Permission::ViewStrategicGoals) { // Maybe a more specific permission?
-            return Err(ServiceError::PermissionDenied(
-                "User does not have permission to view stale strategic goals".to_string(),
-            ));
-        }
+        auth.authorize(Permission::ViewStrategicGoals)?;
 
-        // 2. Calculate cutoff date
-        let now = Utc::now();
-        let cutoff = now.checked_sub_signed(chrono::Duration::days(days_stale as i64))
-                      .unwrap_or(now); // Default to now if subtraction fails
-        let cutoff_str = cutoff.to_rfc3339();
+        let cutoff_date = Utc::now() - chrono::Duration::days(days_stale as i64);
         
-        // 3. Call the new repository method to get paginated stale goals directly
-        let paginated_result = self.repo.find_stale(&cutoff_str, params).await?;
-
-        // 4. Convert to response DTOs and enrich them
+        let paginated_result = self.repo
+            .find_stale_since(cutoff_date, params)
+            .await
+            .map_err(ServiceError::Domain)?;
+            
         let mut enriched_items = Vec::new();
-        for goal in paginated_result.items {
-            let response = StrategicGoalResponse::from(goal);
-            let enriched = self.enrich_response(response, include, auth).await?;
+        for item in paginated_result.items {
+            let response = StrategicGoalResponse::from(item);
+            let enriched = self.enrich_response(response, include, auth).await?; // Call enrich
             enriched_items.push(enriched);
         }
-        
-        // 5. Return paginated result with potentially enriched items
+
         Ok(PaginatedResult::new(
             enriched_items,
-            paginated_result.total, // Use total count from repository result
+            paginated_result.total,
             params,
         ))
     }

@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use crate::errors::{ServiceError, ServiceResult, DomainError};
 use crate::types::UserRole;
 use std::sync::OnceLock;
+use jsonwebtoken::{encode, decode, Header, EncodingKey, DecodingKey, Validation, Algorithm, TokenData};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -156,14 +157,38 @@ pub fn refresh_access_token(refresh_token: &str) -> ServiceResult<(String, DateT
     generate_token(&user_id, &role, &claims.device_id, TokenType::Access)
 }
 
+/// Decodes token claims without verifying signature or expiry.
+/// Useful for retrieving JTI/expiry for logging out/revocation even if token is expired.
+pub fn decode_unverified(token: &str) -> ServiceResult<Claims> {
+    // Use a validation struct that ignores expiry and signature
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = false;
+    validation.insecure_disable_signature_validation(); // Added to bypass signature check
+    
+    // Attempt to decode using a dummy key, as signature isn't checked
+    // Note: The algorithm still needs to match the header for the library to proceed.
+    let dummy_key = DecodingKey::from_secret(b"dummy");
+    
+    let token_data = decode::<Claims>(token, &dummy_key, &validation)
+        .map_err(|e| {
+            log::error!("Unverified token decode error: {}", e);
+            // Distinguish between structural errors and others if needed
+            ServiceError::Authentication(format!("Invalid token structure: {}", e))
+        })?;
+    
+    Ok(token_data.claims)
+}
+
 /// Revoke a token (in a real app, this would add it to a blocklist)
 pub fn revoke_token(token: &str) -> ServiceResult<()> {
-    // In a real app, you would:
-    // 1. Verify the token is valid (don't error if expired)
-    // 2. Extract the jti (JWT ID)
-    // 3. Add it to a blocklist (e.g., in Redis or the database)
-    // 4. Check this blocklist during token verification
-    
-    // For now, this is a placeholder
+    // Placeholder - Actual revocation logic is now in AuthService using the repository
+    // This function could potentially decode the token to get JTI/expiry if needed elsewhere,
+    // but currently AuthService handles that directly.
+    log::warn!("jwt::revoke_token called, but it's a placeholder. Revocation handled by AuthService.");
+    // You might decode here just to log the JTI being 'revoked' conceptually
+    match decode_unverified(token) {
+        Ok(claims) => log::info!("Placeholder revocation for JTI: {}", claims.jti),
+        Err(_) => log::warn!("Could not decode token for placeholder revocation log.")
+    }
     Ok(())
 } 

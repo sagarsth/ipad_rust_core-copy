@@ -5,7 +5,7 @@ mod compression;
 mod activity;
 mod participant;
 mod livelihood;
-mod sync;
+pub mod sync;
 
 pub mod core;
 mod settings;
@@ -16,4 +16,5 @@ mod donor;
 mod funding;
 
 pub use user::{User, UserService};
+pub use sync::repository::{ChangeLogRepository, SqliteChangeLogRepository};
 

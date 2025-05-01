@@ -6,7 +6,11 @@ use crate::domains::core::repository::{DeleteResult, FindById, HardDeletable, So
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
 use crate::domains::permission::Permission;
 use crate::domains::donor::repository::DonorRepository;
-use crate::domains::donor::types::{Donor, NewDonor, DonorResponse, UpdateDonor, DonorInclude, DonorSummary};
+use crate::domains::donor::types::{
+    Donor, NewDonor, DonorResponse, UpdateDonor, DonorInclude, DonorSummary, 
+    DonorDashboardStats, FundingSummaryStats, DonorWithFundingDetails, 
+    DonorWithDocumentTimeline, DonorFundingStats, UserDonorRole
+};
 use crate::domains::funding::repository::ProjectFundingRepository;
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
 use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, ValidationError, DbError};
@@ -15,6 +19,8 @@ use crate::validation::Validate;
 use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
+use std::collections::HashMap;
+use chrono::{self, Utc, DateTime, Duration, Datelike};
 
 // Import necessary document types and services
 use crate::domains::document::repository::MediaDocumentRepository;
@@ -99,6 +105,65 @@ pub trait DonorService: DeleteService<Donor> + Send + Sync {
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
     ) -> ServiceResult<Vec<MediaDocumentResponse>>;
+
+    /// Get comprehensive donor statistics for dashboard
+    async fn get_donor_statistics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorDashboardStats>;
+
+    /// Get distribution of donors by type
+    async fn get_type_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+
+    /// Get distribution of donors by country
+    async fn get_country_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+
+    /// Find donors by type
+    async fn find_donors_by_type(
+        &self,
+        donor_type: &str,
+        params: PaginationParams,
+        include: Option<&[DonorInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<DonorResponse>>;
+
+    /// Find donors by country
+    async fn find_donors_by_country(
+        &self,
+        country: &str,
+        params: PaginationParams,
+        include: Option<&[DonorInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<DonorResponse>>;
+
+    /// Find donors with recent donations in the past number of days
+    async fn find_donors_with_recent_donations(
+        &self,
+        days_ago: u32,
+        params: PaginationParams,
+        include: Option<&[DonorInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<DonorResponse>>;
+
+    /// Get donor with detailed funding information
+    async fn get_donor_with_funding_details(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorWithFundingDetails>;
+
+    /// Get donor with document timeline
+    async fn get_donor_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorWithDocumentTimeline>;
 }
 
 /// Implementation of the donor service
@@ -575,5 +640,294 @@ impl DonorService for DonorServiceImpl {
         }
         
         Ok(results) // Returns only the successfully uploaded documents
+    }
+
+    async fn get_donor_statistics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorDashboardStats> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewDonors)?; // Maybe ViewStatistics permission?
+
+        // 2. Get basic donor statistics
+        let donor_stats = self.repo.get_donation_stats().await?;
+
+        // 3. Get funding summary information
+        // Assume funding_repo.get_funding_summary() returns Ok<(i64, f64, f64, HashMap<String, f64>)> 
+        // representing (active_count, total_amount, avg_amount, currency_distribution)
+        let (total_active_fundings, total_amount, avg_amount, funding_by_currency) = 
+            match self.funding_repo.get_funding_summary().await {
+                Ok(summary) => summary,
+                Err(e) => {
+                    // Log error but provide defaults
+                    eprintln!("Failed to get funding summary for donor stats: {:?}", e);
+                    (0, 0.0, 0.0, HashMap::new())
+                },
+            };
+
+        // 4. Calculate recent donors (e.g., created in last 30 days - adjust as needed)
+        // This requires a dedicated repository method for efficiency, e.g., count_recent_donors
+        // Using find_with_recent_donations count is inefficient if list is large
+        let thirty_days_ago = (Utc::now() - Duration::days(30)).to_rfc3339();
+        let recent_donors_count = match self.repo.find_with_recent_donations(&thirty_days_ago, PaginationParams { page: 1, per_page: 1 }).await {
+             Ok(result) => result.total as i64, // Assuming find_with_recent_donations correctly counts
+             Err(e) => {
+                 eprintln!("Failed to count recent donors: {:?}", e);
+                 0 // Default to 0 on error
+             }
+        };
+
+        // 5. Create and return the dashboard stats
+        Ok(DonorDashboardStats {
+            total_donors: donor_stats.total_donors,
+            donors_by_type: donor_stats.donor_count_by_type,
+            donors_by_country: donor_stats.donor_count_by_country,
+            recent_donors_count, // Count based on recent *donations* as per repo method name
+            funding_summary: FundingSummaryStats {
+                total_active_fundings,
+                total_funding_amount: total_amount,
+                avg_funding_amount: avg_amount,
+                funding_by_currency,
+            },
+        })
+    }
+
+    async fn get_type_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewDonors)?; // Or ViewStatistics?
+
+        // 2. Get type counts from repository
+        let type_counts = self.repo.count_by_type().await?;
+
+        // 3. Convert to a more user-friendly HashMap
+        let mut distribution = HashMap::new();
+        for (type_opt, count) in type_counts {
+            let type_name = type_opt.unwrap_or_else(|| "Unspecified".to_string());
+            distribution.insert(type_name, count);
+        }
+
+        Ok(distribution)
+    }
+
+    async fn get_country_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewDonors)?; // Or ViewStatistics?
+
+        // 2. Get country counts from repository
+        let country_counts = self.repo.count_by_country().await?;
+
+        // 3. Convert to a more user-friendly HashMap
+        let mut distribution = HashMap::new();
+        for (country_opt, count) in country_counts {
+            let country_name = country_opt.unwrap_or_else(|| "Unspecified".to_string());
+            distribution.insert(country_name, count);
+        }
+
+        Ok(distribution)
+    }
+
+    async fn find_donors_by_type(
+        &self,
+        donor_type: &str,
+        params: PaginationParams,
+        include: Option<&[DonorInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<DonorResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewDonors)?;
+
+        // 2. Find donors by type
+        let paginated_result = self.repo.find_by_type(donor_type, params).await?;
+
+        // 3. Convert and enrich each donor
+        let mut enriched_items = Vec::new();
+        for donor in paginated_result.items {
+            let response = DonorResponse::from(donor);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return the paginated result with enriched donors
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn find_donors_by_country(
+        &self,
+        country: &str,
+        params: PaginationParams,
+        include: Option<&[DonorInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<DonorResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewDonors)?;
+
+        // 2. Find donors by country
+        let paginated_result = self.repo.find_by_country(country, params).await?;
+
+        // 3. Convert and enrich each donor
+        let mut enriched_items = Vec::new();
+        for donor in paginated_result.items {
+            let response = DonorResponse::from(donor);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 4. Return the paginated result with enriched donors
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn find_donors_with_recent_donations(
+        &self,
+        days_ago: u32,
+        params: PaginationParams,
+        include: Option<&[DonorInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<DonorResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewDonors)?;
+
+        // 2. Calculate the cutoff date based on days_ago
+        let cutoff_date = (Utc::now() - Duration::days(days_ago as i64)).to_rfc3339();
+
+        // 3. Find donors with recent donations using the repository method
+        let paginated_result = self.repo.find_with_recent_donations(&cutoff_date, params).await?;
+
+        // 4. Convert and enrich each donor
+        let mut enriched_items = Vec::new();
+        for donor in paginated_result.items {
+            let response = DonorResponse::from(donor);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 5. Return the paginated result with enriched donors
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn get_donor_with_funding_details(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorWithFundingDetails> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewDonors)?;
+        auth.authorize(Permission::ViewFunding)?; // Ensure user can view funding details
+
+        // 2. Get the donor (include basic stats for the DonorResponse part)
+        let donor_response = self.get_donor_by_id(id, Some(&[DonorInclude::FundingStats]), auth).await?;
+
+        // 3. Get detailed funding statistics
+        // Assuming funding_repo.get_donor_detailed_funding_stats returns Ok((i64, i64, f64, f64, f64, f64, HashMap<String, f64>))
+        // representing (active_count, total_count, total_amount, active_amount, avg_amount, largest_amount, currency_dist)
+        let stats = match self.funding_repo.get_donor_detailed_funding_stats(id).await {
+            Ok((active_count, total_count, total_amount, active_amount, avg_amount, largest_amount, currency_dist)) => {
+                DonorFundingStats {
+                    active_fundings_count: active_count,
+                    total_fundings_count: total_count,
+                    total_funding_amount: total_amount,
+                    active_funding_amount: active_amount,
+                    avg_funding_amount: avg_amount,
+                    largest_funding_amount: largest_amount,
+                    currency_distribution: currency_dist,
+                }
+            },
+            Err(e) => {
+                 eprintln!("Failed to get detailed funding stats for donor {}: {:?}", id, e);
+                 // Provide default stats on error
+                 DonorFundingStats {
+                    active_fundings_count: 0,
+                    total_fundings_count: 0,
+                    total_funding_amount: 0.0,
+                    active_funding_amount: 0.0,
+                    avg_funding_amount: 0.0,
+                    largest_funding_amount: 0.0,
+                    currency_distribution: HashMap::new(),
+                }
+            }
+        };
+
+        // 4. Get recent funding entries (limit to, say, 5)
+        // Assuming funding_repo.get_recent_fundings_for_donor returns Ok<Vec<ProjectFundingSummary>>
+        let recent_fundings = match self.funding_repo.get_recent_fundings_for_donor(id, 5).await {
+            Ok(fundings) => fundings,
+            Err(e) => {
+                eprintln!("Failed to get recent fundings for donor {}: {:?}", id, e);
+                Vec::new()
+            },
+        };
+
+        // 5. Combine into response
+        Ok(DonorWithFundingDetails {
+            donor: donor_response,
+            funding_stats: stats,
+            recent_fundings,
+        })
+    }
+
+    async fn get_donor_with_document_timeline(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorWithDocumentTimeline> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewDonors)?;
+        auth.authorize(Permission::ViewDocuments)?;
+
+        // 2. Get the donor base response
+        let donor_response = self.get_donor_by_id(id, None, auth).await?;
+
+        // 3. Get all documents for this donor (handle potential pagination if necessary)
+        // Fetching all might be inefficient for donors with many docs; consider adding date range filter?
+        let docs_result = self.document_service.list_media_documents_by_related_entity(
+            auth,
+            "donors",
+            id,
+            PaginationParams { page: 1, per_page: 500 }, // Set a reasonable limit, adjust as needed
+            None,
+        ).await?;
+        
+        let documents = docs_result.items;
+        let total_document_count = docs_result.total; // Use total from pagination
+
+        // 4. Organize documents by month (YYYY-MM)
+        let mut documents_by_month: HashMap<String, Vec<MediaDocumentResponse>> = HashMap::new();
+        for doc in documents {
+            // Use created_at timestamp for grouping
+            if let Ok(created_at_dt) = DateTime::parse_from_rfc3339(&doc.created_at) {
+                let month_key = format!("{}-{:02}", created_at_dt.year(), created_at_dt.month());
+                documents_by_month
+                    .entry(month_key)
+                    .or_default()
+                    .push(doc);
+            } else {
+                 eprintln!("Failed to parse document created_at date: {}", doc.created_at);
+                 // Optionally group unparsable dates under a special key
+            }
+        }
+
+        // 5. Create and return the response
+        Ok(DonorWithDocumentTimeline {
+            donor: donor_response,
+            documents_by_month,
+            total_document_count,
+        })
     }
 }

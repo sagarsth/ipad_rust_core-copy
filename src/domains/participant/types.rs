@@ -10,7 +10,7 @@ use std::fmt;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 
 /// Gender enum with string representation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +360,9 @@ pub enum ParticipantInclude {
     WorkshopCount,
     LivelihoodCount,
     Documents,
+    Workshops,
+    Livelihoods,
+    DocumentCounts,
     All,
 }
 
@@ -486,4 +489,74 @@ impl WorkshopParticipantRow {
                 .transpose()?,
         })
     }
+}
+
+/// Demographic statistics for participants
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantDemographics {
+    pub total_participants: i64,
+    pub by_gender: HashMap<String, i64>,
+    pub by_age_group: HashMap<String, i64>,
+    pub by_location: HashMap<String, i64>,
+    pub by_disability: HashMap<String, i64>,
+    pub by_disability_type: HashMap<String, i64>,
+}
+
+/// Workshop summary for a participant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkshopSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub date: Option<String>,
+    pub location: Option<String>,
+    pub has_completed: bool,
+    pub pre_evaluation: Option<String>,
+    pub post_evaluation: Option<String>,
+}
+
+/// Livelihood summary for a participant
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivelihoodSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub type_: Option<String>,
+    pub status: Option<String>,
+    pub start_date: Option<String>,
+}
+
+/// Participant with their workshop history
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantWithWorkshops {
+    pub participant: ParticipantResponse,
+    pub workshops: Vec<WorkshopSummary>,
+    pub total_workshops: i64,
+    pub completed_workshops: i64,
+    pub upcoming_workshops: i64,
+}
+
+/// Participant with their livelihood history
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantWithLivelihoods {
+    pub participant: ParticipantResponse,
+    pub livelihoods: Vec<LivelihoodSummary>,
+    pub total_livelihoods: i64,
+    pub active_livelihoods: i64,
+}
+
+/// Participant with document timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantWithDocumentTimeline {
+    pub participant: ParticipantResponse,
+    pub documents_by_month: HashMap<String, Vec<MediaDocumentResponse>>,
+    pub total_document_count: u64,
+}
+
+/// Workshop attendance statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkshopAttendance {
+    pub total_workshops: i64,
+    pub total_participants: i64,
+    pub avg_participants_per_workshop: f64,
+    pub workshops_by_participant_count: HashMap<i64, i64>, // Map of participant count -> workshop count
+    pub participants_by_workshop_count: HashMap<i64, i64>, // Map of workshop count -> participant count
 }

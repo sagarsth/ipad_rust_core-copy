@@ -7,6 +7,7 @@ use sqlx::FromRow;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
 use std::collections::HashSet;
+use std::collections::HashMap;
 
 /// Livelihood entity - represents a livelihood grant for a participant
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -539,8 +540,11 @@ impl LivelihoodResponse {
 pub enum LivelihoodInclude {
     Project,
     Participant,
+    ParticipantDetails,
     SubsequentGrants,
     Documents,
+    DocumentCounts,
+    OutcomeMetrics,
     All,
 }
 
@@ -588,4 +592,100 @@ impl SubsequentGrantResponse {
         self.livelihood = Some(livelihood);
         self
     }
+}
+
+/// Livelihood statistics summary for reports and dashboards
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivelioodStatsSummary {
+    pub total_livelihoods: i64,
+    pub active_livelihoods: i64,
+    pub total_grant_amount: f64,
+    pub average_grant_amount: f64,
+    pub total_subsequent_grants: i64,
+    pub total_subsequent_grant_amount: f64,
+    pub livelihoods_by_project: HashMap<String, i64>,
+    pub grant_amounts_by_project: HashMap<String, f64>,
+}
+
+/// Livelihood with full participant details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivelioodWithParticipantDetails {
+    pub livelihood: LivelihoodResponse,
+    pub participant_details: ParticipantDetails,
+    pub subsequent_grants: Vec<SubsequentGrantSummary>,
+    pub total_grant_amount: f64,
+    pub documents_count: i64,
+}
+
+/// Extended participant details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantDetails {
+    pub id: Uuid,
+    pub name: String,
+    pub gender: Option<String>,
+    pub age_group: Option<String>,
+    pub disability: bool,
+    pub address: Option<String>,
+    pub phone: Option<String>,
+    pub occupation: Option<String>,
+    pub family_size: Option<i32>,
+    pub created_at: String,
+}
+
+/// Outcome tracking status
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OutcomeStatus {
+    NotStarted,
+    InProgress,
+    Completed,
+    Discontinued,
+}
+
+/// Extended livelihood summary with outcome tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivelioodOutcomeSummary {
+    pub id: Uuid,
+    pub participant_name: String,
+    pub project_name: Option<String>,
+    pub grant_amount: Option<f64>,
+    pub total_grant_amount: f64,
+    pub purpose: Option<String>,
+    pub outcome: Option<String>,
+    pub outcome_status: OutcomeStatus,
+    pub has_progress_photos: bool,
+    pub last_updated: String,
+}
+
+/// Livelihood dashboard metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivelihoodDashboardMetrics {
+    pub total_participants_supported: i64,
+    pub total_grant_amount: f64,
+    pub grant_count_by_month: HashMap<String, i64>,
+    pub grant_amount_by_month: HashMap<String, f64>,
+    pub outcome_status_distribution: HashMap<String, i64>,
+    pub gender_distribution: HashMap<String, i64>,
+    pub age_group_distribution: HashMap<String, i64>,
+}
+
+/// Participant outcome metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantOutcomeMetrics {
+    pub participant_id: Uuid,
+    pub participant_name: String,
+    pub gender: Option<String>,
+    pub total_grants_received: i64,
+    pub total_grant_amount: f64,
+    pub first_grant_date: Option<String>,
+    pub last_grant_date: Option<String>,
+    pub has_positive_outcome: bool,
+    pub outcome_description: Option<String>,
+}
+
+/// Livelihood with document timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivelioodWithDocumentTimeline {
+    pub livelihood: LivelihoodResponse,
+    pub documents_by_month: HashMap<String, Vec<MediaDocumentResponse>>,
+    pub total_document_count: u64,
 }
