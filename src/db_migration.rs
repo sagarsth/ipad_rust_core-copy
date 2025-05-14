@@ -6,11 +6,26 @@ use std::fs;
 use tokio::runtime::Runtime;
 
 /// List of schema migration files in order
-const MIGRATION_FILES: [&str; 4] = [
-    "v1_schema.sql",
-    "v2_schema.sql",
-    "v3_tombstone.sql",
-    "v4_syncapi.sql",
+const MIGRATION_FILES: [&str; 19] = [
+    "20240320000000_basic.sql",
+    "20240404000000_cascade.sql",
+    "20240407000000_tombstone.sql",
+    "20240412000000_sync.sql",
+    "20240417000000_nullable.sql",
+    "20240420000000_add_evaluations.sql",
+    "20240421000000_document_updates.sql",
+    "20240422000000_add_sync_priority.sql",
+    "20240423000000_add_temp_doc_link.sql",
+    "20240730100000_add_sync_priority_to_activities_donors.sql", // Note: Chronologically, this might seem out of place with 2025, ensure order is correct for your logic
+    "20240801000000_add_document_ref_columns.sql",
+    "20250421170655_add_total_files_skipped_to_compression_stats.sql",
+    "20250422061436_update_document_type_compression_check.sql",
+    "20250423000001_update_document_schema_fields.sql",
+    "20250424000000_document_enhancements.sql",
+    "20250425000000_add_revoked_tokens_table.sql",
+    "20250502040000_merge_sync_types.sql",
+    "20250503000000_standardize_sync_priority.sql",
+    "20250503000001_update_donors_sync_priority.sql",
 ];
 
 /// Initialize the database with migrations (synchronous wrapper)

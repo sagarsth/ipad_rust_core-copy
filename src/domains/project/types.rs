@@ -5,9 +5,10 @@ use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use crate::domains::document::types::MediaDocumentResponse;
-use crate::types::SyncPriority;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
 use std::collections::{HashSet, HashMap};
+use std::str::FromStr;
+use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
 
 /// Project entity - represents a project in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,7 +39,7 @@ pub struct Project {
     pub updated_by_user_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
-    pub sync_priority: SyncPriority,
+    pub sync_priority: SyncPriorityFromSyncDomain,
 }
 
 impl Project {
@@ -88,7 +89,7 @@ pub struct NewProject {
     pub status_id: Option<i64>,
     pub timeline: Option<String>,
     pub responsible_team: Option<String>,
-    pub sync_priority: SyncPriority,
+    pub sync_priority: SyncPriorityFromSyncDomain,
     pub created_by_user_id: Option<Uuid>,
 }
 
@@ -122,7 +123,7 @@ pub struct UpdateProject {
     pub status_id: Option<i64>,
     pub timeline: Option<String>,
     pub responsible_team: Option<String>,
-    pub sync_priority: Option<SyncPriority>,
+    pub sync_priority: Option<SyncPriorityFromSyncDomain>,
     pub updated_by_user_id: Uuid,
 }
 
@@ -180,7 +181,7 @@ pub struct ProjectRow {
     pub updated_by_user_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
-    pub sync_priority: i64,
+    pub sync_priority: String,
 }
 
 impl ProjectRow {
@@ -232,7 +233,7 @@ impl ProjectRow {
             updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
             deleted_at: parse_datetime(&self.deleted_at).transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
-            sync_priority: SyncPriority::from_i64(self.sync_priority).ok_or_else(|| DomainError::Internal(format!("Invalid sync_priority value: {}", self.sync_priority)))?,
+            sync_priority: SyncPriorityFromSyncDomain::from_str(&self.sync_priority).unwrap_or_default(),
         })
     }
 }
@@ -313,7 +314,7 @@ pub struct ProjectResponse {
     pub activity_count: Option<i64>, // Count of related activities
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workshop_count: Option<i64>, // Count of related workshops
-    pub sync_priority: SyncPriority,
+    pub sync_priority: SyncPriorityFromSyncDomain,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Vec<MediaDocumentResponse>>,
 }

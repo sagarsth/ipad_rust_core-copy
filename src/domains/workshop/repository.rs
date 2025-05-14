@@ -20,7 +20,8 @@ use rust_decimal_macros::dec;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use crate::domains::changelog::{ChangeLogRepository, ChangeLogEntry, ChangeOperationType};
+use crate::domains::sync::repository::ChangeLogRepository;
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
 
 /// Trait defining workshop repository operations
 #[async_trait]
@@ -134,10 +135,19 @@ pub trait WorkshopRepository:
 }
 
 /// SQLite implementation for WorkshopRepository
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SqliteWorkshopRepository {
     pool: SqlitePool,
     change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
+}
+
+impl std::fmt::Debug for SqliteWorkshopRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteWorkshopRepository")
+            .field("pool", &self.pool)
+            .field("change_log_repo", &"<ChangeLogRepository>")
+            .finish()
+    }
 }
 
 impl SqliteWorkshopRepository {
@@ -225,7 +235,7 @@ impl SoftDeletable for SqliteWorkshopRepository {
         let result = self.soft_delete_with_tx(id, auth, &mut tx).await;
         match result {
             Ok(()) => {
-                tx.commit().await.map_err(DbError::from)?;
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
                 Ok(())
             }
             Err(e) => {
@@ -267,7 +277,7 @@ impl HardDeletable for SqliteWorkshopRepository {
         let result = self.hard_delete_with_tx(id, auth, &mut tx).await;
         match result {
             Ok(()) => {
-                tx.commit().await.map_err(DbError::from)?;
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
                 Ok(())
             }
             Err(e) => {
@@ -289,7 +299,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         let result = self.create_with_tx(new_workshop, auth, &mut tx).await;
         match result {
             Ok(workshop) => {
-                tx.commit().await.map_err(DbError::from)?;
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
                 Ok(workshop)
             }
             Err(e) => {
@@ -376,10 +386,10 @@ impl WorkshopRepository for SqliteWorkshopRepository {
             operation_type: ChangeOperationType::Create,
             field_name: None,
             old_value: None,
-            new_value: serde_json::to_string(&created_workshop).ok(),
+            new_value: Some(serde_json::to_string(&created_workshop).unwrap_or_default()),
             timestamp: now,
             user_id: user_id,
-            device_id: device_uuid,
+            device_id: Uuid::parse_str(&device_uuid).ok(),
             document_metadata: None,
             sync_batch_id: None,
             processed_at: None,
@@ -400,7 +410,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         let result = self.update_with_tx(id, update_data, auth, &mut tx).await;
         match result {
             Ok(workshop) => {
-                tx.commit().await.map_err(DbError::from)?;
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
                 Ok(workshop)
             }
             Err(e) => {
@@ -544,7 +554,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
                         new_value: serde_json::to_string(&$new_val).ok(),
                         timestamp: now,
                         user_id: user_id,
-                        device_id: device_uuid.clone(),
+                        device_id: Uuid::parse_str(&device_uuid).ok(),
                         document_metadata: None,
                         sync_batch_id: None,
                         processed_at: None,
@@ -660,38 +670,39 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         let user_id = auth.user_id;
         let device_uuid = auth.device_id.clone();
         let user_id_str = user_id.to_string();
-        let priority_val = priority as i64;
+        
+        // Convert enum to its string representation for the database
+        // Assuming SyncPriority enum from sync::types has a .to_string() or .as_str() that gives "high", "normal" etc.
+        let priority_val_str = priority.to_string(); 
         
         let mut builder = QueryBuilder::new("UPDATE workshops SET ");
         builder.push("sync_priority = ");
-        builder.push_bind(priority_val);
+        builder.push_bind(priority_val_str.clone()); // Bind the string value
         builder.push(", updated_at = ");
-        builder.push_bind(now_str);
+        builder.push_bind(now_str.clone());
         builder.push(", updated_by_user_id = ");
-        builder.push_bind(user_id_str);
+        builder.push_bind(user_id_str.clone());
         
-        // Build the WHERE clause with IN condition
         builder.push(" WHERE id IN (");
         let mut id_separated = builder.separated(",");
         for id in ids {
             id_separated.push_bind(id.to_string());
         }
-        id_separated.push_unseparated(")"); // Correctly close parenthesis
+        id_separated.push_unseparated(")");
         builder.push(" AND deleted_at IS NULL");
         
         let query = builder.build();
         let result = query.execute(&mut *tx).await.map_err(DbError::from)?;
         let rows_affected = result.rows_affected();
         
-        // Log changes if any rows were affected
         if rows_affected > 0 {
             for &id in ids {
-                // Fetch old priority (optional, could log without old value)
-                 let old_priority: Option<i64> = query_scalar("SELECT sync_priority FROM workshops WHERE id = ?")
-                     .bind(id.to_string())
-                     .fetch_optional(&mut *tx)
-                     .await
-                     .map_err(DbError::from)?;
+                // Fetch old priority as String from the database
+                let old_priority_db_str: Option<String> = query_scalar("SELECT sync_priority FROM workshops WHERE id = ?")
+                    .bind(id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(DbError::from)?;
 
                 let entry = ChangeLogEntry {
                     operation_id: Uuid::new_v4(),
@@ -699,11 +710,13 @@ impl WorkshopRepository for SqliteWorkshopRepository {
                     entity_id: id,
                     operation_type: ChangeOperationType::Update,
                     field_name: Some("sync_priority".to_string()),
-                    old_value: old_priority.map(|p| serde_json::to_string(&SyncPriority::from(p)).ok()).flatten(),
-                    new_value: serde_json::to_string(&priority).ok(),
+                    // Log the string value directly if it existed
+                    old_value: old_priority_db_str.as_ref().map(|s| serde_json::to_string(s).ok()).flatten(),
+                    // Log the new string value that was set
+                    new_value: serde_json::to_string(&priority_val_str).ok(),
                     timestamp: now,
-                    user_id: user_id,
-                    device_id: device_uuid.clone(),
+                    user_id: user_id, 
+                    device_id: Uuid::parse_str(&device_uuid).ok(),
                     document_metadata: None,
                     sync_batch_id: None,
                     processed_at: None,
@@ -713,7 +726,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
             }
         }
 
-        tx.commit().await.map_err(DbError::from)?;
+        tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
         Ok(rows_affected)
     }
 
@@ -751,7 +764,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
                 new_value: serde_json::to_string(&new_count).ok(),
                 timestamp: now,
                 user_id: user_id,
-                device_id: device_uuid,
+                device_id: Uuid::parse_str(&device_uuid).ok(),
                 document_metadata: None,
                 sync_batch_id: None,
                 processed_at: None,
@@ -763,7 +776,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         }.await;
 
         match result {
-            Ok(_) => tx.commit().await.map_err(DbError::from),
+            Ok(_) => tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e))),
             Err(e) => {
                 let _ = tx.rollback().await;
                 Err(e)
@@ -809,7 +822,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
                     new_value: serde_json::to_string(&new_count).ok(),
                     timestamp: now,
                     user_id: user_id,
-                    device_id: device_uuid,
+                    device_id: Uuid::parse_str(&device_uuid).ok(),
                     document_metadata: None,
                     sync_batch_id: None,
                     processed_at: None,
@@ -821,7 +834,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         }.await;
 
         match result {
-            Ok(_) => tx.commit().await.map_err(DbError::from),
+            Ok(_) => tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e))),
             Err(e) => {
                 let _ = tx.rollback().await;
                 Err(e)
@@ -1259,7 +1272,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         
         let mut summaries = Vec::new();
         for row in rows {
-            let id = Uuid::parse_str(row.get::<String, _>("id")).map_err(|_| {
+            let id = Uuid::parse_str(row.get::<String, _>("id").as_str()).map_err(|_| {
                 DomainError::Internal("Invalid UUID format in workshop id".to_string())
             })?;
             

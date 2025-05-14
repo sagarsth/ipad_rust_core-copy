@@ -19,7 +19,7 @@ use crate::domains::sync::types::SyncPriority;
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json;
-
+use std::str::FromStr;
 /// Trait defining participant repository operations
 #[async_trait]
 pub trait ParticipantRepository: DeleteServiceRepository<Participant> + Send + Sync {
@@ -367,7 +367,7 @@ impl ParticipantRepository for SqliteParticipantRepository {
         .bind(&new_participant.disability_type).bind(new_participant.disability_type.as_ref().map(|_| &now_str)).bind(new_participant.disability_type.as_ref().map(|_| &user_id_str)) // Disability Type LWW
         .bind(&new_participant.age_group).bind(new_participant.age_group.as_ref().map(|_| &now_str)).bind(new_participant.age_group.as_ref().map(|_| &user_id_str)) // Age Group LWW
         .bind(&new_participant.location).bind(new_participant.location.as_ref().map(|_| &now_str)).bind(new_participant.location.as_ref().map(|_| &user_id_str)) // Location LWW
-        .bind(new_participant.sync_priority.unwrap_or(SyncPriority::Normal) as i64) // sync_priority
+        .bind(new_participant.sync_priority.unwrap_or_default().as_str()) // sync_priority as TEXT
         .bind(&now_str).bind(&now_str) // created_at, updated_at
         .bind(&created_by_id_str).bind(&user_id_str) // created_by, updated_by
         .execute(&mut **tx)
@@ -474,7 +474,7 @@ impl ParticipantRepository for SqliteParticipantRepository {
         // --- Handle Sync Priority --- 
         if let Some(priority) = update_data.sync_priority {
             separated.push("sync_priority = ");
-            separated.push_bind_unseparated(priority as i64);
+            separated.push_bind_unseparated(priority.as_str()); // Bind as TEXT
             fields_updated = true;
         }
 
@@ -532,15 +532,15 @@ impl ParticipantRepository for SqliteParticipantRepository {
         log_if_changed!(age_group, "age_group");
         log_if_changed!(location, "location");
         // Log sync_priority change (handle Option<SyncPriority>)
-        if old_entity.sync_priority.unwrap_or(SyncPriority::Normal) != new_entity.sync_priority.unwrap_or(SyncPriority::Normal) {
+        if old_entity.sync_priority.unwrap_or_default() != new_entity.sync_priority.unwrap_or_default() {
             let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
                 entity_table: self.entity_name().to_string(),
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("sync_priority".to_string()),
-                old_value: serde_json::to_string(&(old_entity.sync_priority.unwrap_or(SyncPriority::Normal) as i64)).ok(),
-                new_value: serde_json::to_string(&(new_entity.sync_priority.unwrap_or(SyncPriority::Normal) as i64)).ok(),
+                old_value: serde_json::to_string(old_entity.sync_priority.unwrap_or_default().as_str()).ok(), // Log as TEXT
+                new_value: serde_json::to_string(new_entity.sync_priority.unwrap_or_default().as_str()).ok(), // Log as TEXT
                 timestamp: now,
                 user_id: user_id,
                 device_id: device_uuid,
@@ -603,7 +603,7 @@ impl ParticipantRepository for SqliteParticipantRepository {
             "SELECT id, sync_priority FROM participants WHERE id IN ({})",
             vec!["?"; ids.len()].join(", ")
         );
-        let mut select_builder = query_as::<_, (String, i64)>(&select_query);
+        let mut select_builder = query_as::<_, (String, String)>(&select_query);
         for id_str in &id_strings {
             select_builder = select_builder.bind(id_str);
         }
@@ -611,10 +611,10 @@ impl ParticipantRepository for SqliteParticipantRepository {
             .fetch_all(&mut *tx)
             .await.map_err(DbError::from)?
             .into_iter()
-            .filter_map(|(id_str, prio_int)| {
+            .filter_map(|(id_str, prio_text)| {
                 match Uuid::parse_str(&id_str) {
-                    Ok(id) => Some((id, SyncPriority::from(prio_int))),
-                    Err(_) => None, // Skip rows with invalid UUIDs
+                    Ok(id) => Some((id, SyncPriority::from_str(&prio_text).unwrap_or_default())),
+                    Err(_) => None, 
                 }
             }).collect();
 
@@ -624,10 +624,10 @@ impl ParticipantRepository for SqliteParticipantRepository {
         let user_id = auth.user_id;
         let user_id_str = user_id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
-        let priority_val = priority as i64;
+        let priority_str = priority.as_str();
         
         let mut update_builder = QueryBuilder::new("UPDATE participants SET ");
-        update_builder.push("sync_priority = "); update_builder.push_bind(priority_val);
+        update_builder.push("sync_priority = "); update_builder.push_bind(priority_str);
         update_builder.push(", updated_at = "); update_builder.push_bind(now_str.clone());
         update_builder.push(", updated_by_user_id = "); update_builder.push_bind(user_id_str.clone());
         update_builder.push(" WHERE id IN (");
@@ -649,8 +649,8 @@ impl ParticipantRepository for SqliteParticipantRepository {
                         entity_id: *id,
                         operation_type: ChangeOperationType::Update,
                         field_name: Some("sync_priority".to_string()),
-                        old_value: serde_json::to_string(&(*old_priority as i64)).ok(),
-                        new_value: serde_json::to_string(&priority_val).ok(),
+                        old_value: serde_json::to_string(old_priority.as_str()).ok(),
+                        new_value: serde_json::to_string(priority_str).ok(),
                         timestamp: now,
                         user_id: user_id,
                         device_id: device_uuid.clone(),

@@ -35,6 +35,15 @@ impl From<SyncDirection> for String {
     }
 }
 
+impl SyncDirection {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SyncDirection::Upload => "upload",
+            SyncDirection::Download => "download",
+        }
+    }
+}
+
 /// The status of a sync batch
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncBatchStatus {
@@ -73,6 +82,18 @@ impl From<SyncBatchStatus> for String {
     }
 }
 
+impl SyncBatchStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SyncBatchStatus::Pending => "pending",
+            SyncBatchStatus::Processing => "processing",
+            SyncBatchStatus::Completed => "completed",
+            SyncBatchStatus::Failed => "failed",
+            SyncBatchStatus::PartiallyFailed => "partially_failed",
+        }
+    }
+}
+
 /// The status of a device sync connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceSyncStatus {
@@ -104,6 +125,17 @@ impl From<DeviceSyncStatus> for String {
             DeviceSyncStatus::PartialSuccess => "partial_success".to_string(),
             DeviceSyncStatus::Failed => "failed".to_string(),
             DeviceSyncStatus::InProgress => "in_progress".to_string(),
+        }
+    }
+}
+
+impl DeviceSyncStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeviceSyncStatus::Success => "success",
+            DeviceSyncStatus::PartialSuccess => "partial_success",
+            DeviceSyncStatus::Failed => "failed",
+            DeviceSyncStatus::InProgress => "in_progress",
         }
     }
 }
@@ -153,6 +185,17 @@ pub enum ConflictResolutionStatus {
     Ignored,
 }
 
+impl ConflictResolutionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConflictResolutionStatus::Resolved => "resolved",
+            ConflictResolutionStatus::Unresolved => "unresolved",
+            ConflictResolutionStatus::Manual => "manual",
+            ConflictResolutionStatus::Ignored => "ignored",
+        }
+    }
+}
+
 /// The strategy for conflict resolution
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConflictResolutionStrategy {
@@ -164,75 +207,77 @@ pub enum ConflictResolutionStrategy {
     Manual,
 }
 
+impl ConflictResolutionStrategy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConflictResolutionStrategy::ServerWins => "server_wins",
+            ConflictResolutionStrategy::ClientWins => "client_wins",
+            ConflictResolutionStrategy::LastWriteWins => "last_write_wins",
+            ConflictResolutionStrategy::MergePrioritizeServer => "merge_prioritize_server",
+            ConflictResolutionStrategy::MergePrioritizeClient => "merge_prioritize_client",
+            ConflictResolutionStrategy::Manual => "manual",
+        }
+    }
+}
+
 /// Sync priority for entities
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SyncPriority {
-    Critical = 10,    // Sync immediately, retry aggressively
-    High = 8,         // Sync early in the queue
-    Normal = 5,       // Default priority
-    Low = 3,          // Sync when convenient
-    Background = 1,   // Sync only when resources available
+    High,    // 'high'
+    Normal,  // 'normal'
+    Low,     // 'low'
+    Never,   // 'never'
+}
+
+impl std::fmt::Display for SyncPriority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 impl SyncPriority {
-    // Add as_str method for consistent string representation
     pub fn as_str(&self) -> &'static str {
         match self {
-            SyncPriority::Critical => "critical",
             SyncPriority::High => "high",
             SyncPriority::Normal => "normal",
             SyncPriority::Low => "low",
-            SyncPriority::Background => "background",
+            SyncPriority::Never => "never",
         }
     }
 }
 
-impl From<i32> for SyncPriority {
-    fn from(value: i32) -> Self {
-        match value {
-            10 => SyncPriority::Critical,
-            8..=9 => SyncPriority::High,
-            4..=7 => SyncPriority::Normal,
-            2..=3 => SyncPriority::Low,
-            _ => SyncPriority::Background,
-        }
+impl Default for SyncPriority {
+    fn default() -> Self {
+        SyncPriority::Normal
     }
 }
 
-impl From<i64> for SyncPriority {
-    fn from(value: i64) -> Self {
-        Self::from(value as i32)
-    }
-}
-
-impl From<SyncPriority> for i32 {
-    fn from(priority: SyncPriority) -> Self {
-        priority as i32
-    }
-}
-
-impl From<SyncPriority> for i64 {
-    fn from(priority: SyncPriority) -> Self {
-        i32::from(priority) as i64
-    }
-}
-
-impl FromStr for SyncPriority {
-    type Err = DomainError;
+impl std::str::FromStr for SyncPriority {
+    type Err = crate::errors::DomainError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "critical" => Ok(SyncPriority::Critical),
             "high" => Ok(SyncPriority::High),
             "normal" => Ok(SyncPriority::Normal),
             "low" => Ok(SyncPriority::Low),
-            "background" => Ok(SyncPriority::Background),
-            _ => s.parse::<i32>()
-                .map(SyncPriority::from)
-                .map_err(|_| DomainError::Validation(ValidationError::custom(
-                    &format!("Invalid SyncPriority string: {}", s)
-                )))
+            "never" => Ok(SyncPriority::Never),
+            _ => Err(crate::errors::DomainError::Validation(crate::errors::ValidationError::custom(&format!("Invalid SyncPriority string: {}", s))))
         }
     }
+}
+
+impl From<SyncPriority> for String {
+    fn from(priority: SyncPriority) -> Self {
+        priority.as_str().to_string()
+    }
+}
+
+/// Detailed sync priority levels for more granular control, used internally by sync scheduler
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum DetailedSyncPriority {
+    High,
+    Normal,
+    Low,
+    Never,
 }
 
 /// Sync mode configuration
@@ -246,6 +291,17 @@ pub enum SyncMode {
     Minimal,
     /// Sync only specific entities
     Selective,
+}
+
+impl SyncMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SyncMode::Full => "full",
+            SyncMode::Incremental => "incremental",
+            SyncMode::Minimal => "minimal",
+            SyncMode::Selective => "selective",
+        }
+    }
 }
 
 /// Data purge strategy
@@ -621,6 +677,30 @@ pub struct SyncScheduleConfig {
     pub allow_metered_connection: Option<bool>,
 }
 
+/// Represents the outcome of a merge operation for a single entity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeOutcome {
+    /// A new entity was created locally based on the remote change.
+    Created(Uuid),
+    /// An existing local entity was updated based on the remote change.
+    Updated(Uuid),
+    /// No operation was performed. This could be due to various reasons,
+    /// e.g., the local change was newer, or it was a redundant soft delete.
+    NoOp(String), // String provides a reason for the NoOp
+    /// A conflict was detected between the local and remote change.
+    /// The synchronization service will typically use this to create a SyncConflict entry.
+    ConflictDetected {
+        entity_id: Uuid,
+        entity_table: String,
+        field_name: Option<String>, // Specific field if it's a field-level conflict
+        local_value_json: Option<String>, // Current local state of the conflicting field/entity as JSON
+        remote_value_json: Option<String>, // Incoming remote state from ChangeLogEntry as JSON
+        reason: String, // Detailed reason for the conflict
+    },
+    /// An entity was hard-deleted locally based on a remote instruction (e.g., from a Tombstone).
+    HardDeleted(Uuid),
+}
+
 fn parse_uuid(uuid_str: &str, field_name: &str) -> Result<Uuid, DomainError> {
     Uuid::parse_str(uuid_str).map_err(|_| DomainError::Validation(ValidationError::format(
         field_name, &format!("Invalid UUID format: {}", uuid_str)
@@ -907,4 +987,70 @@ impl FromStr for SyncMode {
             )))
         }
     }
+}
+
+// Aliases for HTTP sync transport
+pub type RemoteChange = ChangeLogEntry;
+pub type PushPayload = UploadChangesDto;
+pub type PushChangesResponse = UploadChangesResponse;
+pub type FetchChangesResponse = DownloadChangesResponse;
+
+// ----- Sync Configuration -----
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncConfig {
+    pub user_id: Uuid,
+    pub sync_interval_minutes: i64,
+    pub background_sync_enabled: bool,
+    pub wifi_only: bool,
+    pub charging_only: bool,
+    pub sync_priority_threshold: i64,
+    pub document_sync_enabled: bool,
+    pub metadata_sync_enabled: bool,
+    pub server_token: Option<String>,
+    pub last_sync_timestamp: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ----- Sync Status Overview -----
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncStatus {
+    pub user_id: Uuid,
+    pub last_sync_timestamp: Option<DateTime<Utc>>,
+    pub last_device_sync: Option<DateTime<Utc>>,
+    pub sync_enabled: bool,
+    pub offline_mode: bool,
+    pub pending_changes: i64,
+    pub pending_documents: i64,
+    pub sync_in_progress: bool,
+}
+
+// ----- Sync Operation Log -----
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncOperationLog {
+    pub id: Uuid,
+    pub batch_id: String,
+    pub operation: String,
+    pub entity_type: Option<String>,
+    pub entity_id: Option<Uuid>,
+    pub status: String,
+    pub error_message: Option<String>,
+    pub blob_key: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ----- Sync Queue Item -----
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncQueueItem {
+    pub id: Uuid,
+    pub sync_batch_id: Option<String>,
+    pub entity_id: Uuid,
+    pub entity_type: String,
+    pub operation_type: String,
+    pub status: String,
+    pub blob_key: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub error_message: Option<String>,
+    pub retry_count: i64,
 }

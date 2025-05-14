@@ -1,6 +1,6 @@
 use crate::errors::{DomainError, ValidationError, DomainResult};
 use crate::validation::{Validate, ValidationBuilder};
-use crate::types::{PaginatedResult, SyncPriority}; // Import SyncPriority
+use crate::types::PaginatedResult; // Keep this if needed
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap; // Keep for DocumentSummary if used
@@ -66,6 +66,8 @@ pub struct MediaDocument {
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
     pub sync_priority: String,       // Changed to String (use SyncPriority::as_str())
+    pub last_sync_attempt_at: Option<DateTime<Utc>>,
+    pub sync_attempt_count: i64,
 }
 
 /// Document version record for tracking file history (if needed)
@@ -516,28 +518,29 @@ pub struct DocumentFileInfo {
 
 // --- Database Row Mappers ---
 
+/// DocumentTypeRow - SQLite row representation
 #[derive(Debug, Clone, FromRow)]
 pub struct DocumentTypeRow {
     pub id: String,
     pub name: String,
-    pub name_updated_at: Option<String>,
-    pub name_updated_by: Option<String>,
     pub description: Option<String>,
-    pub description_updated_at: Option<String>,
-    pub description_updated_by: Option<String>,
     pub icon: Option<String>,
-    pub icon_updated_at: Option<String>,
-    pub icon_updated_by: Option<String>,
     pub color: Option<String>,
-    pub color_updated_at: Option<String>,
-    pub color_updated_by: Option<String>,
-    pub default_priority: String, // ADDED
+    pub default_priority: String, // CHANGE: Must be String
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
     pub updated_by_user_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub name_updated_at: Option<String>,
+    pub name_updated_by: Option<String>,
+    pub description_updated_at: Option<String>,
+    pub description_updated_by: Option<String>,
+    pub icon_updated_at: Option<String>,
+    pub icon_updated_by: Option<String>,
+    pub color_updated_at: Option<String>,
+    pub color_updated_by: Option<String>,
 }
 
 impl DocumentTypeRow {
@@ -552,7 +555,7 @@ impl DocumentTypeRow {
         let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
             s.as_ref().map(|dt| {
                 DateTime::parse_from_rfc3339(dt)
-                    .map(|dt_fixed| dt_fixed.with_timezone(&Utc))
+                    .map(|dt| dt.with_timezone(&Utc))
                     .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", dt)))
             })
         };
@@ -560,18 +563,10 @@ impl DocumentTypeRow {
         Ok(DocumentType {
             id: Uuid::parse_str(&self.id).map_err(|_| DomainError::InvalidUuid(self.id.clone()))?,
             name: self.name,
-            name_updated_at: parse_datetime(&self.name_updated_at).transpose()?,
-            name_updated_by: parse_uuid(&self.name_updated_by).transpose()?,
             description: self.description,
-            description_updated_at: parse_datetime(&self.description_updated_at).transpose()?,
-            description_updated_by: parse_uuid(&self.description_updated_by).transpose()?,
             icon: self.icon,
-            icon_updated_at: parse_datetime(&self.icon_updated_at).transpose()?,
-            icon_updated_by: parse_uuid(&self.icon_updated_by).transpose()?,
             color: self.color,
-            color_updated_at: parse_datetime(&self.color_updated_at).transpose()?,
-            color_updated_by: parse_uuid(&self.color_updated_by).transpose()?,
-            default_priority: self.default_priority, // ADDED
+            default_priority: SyncPriorityFromSyncDomain::from_str(&self.default_priority).unwrap_or_default().as_str().to_string(),
             created_at: DateTime::parse_from_rfc3339(&self.created_at)
                  .map(|dt| dt.with_timezone(&Utc))
                  .map_err(|_| DomainError::Internal(format!("Invalid created_at format: {}", self.created_at)))?,
@@ -582,6 +577,14 @@ impl DocumentTypeRow {
             updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
             deleted_at: parse_datetime(&self.deleted_at).transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+            name_updated_at: parse_datetime(&self.name_updated_at).transpose()?,
+            name_updated_by: parse_uuid(&self.name_updated_by).transpose()?,
+            description_updated_at: parse_datetime(&self.description_updated_at).transpose()?,
+            description_updated_by: parse_uuid(&self.description_updated_by).transpose()?,
+            icon_updated_at: parse_datetime(&self.icon_updated_at).transpose()?,
+            icon_updated_by: parse_uuid(&self.icon_updated_by).transpose()?,
+            color_updated_at: parse_datetime(&self.color_updated_at).transpose()?,
+            color_updated_by: parse_uuid(&self.color_updated_by).transpose()?,
         })
     }
 }
@@ -615,7 +618,9 @@ pub struct MediaDocumentRow {
     pub updated_by_user_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
-    pub sync_priority: i64, // Stored as integer in DB
+    pub sync_priority: String, // CHANGE: Must be String
+    pub last_sync_attempt_at: Option<String>,
+    pub sync_attempt_count: i64,
 }
 
 impl MediaDocumentRow {
@@ -630,15 +635,11 @@ impl MediaDocumentRow {
         let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
             s.as_ref().map(|dt| {
                 DateTime::parse_from_rfc3339(dt)
-                    .map(|dt_fixed| dt_fixed.with_timezone(&Utc))
+                    .map(|dt| dt.with_timezone(&Utc))
                     .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", dt)))
             })
         };
-        // Helper to convert DB priority int to SyncPriority string
-        let sync_priority_str = SyncPriorityFromSyncDomain::from(self.sync_priority as i32) // Cast i64 to i32
-             .as_str() 
-             .to_string(); 
-
+        
         Ok(MediaDocument {
             id: Uuid::parse_str(&self.id).map_err(|_| DomainError::InvalidUuid(self.id.clone()))?,
             related_table: self.related_table,
@@ -653,24 +654,22 @@ impl MediaDocumentRow {
             description: self.description,
             mime_type: self.mime_type,
             size_bytes: self.size_bytes,
-            compression_status: self.compression_status,
+            compression_status: CompressionStatus::from_str(&self.compression_status).unwrap_or_default().as_str().to_string(),
             blob_key: self.blob_key,
-            blob_status: self.blob_status,
+            blob_status: BlobSyncStatus::from_str(&self.blob_status).unwrap_or_default().as_str().to_string(),
             temp_related_id: parse_uuid(&self.temp_related_id).transpose()?,
-            has_error: self.has_error,             // Mapped
-            error_type: self.error_type,           // Mapped
-            error_message: self.error_message,     // Mapped
-            created_at: DateTime::parse_from_rfc3339(&self.created_at)
-                 .map(|dt| dt.with_timezone(&Utc))
-                 .map_err(|_| DomainError::Internal(format!("Invalid created_at format: {}", self.created_at)))?,
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at)
-                 .map(|dt| dt.with_timezone(&Utc))
-                 .map_err(|_| DomainError::Internal(format!("Invalid updated_at format: {}", self.updated_at)))?,
+            has_error: self.has_error,             
+            error_type: self.error_type,           
+            error_message: self.error_message,     
+            created_at: DateTime::parse_from_rfc3339(&self.created_at).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid created_at: {}", self.created_at)))?,
+            updated_at: DateTime::parse_from_rfc3339(&self.updated_at).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid updated_at: {}", self.updated_at)))?,
             created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
             updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
             deleted_at: parse_datetime(&self.deleted_at).transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
-            sync_priority: sync_priority_str, // Assign the converted string
+            sync_priority: SyncPriorityFromSyncDomain::from_str(&self.sync_priority).unwrap_or_default().as_str().to_string(),
+            last_sync_attempt_at: parse_datetime(&self.last_sync_attempt_at).transpose()?, 
+            sync_attempt_count: self.sync_attempt_count, 
         })
     }
 }

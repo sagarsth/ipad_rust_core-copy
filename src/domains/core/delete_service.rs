@@ -15,6 +15,98 @@ use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use serde_json; // Added for JSON manipulation
 use sqlx::Row;
+use tokio::sync::RwLock; // Added for RwLock
+
+/// Helper to convert a device_id string to Uuid
+fn parse_device_id(device_id_str: &str) -> Option<Uuid> {
+    Uuid::parse_str(device_id_str).ok()
+}
+
+/// Holds information for a pending document file deletion.
+#[derive(Debug, Clone)]
+struct DocumentDeletion {
+    document_id: Uuid,
+    file_path: String, // file_path is NOT NULL in media_documents and file_deletion_queue
+    compressed_file_path: Option<String>,
+}
+
+/// Manages document deletions that are pending based on the outcome of a main database transaction.
+#[derive(Debug)]
+pub struct PendingDeletionManager {
+    pool: SqlitePool,
+    pending_deletions: RwLock<HashMap<Uuid, Vec<DocumentDeletion>>>,
+}
+
+impl PendingDeletionManager {
+    /// Creates a new PendingDeletionManager.
+    pub fn new(pool: SqlitePool) -> Self {
+        Self {
+            pool,
+            pending_deletions: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Adds a document deletion to the pending list for a given operation ID.
+    pub async fn add_pending(&self, operation_id: Uuid, deletion: DocumentDeletion) {
+        let mut pending = self.pending_deletions.write().await;
+        pending.entry(operation_id).or_default().push(deletion);
+    }
+
+    /// Commits pending deletions for an operation ID to the file_deletion_queue.
+    /// This is typically called after the main database transaction has successfully committed.
+    pub async fn commit_deletions(&self, operation_id: Uuid, requested_by_user_id: Uuid) -> DomainResult<()> {
+        let mut pending_map = self.pending_deletions.write().await;
+        if let Some(deletions_to_commit) = pending_map.remove(&operation_id) {
+            if deletions_to_commit.is_empty() {
+                return Ok(());
+            }
+
+            // Start a new transaction for inserting into the file_deletion_queue
+            let mut queue_tx = self.pool.begin().await.map_err(DbError::from)?;
+            let requested_by_user_id_str = requested_by_user_id.to_string();
+
+            for deletion in deletions_to_commit {
+                let queue_id_str = Uuid::new_v4().to_string();
+                let doc_id_str = deletion.document_id.to_string();
+                let now_str = Utc::now().to_rfc3339();
+
+                sqlx::query!(
+                    r#"
+                    INSERT INTO file_deletion_queue (
+                        id,
+                        document_id,
+                        file_path,
+                        compressed_file_path,
+                        requested_at,
+                        requested_by,
+                        grace_period_seconds
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                    queue_id_str,
+                    doc_id_str,
+                    deletion.file_path, // Is String, matches NOT NULL schema
+                    deletion.compressed_file_path,
+                    now_str,
+                    requested_by_user_id_str,
+                    86400 // 24 hour grace period
+                )
+                .execute(&mut *queue_tx) // Changed &mut **tx to &mut *queue_tx
+                .await
+                .map_err(DbError::from)?;
+            }
+            queue_tx.commit().await.map_err(DbError::from)?;
+        }
+        Ok(())
+    }
+
+    /// Discards pending deletions for an operation ID.
+    /// This is typically called if the main database transaction has rolled back.
+    pub async fn discard_deletions(&self, operation_id: Uuid) {
+        let mut pending = self.pending_deletions.write().await;
+        pending.remove(&operation_id);
+    }
+}
 
 /// Delete options for controlling deletion behavior
 #[derive(Debug, Clone)]
@@ -163,6 +255,7 @@ where
     change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
     dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
     media_doc_repo: Option<Arc<dyn MediaDocumentRepository>>,
+    deletion_manager: Arc<PendingDeletionManager>, // Added
     _marker: std::marker::PhantomData<E>,
 }
 
@@ -178,6 +271,7 @@ where
         change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         media_doc_repo: Option<Arc<dyn MediaDocumentRepository>>,
+        deletion_manager: Arc<PendingDeletionManager>, // Added
     ) -> Self {
         Self {
             pool,
@@ -186,6 +280,7 @@ where
             change_log_repo,
             dependency_checker,
             media_doc_repo,
+            deletion_manager, // Added
             _marker: std::marker::PhantomData,
         }
     }
@@ -198,6 +293,7 @@ where
         hard_delete: bool, // Indicates if the parent was hard deleted
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
+        pending_delete_operation_id: Uuid, // Added to associate with PendingDeletionManager
     ) -> DomainResult<()> 
     where 
         T: Send + Sync + Clone + 'static // Changed generic E to T to avoid conflict
@@ -232,9 +328,9 @@ where
              };
 
             // Process each document
-            for doc in document_data {
+            for doc_data_row in document_data { // Renamed `doc` to `doc_data_row`
                 // Parse the ID string to UUID
-                let doc_id = match Uuid::parse_str(&doc.id) {
+                let doc_id = match Uuid::parse_str(&doc_data_row.id) {
                     Ok(id) => id,
                     Err(_) => continue, // Skip if invalid UUID (shouldn't happen)
                 };
@@ -247,8 +343,8 @@ where
                     
                     // 2. Add additional metadata for sync/cleanup tracking
                     let metadata = serde_json::json!({
-                        "file_path": doc.file_path,
-                        "compressed_file_path": doc.compressed_file_path,
+                        "file_path": doc_data_row.file_path,
+                        "compressed_file_path": doc_data_row.compressed_file_path,
                         "parent_table": parent_table_name,
                         "parent_id": parent_id.to_string(),
                         "deletion_type": "cascade",
@@ -256,14 +352,14 @@ where
                     });
                     
                     tombstone.additional_metadata = Some(metadata.to_string());
-                    let operation_id = tombstone.operation_id; // Capture for consistency
+                    let operation_id_for_changelog = tombstone.operation_id; // Capture for consistency for changelog
                     
                     // 3. Create the tombstone record
                     self.tombstone_repo.create_tombstone_with_tx(&tombstone, tx).await?;
 
                     // 4. Create change log entry for the document's hard delete
                      let change_log = ChangeLogEntry {
-                        operation_id, // Use tombstone's ID
+                        operation_id: operation_id_for_changelog, // Use tombstone's ID
                         entity_table: media_repo.entity_name().to_string(),
                         entity_id: doc_id,
                         operation_type: ChangeOperationType::HardDelete,
@@ -273,7 +369,7 @@ where
                         document_metadata: Some(metadata.to_string()), // Add the same metadata
                         timestamp: Utc::now(),
                         user_id: auth.user_id,
-                        device_id: auth.device_id.parse().ok(),
+                        device_id: parse_device_id(&auth.device_id),
                         sync_batch_id: None, 
                         processed_at: None, 
                         sync_error: None,
@@ -281,36 +377,14 @@ where
                     
                     self.change_log_repo.create_change_log_with_tx(&change_log, tx).await?;
 
-                    // 5. Queue file for deletion
-                    let queue_id_str = Uuid::new_v4().to_string();
-                    let doc_id_str = doc_id.to_string();
-                    let now_str = Utc::now().to_rfc3339();
-                    let user_id_str = auth.user_id.to_string();
-                    sqlx::query!(
-                        r#"
-                        INSERT INTO file_deletion_queue (
-                            id, 
-                            document_id,
-                            file_path, 
-                            compressed_file_path, 
-                            requested_at, 
-                            requested_by, 
-                            grace_period_seconds
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        "#,
-                        queue_id_str, // Use variable
-                        doc_id_str,   // Use variable
-                        doc.file_path,
-                        doc.compressed_file_path,
-                        now_str,      // Use variable
-                        user_id_str,  // Use variable
-                        86400 // 24 hour grace period
-                    )
-                    .execute(&mut **tx)
-                    .await
-                    .map_err(DbError::from)?; // Propagate error instead of just logging
-
+                    // 5. Add to PendingDeletionManager instead of queuing directly
+                    let deletion_info = DocumentDeletion {
+                        document_id: doc_id,
+                        file_path: doc_data_row.file_path.clone(), // file_path is String in query result
+                        compressed_file_path: doc_data_row.compressed_file_path.clone(), // compressed_file_path is Option<String>
+                    };
+                    self.deletion_manager.add_pending(pending_delete_operation_id, deletion_info).await;
+                    
                     // 6. Perform the actual hard delete of the document record
                     media_repo.hard_delete_with_tx(doc_id, auth, tx).await?;
                     
@@ -409,6 +483,9 @@ where
                               && auth.role == UserRole::Admin
                               && (blocking_dependencies.is_empty() || options.force);
 
+        // Unique ID for this entire delete operation, used for managing pending document deletions
+        let pending_delete_operation_id = Uuid::new_v4();
+
         if can_hard_delete {
             // --- Hard Delete Path --- 
             let mut tx = self.pool.begin().await.map_err(DbError::from)?; // Start transaction
@@ -416,12 +493,12 @@ where
             let hard_delete_result = async {
                 // Create tombstone
                 let tombstone = Tombstone::new(id, self.repo.entity_name(), auth.user_id);
-                let operation_id = tombstone.operation_id; // Capture for changelog
+                let operation_id_for_changelog = tombstone.operation_id; // Capture for changelog
                 self.tombstone_repo.create_tombstone_with_tx(&tombstone, &mut tx).await?;
 
                 // Create change log entry for HardDelete
                 let change_log = ChangeLogEntry {
-                    operation_id, // Use same ID as tombstone
+                    operation_id: operation_id_for_changelog, // Use same ID as tombstone
                     entity_table: self.repo.entity_name().to_string(),
                     entity_id: id,
                     operation_type: ChangeOperationType::HardDelete,
@@ -431,34 +508,39 @@ where
                     document_metadata: None, // Not a document deletion itself
                     timestamp: Utc::now(),
                     user_id: auth.user_id,
-                    device_id: auth.device_id.parse::<Uuid>().ok(),
+                    device_id: parse_device_id(&auth.device_id), // Using the helper
                     sync_batch_id: None,
                     processed_at: None,
                     sync_error: None,
                 };
                 self.change_log_repo.create_change_log_with_tx(&change_log, &mut tx).await?;
 
-                // Perform the actual hard delete
+                // Perform the actual hard delete of the main entity
                 self.repo.hard_delete_with_tx(id, auth, &mut tx).await?;
 
-                // *** Cascade Delete Documents ***
-                // Explicitly type the cascade function call if necessary
-                self.cascade_delete_documents::<E>(table_name, id, true, auth, &mut tx).await?;
+                // Cascade delete documents, passing the pending_delete_operation_id
+                self.cascade_delete_documents::<E>(table_name, id, true, auth, &mut tx, pending_delete_operation_id).await?;
 
                 Ok::<_, DomainError>(())
             }.await;
 
             match hard_delete_result {
                 Ok(_) => {
-                    tx.commit().await.map_err(DbError::from)?; // Commit on success
+                    tx.commit().await.map_err(DbError::from)?;
+                    // If DB commit is successful, commit the document deletions to the queue
+                    self.deletion_manager.commit_deletions(pending_delete_operation_id, auth.user_id).await?;
                     Ok(DeleteResult::HardDeleted)
                 },
                 Err(e @ DomainError::EntityNotFound(_, _)) => {
                     let _ = tx.rollback().await;
+                    // If DB rollback, discard pending document deletions
+                    self.deletion_manager.discard_deletions(pending_delete_operation_id).await;
                     Err(e) 
                 },
                 Err(e) => {
                     let _ = tx.rollback().await; 
+                    // If DB rollback, discard pending document deletions
+                    self.deletion_manager.discard_deletions(pending_delete_operation_id).await;
                     Err(e) 
                 }
             }
@@ -475,18 +557,22 @@ where
 
             match soft_delete_result {
                 Ok(_) => {
-                     // *** Cascade Soft Delete Documents ***
-                     self.cascade_delete_documents::<E>(table_name, id, false, auth, &mut tx).await?;
+                     // For soft delete, document files are not queued for physical deletion immediately.
+                     // The cascade_delete_documents for soft delete path handles DB record changes.
+                     // The pending_delete_operation_id is passed but won't be used by add_pending if hard_delete is false.
+                     self.cascade_delete_documents::<E>(table_name, id, false, auth, &mut tx, pending_delete_operation_id).await?;
 
                     tx.commit().await.map_err(DbError::from)?; 
                     Ok(DeleteResult::SoftDeleted { dependencies: blocking_dependencies })
                 },
                 Err(e @ DomainError::EntityNotFound(_, _)) => {
                     let _ = tx.rollback().await;
+                    // No pending physical deletions to discard for soft delete path
                     Err(e) 
                 },
                 Err(e) => {
                     let _ = tx.rollback().await; 
+                    // No pending physical deletions to discard for soft delete path
                     Err(e) 
                 }
             }

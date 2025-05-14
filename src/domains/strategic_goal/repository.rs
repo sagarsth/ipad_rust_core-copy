@@ -17,6 +17,8 @@ use uuid::Uuid;
 use chrono::DateTime;
 use std::sync::Arc;
 use serde_json;
+use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
+use std::str::FromStr;
 
 /// Trait defining strategic goal repository operations
 #[async_trait]
@@ -63,7 +65,7 @@ pub trait StrategicGoalRepository:
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
-        priority: SyncPriority,
+        priority: SyncPriorityFromSyncDomain,
         auth: &AuthContext,
     ) -> DomainResult<u64>;
 
@@ -345,7 +347,7 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
         .bind(new_goal.status_id.map(|_| &now_str)).bind(new_goal.status_id.map(|_| &user_id_str)) // status_id LWW
         .bind(&new_goal.responsible_team)
         .bind(new_goal.responsible_team.as_ref().map(|_| &now_str)).bind(new_goal.responsible_team.as_ref().map(|_| &user_id_str)) // responsible_team LWW
-        .bind(new_goal.sync_priority as i64)
+        .bind(new_goal.sync_priority.as_str())
         .bind(&now_str).bind(&now_str) // created_at, updated_at
         .bind(&user_id_str).bind(&user_id_str) // created_by, updated_by
         .execute(&mut **tx)
@@ -453,7 +455,7 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
         if let Some(priority) = update_data.sync_priority {
             // Check if update data contains sync_priority
             separated.push("sync_priority = ");
-            separated.push_bind_unseparated(priority as i64);
+            separated.push_bind_unseparated(priority.as_str());
             fields_updated = true; // Mark that SQL update includes this field
         }
 
@@ -633,8 +635,8 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
                 entity_id: id, 
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("sync_priority".to_string()),
-                old_value: serde_json::to_string(&(old_entity.sync_priority as i64)).ok(),
-                new_value: serde_json::to_string(&(new_entity.sync_priority as i64)).ok(),
+                old_value: serde_json::to_string(old_entity.sync_priority.as_str()).ok(),
+                new_value: serde_json::to_string(new_entity.sync_priority.as_str()).ok(),
                 timestamp: now, 
                 user_id: user_id, 
                 device_id: device_uuid.clone(), 
@@ -702,7 +704,7 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
-        priority: SyncPriority,
+        priority: SyncPriorityFromSyncDomain,
         auth: &AuthContext,
     ) -> DomainResult<u64> {
         if ids.is_empty() { return Ok(0); }
@@ -715,18 +717,18 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
             "SELECT id, sync_priority FROM strategic_goals WHERE id IN ({})",
             vec!["?"; ids.len()].join(", ")
         );
-        let mut select_builder = query_as::<_, (String, i64)>(&select_query);
+        let mut select_builder = query_as::<_, (String, String)>(&select_query);
         for id_str in &id_strings {
             select_builder = select_builder.bind(id_str);
         }
-        let old_priorities: std::collections::HashMap<Uuid, SyncPriority> = select_builder
+        let old_priorities: std::collections::HashMap<Uuid, SyncPriorityFromSyncDomain> = select_builder
             .fetch_all(&mut *tx)
             .await
             .map_err(DbError::from)?
             .into_iter()
-            .filter_map(|(id_str, prio_int)| {
+            .filter_map(|(id_str, prio_text)| {
                  Uuid::parse_str(&id_str).ok()
-                     .and_then(|id| SyncPriority::from_i64(prio_int).map(|prio| (id, prio)))
+                     .and_then(|id| SyncPriorityFromSyncDomain::from_str(&prio_text).map(|prio| (id, prio)).ok())
             })
             .collect();
 
@@ -736,10 +738,10 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
         let user_id = auth.user_id;
         let user_id_str = user_id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
-        let priority_val = priority as i64;
+        let priority_str = priority.as_str();
         
         let mut update_builder = QueryBuilder::new("UPDATE strategic_goals SET ");
-        update_builder.push("sync_priority = "); update_builder.push_bind(priority_val);
+        update_builder.push("sync_priority = "); update_builder.push_bind(priority_str);
         update_builder.push(", updated_at = "); update_builder.push_bind(now_str.clone()); // Use clone as now_str is used later if needed
         update_builder.push(", updated_by_user_id = "); update_builder.push_bind(user_id_str.clone()); // Use clone
         update_builder.push(" WHERE id IN (");
@@ -761,8 +763,8 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
                         entity_id: *id,
                         operation_type: ChangeOperationType::Update,
                         field_name: Some("sync_priority".to_string()),
-                        old_value: serde_json::to_string(&(*old_priority as i64)).ok(),
-                        new_value: serde_json::to_string(&priority_val).ok(),
+                        old_value: serde_json::to_string(old_priority.as_str()).ok(),
+                        new_value: serde_json::to_string(priority_str).ok(),
                         timestamp: now, 
                         user_id: user_id,
                         device_id: device_uuid.clone(),

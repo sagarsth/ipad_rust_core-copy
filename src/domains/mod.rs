@@ -6,7 +6,7 @@ mod activity;
 mod participant;
 mod livelihood;
 pub mod sync;
-
+mod workshop;
 pub mod core;
 mod settings;
 mod strategic_goal;

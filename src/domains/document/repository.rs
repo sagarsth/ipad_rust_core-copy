@@ -198,18 +198,18 @@ impl DocumentTypeRepository for SqliteDocumentTypeRepository {
 
             query(
                 r#"INSERT INTO document_types (
-                    id, name, description, icon, color, default_priority, -- Added default_priority
+                    id, name, description, icon, color, default_priority, // Now TEXT
                     created_at, updated_at, created_by_user_id, updated_by_user_id,
                     name_updated_at, name_updated_by, description_updated_at, description_updated_by,
                     icon_updated_at, icon_updated_by, color_updated_at, color_updated_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"# // Added placeholder for default_priority
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"# 
             )
             .bind(id.to_string())
             .bind(&new_type.name)
             .bind(&new_type.description)
             .bind(&new_type.icon)
             .bind(&new_type.color)
-            .bind(&new_type.default_priority) // Bind default_priority
+            .bind(new_type.default_priority.as_str()) // Bind default_priority as TEXT
             .bind(&now).bind(&now)
             .bind(&user_id).bind(&user_id)
             // LWW fields initialization
@@ -307,7 +307,7 @@ impl DocumentTypeRepository for SqliteDocumentTypeRepository {
              // Non-LWW field update (if needed)
               if let Some(prio) = &update_data.default_priority {
                  sets.push("default_priority = ?".to_string());
-                 binds.push(prio.clone());
+                 binds.push(prio.as_str().to_string()); // Bind as TEXT
              }
 
 
@@ -669,7 +669,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             .bind(
                 SyncPriority::from_str(&new_doc.sync_priority)
                     .map_err(|_| DomainError::Validation(ValidationError::custom(&format!("Invalid sync priority string: {}", new_doc.sync_priority))))?
-                as i64 // Cast the resulting enum variant to i64
+                    .as_str() // Bind the string representation
             )
             .bind(temp_related_id_str) // Store temp ID if provided
             .bind(&now).bind(&now)
@@ -893,7 +893,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             "SELECT id, sync_priority FROM media_documents WHERE id IN ({})",
             vec!["?"; ids.len()].join(", ")
         );
-        let mut select_builder = query_as::<_, (String, Option<i64>)>(&select_query); // Priority is nullable
+        let mut select_builder = query_as::<_, (String, String)>(&select_query); // Expect TEXT
         for id_str in &id_strings {
             select_builder = select_builder.bind(id_str);
         }
@@ -901,10 +901,11 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             .fetch_all(&mut *tx) // Use the transaction
             .await.map_err(DbError::from)?
             .into_iter()
-            .filter_map(|(id_str, prio_int_opt)| {
+            .filter_map(|(id_str, prio_text_opt)| { // Changed to prio_text_opt: Option<String> or String
+                // Assuming sync_priority is NOT NULL in DB and TEXT
                 match Uuid::parse_str(&id_str) {
-                    Ok(id) => Some((id, prio_int_opt.map(SyncPriority::from).unwrap_or(SyncPriority::Normal))),
-                    Err(_) => None, // Skip rows with invalid UUIDs
+                     Ok(id) => Some((id, SyncPriority::from_str(&prio_text_opt).unwrap_or(SyncPriority::Normal))),
+                     Err(_) => None,
                 }
             }).collect();
 
@@ -913,7 +914,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         let user_id_str = auth.user_id.to_string();
         let user_uuid = auth.user_id;
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
-        let priority_val = priority as i64; // Store as integer
+        let priority_str = priority.as_str(); // Store as string
 
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let query_str = format!(
@@ -924,7 +925,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         );
 
         let mut query_builder = sqlx::query(&query_str)
-            .bind(priority_val)
+            .bind(priority_str) // Bind string
             .bind(now)
             .bind(user_id_str);
 
@@ -945,8 +946,8 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
                         entity_id: *id,
                         operation_type: ChangeOperationType::Update,
                         field_name: Some("sync_priority".to_string()),
-                        old_value: serde_json::to_string(&(*old_priority as i64)).ok(), // Log old priority as i64
-                        new_value: serde_json::to_string(&priority_val).ok(), // Log new priority as i64
+                        old_value: serde_json::to_string(old_priority.as_str()).ok(), // Log old priority as string
+                        new_value: serde_json::to_string(priority_str).ok(), // Log new priority as string
                         timestamp: now_dt,
                         user_id: user_uuid,
                         device_id: device_uuid.clone(),

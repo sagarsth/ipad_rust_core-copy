@@ -21,7 +21,7 @@ use uuid::Uuid;
 use std::str::FromStr;
 use std::collections::{HashMap, HashSet};
 use chrono::{Utc, DateTime};
-
+use crate::domains::core::delete_service::PendingDeletionManager;
 // Add correct imports
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
@@ -186,6 +186,7 @@ impl StrategicGoalServiceImpl {
         document_service: Arc<dyn DocumentService>,
         // --- ADDED: Inject Project Repository --- 
         project_repo: Arc<dyn ProjectRepository + Send + Sync>,
+        deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         // Define a local wrapper struct that implements DeleteServiceRepository
         struct RepoAdapter(Arc<dyn StrategicGoalRepository + Send + Sync>);
@@ -244,6 +245,7 @@ impl StrategicGoalServiceImpl {
             change_log_repo,
             dependency_checker,
             None,
+            deletion_manager,
         ));
         
         Self {

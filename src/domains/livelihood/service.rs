@@ -24,6 +24,7 @@ use crate::domains::document::service::DocumentService;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
+use crate::domains::core::delete_service::PendingDeletionManager;
 
 /// Interface for the livelihood service
 #[async_trait]
@@ -233,6 +234,7 @@ impl LivehoodServiceImpl {
         participant_repo: Arc<dyn ParticipantRepository>,
         document_service: Arc<dyn DocumentService>,
         media_doc_repo: Arc<dyn MediaDocumentRepository>,
+        deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         let delete_service = Arc::new(BaseDeleteService::new(
             pool.clone(),
@@ -240,7 +242,8 @@ impl LivehoodServiceImpl {
             tombstone_repo,
             change_log_repo,
             dependency_checker,
-            Some(media_doc_repo) // Pass media repo for delete service to handle document cleanup
+            Some(media_doc_repo),
+            deletion_manager,
         ));
         
         Self {
@@ -599,7 +602,7 @@ impl LivehoodService for LivehoodServiceImpl {
         }
         
         // Set the updated by user ID
-        update_data.updated_by_user_id = auth.user_id;
+        update_data.updated_by_user_id = Some(auth.user_id);
         
         // Validate the update data
         update_data.validate().map_err(ServiceError::Domain)?;
@@ -685,23 +688,12 @@ impl LivehoodService for LivehoodServiceImpl {
         // Convert to response
         let mut response = SubsequentGrantResponse::from(grant);
         
-        // Get participant name for livelihood summary
-        let participant_name = if let Some(participant_id) = livelihood.participant_id {
-            match self.participant_repo.find_by_id(participant_id).await {
-                Ok(participant) => participant.name,
-                Err(_) => "Unknown".to_string(),
-            }
-        } else {
-            "Unknown".to_string()
-        };
-        
         // Add livelihood summary
         response = response.with_livelihood(crate::domains::livelihood::types::LivelihoodSummary {
             id: livelihood.id,
-            participant_id: livelihood.participant_id.unwrap_or(Uuid::nil()),
-            participant_name,
-            grant_amount: livelihood.grant_amount,
-            purpose: livelihood.purpose,
+            type_: livelihood.type_.clone(),
+            description: livelihood.description.clone(),
+            initial_grant_amount: livelihood.initial_grant_amount,
         });
         
         Ok(response)
@@ -732,32 +724,18 @@ impl LivehoodService for LivehoodServiceImpl {
             .await
             .map_err(ServiceError::Domain)?;
         
-        // Get the livelihood to create summary
         let livelihood = self.repo
             .find_by_id(grant.livelihood_id)
             .await
             .map_err(ServiceError::Domain)?;
         
-        // Convert to response
         let mut response = SubsequentGrantResponse::from(grant);
         
-        // Get participant name for livelihood summary
-        let participant_name = if let Some(participant_id) = livelihood.participant_id {
-            match self.participant_repo.find_by_id(participant_id).await {
-                Ok(participant) => participant.name,
-                Err(_) => "Unknown".to_string(),
-            }
-        } else {
-            "Unknown".to_string()
-        };
-        
-        // Add livelihood summary
         response = response.with_livelihood(crate::domains::livelihood::types::LivelihoodSummary {
             id: livelihood.id,
-            participant_id: livelihood.participant_id.unwrap_or(Uuid::nil()),
-            participant_name,
-            grant_amount: livelihood.grant_amount,
-            purpose: livelihood.purpose,
+            type_: livelihood.type_.clone(),
+            description: livelihood.description.clone(),
+            initial_grant_amount: livelihood.initial_grant_amount,
         });
         
         Ok(response)
@@ -803,10 +781,9 @@ impl LivehoodService for LivehoodServiceImpl {
         // Add livelihood summary
         response = response.with_livelihood(crate::domains::livelihood::types::LivelihoodSummary {
             id: livelihood.id,
-            participant_id: livelihood.participant_id.unwrap_or(Uuid::nil()),
-            participant_name,
-            grant_amount: livelihood.grant_amount,
-            purpose: livelihood.purpose,
+            type_: livelihood.type_.clone(),
+            description: livelihood.description.clone(),
+            initial_grant_amount: livelihood.initial_grant_amount,
         });
         
         Ok(response)
@@ -1125,7 +1102,7 @@ impl LivehoodService for LivehoodServiceImpl {
             .collect::<Vec<_>>();
 
         // 5. Calculate total grant amount
-        let initial_amount = livelihood.grant_amount.unwrap_or(0.0);
+        let initial_amount = livelihood.initial_grant_amount.unwrap_or(0.0);
         let subsequent_amount: f64 = subsequent_grants
             .iter()
             .filter_map(|g| g.amount)
@@ -1291,7 +1268,7 @@ impl LivehoodService for LivehoodServiceImpl {
         let total_grants_received = livelihoods.len() as i64 + all_subsequent_grants.len() as i64;
 
         // 7. Calculate total grant amount
-        let initial_amount: f64 = livelihoods.iter().filter_map(|l| l.grant_amount).sum();
+        let initial_amount: f64 = livelihoods.iter().filter_map(|l| l.initial_grant_amount).sum();
         let subsequent_amount: f64 = all_subsequent_grants.iter().filter_map(|g| g.amount).sum();
         let total_grant_amount = initial_amount + subsequent_amount;
 
@@ -1328,14 +1305,14 @@ impl LivehoodService for LivehoodServiceImpl {
 
         // 9. Determine outcome status (check if *any* livelihood has a non-empty outcome)
         let has_outcome = livelihoods.iter().any(|l| 
-            l.outcome.as_ref().map_or(false, |o| !o.is_empty())
+            l.description.as_ref().map_or(false, |o| !o.is_empty())
         );
         
-        // Get the most recent outcome description (order by update time might be better)
+        // Placeholder for outcome_description, using description of the most recently updated livelihood
         let outcome_description = livelihoods.iter()
             .max_by_key(|l| l.updated_at)
-            .and_then(|l| l.outcome.clone())
-            .filter(|o| !o.is_empty());
+            .and_then(|l| l.description.clone()) // Using description as a proxy for outcome description
+            .filter(|o: &String| !o.is_empty());
 
         // 10. Return metrics
         Ok(ParticipantOutcomeMetrics {
@@ -1489,7 +1466,7 @@ impl LivehoodService for LivehoodServiceImpl {
         // 8. Return dashboard metrics
         Ok(LivelihoodDashboardMetrics {
             total_participants_supported: unique_participants_count,
-            total_grant_amount: stats.total_grant_amount + stats.total_subsequent_grant_amount,
+            total_grant_amount: stats.total_initial_grant_amount + stats.total_subsequent_grant_amount,
             grant_count_by_month,
             grant_amount_by_month,
             outcome_status_distribution,

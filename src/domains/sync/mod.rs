@@ -1,8 +1,11 @@
 pub mod types;
 pub mod repository;
 pub mod conflict_resolver;
+pub mod entity_merger;
 
 pub mod complete_change_log_tombstone_repo;
+pub mod utils;
+pub mod cloud_storage;
 
 // Re-exports
 

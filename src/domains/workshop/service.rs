@@ -27,6 +27,7 @@ use crate::domains::compression::types::CompressionPriority;
 use chrono::{NaiveDate, Local};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use crate::domains::core::delete_service::PendingDeletionManager;
 
 /// Trait defining workshop service operations
 #[async_trait]
@@ -241,6 +242,7 @@ impl WorkshopServiceImpl {
         project_repo: Arc<dyn ProjectRepository>,
         workshop_participant_repo: Arc<dyn WorkshopParticipantRepository>,
         document_service: Arc<dyn DocumentService>,
+        deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         // Define a local wrapper struct that implements DeleteServiceRepository
         // Note: This adapter pattern is useful if the main repo trait doesn't directly implement all needed sub-traits.
@@ -298,6 +300,8 @@ impl WorkshopServiceImpl {
             tombstone_repo,
             change_log_repo,
             dependency_checker,
+            None,
+            deletion_manager,
         ));
         
         Self {
@@ -307,6 +311,7 @@ impl WorkshopServiceImpl {
             workshop_participant_repo,
             document_service,
             pool, // Store the pool for direct queries
+          
         }
     }
     
@@ -1043,7 +1048,7 @@ impl WorkshopService for WorkshopServiceImpl {
             auth,
             "workshops",
             id,
-            PaginationParams::new(1, 100), // Adjust limits as needed
+            PaginationParams { page: 1, per_page: 100 }, // Corrected instantiation
             None,
         ).await?.items;
         
@@ -1052,8 +1057,8 @@ impl WorkshopService for WorkshopServiceImpl {
         let mut total_document_count = 0;
 
         for doc in documents {
-            // Use linked_field if available, otherwise use a default category
-            let category = doc.linked_field.clone().unwrap_or_else(|| "General".to_string());
+            // Use field_identifier if available, otherwise use a default category
+            let category = doc.field_identifier.clone().unwrap_or_else(|| "General".to_string());
             
             documents_by_category
                 .entry(category)

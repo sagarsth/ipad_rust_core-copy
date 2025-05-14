@@ -28,7 +28,7 @@ use crate::domains::document::service::DocumentService;
 use crate::domains::document::types::MediaDocumentResponse; // Ensure this is imported
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
-
+use crate::domains::core::delete_service::PendingDeletionManager;
 
 /// Trait defining project service operations
 #[async_trait]
@@ -185,6 +185,7 @@ impl ProjectServiceImpl {
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         media_doc_repo: Arc<dyn MediaDocumentRepository>, // Still needed for BaseDeleteService
         document_service: Arc<dyn DocumentService>,
+        deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         // --- Adapter setup remains the same ---
         struct RepoAdapter(Arc<dyn ProjectRepository + Send + Sync>);
@@ -239,6 +240,7 @@ impl ProjectServiceImpl {
             change_log_repo,
             dependency_checker,
             Some(media_doc_repo), // Pass media repo for delete service's file handling
+            deletion_manager,
         ));
 
         Self {

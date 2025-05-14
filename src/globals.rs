@@ -12,6 +12,7 @@ use crate::domains::user::User;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::auth::AuthContext;
 use uuid::Uuid;
+use crate::domains::core::delete_service::PendingDeletionManager;
 
 // Global state definitions
 lazy_static! {
@@ -25,6 +26,7 @@ lazy_static! {
     static ref TOMBSTONE_REPO: Mutex<Option<Arc<dyn TombstoneRepository>>> = Mutex::new(None);
     static ref DEPENDENCY_CHECKER: Mutex<Option<Arc<dyn DependencyChecker>>> = Mutex::new(None);
     static ref DELETE_SERVICE_USER: Mutex<Option<Arc<dyn DeleteService<User>>>> = Mutex::new(None);
+    static ref DELETION_MANAGER: Mutex<Option<Arc<PendingDeletionManager>>> = Mutex::new(None);
 }
 
 static INIT: Once = Once::new();
@@ -76,6 +78,9 @@ pub fn initialize(
                 offline_mode,
             ));
 
+            // Create PendingDeletionManager
+            let deletion_manager = Arc::new(PendingDeletionManager::new(pool.clone()));
+
             // --- Create Delete Services ---
             // Adapter for DeleteServiceRepository<User>
             struct UserRepoAdapter(Arc<dyn UserRepository>); 
@@ -115,6 +120,9 @@ pub fn initialize(
                 change_log_repo.clone(),
                 dependency_checker.clone(),
                 None, // Assuming User doesn't link to MediaDocumentRepository
+                deletion_manager.clone(), // Pass the instantiated deletion_manager
+            
+
             ));
 
             // --- Create Domain Services ---
@@ -132,6 +140,7 @@ pub fn initialize(
             *DEPENDENCY_CHECKER.lock().map_err(|_| "DEPENDENCY_CHECKER lock poisoned")? = Some(dependency_checker);
             *USER_REPO.lock().map_err(|_| "USER_REPO lock poisoned")? = Some(user_repo);
             *DELETE_SERVICE_USER.lock().map_err(|_| "DELETE_SERVICE_USER lock poisoned")? = Some(delete_service_user); 
+            *DELETION_MANAGER.lock().map_err(|_| "DELETION_MANAGER lock poisoned")? = Some(deletion_manager); // Store the deletion manager
             *USER_SERVICE.lock().map_err(|_| "USER_SERVICE lock poisoned")? = Some(user_service);
             *AUTH_SERVICE.lock().map_err(|_| "AUTH_SERVICE lock poisoned")? = Some(auth_service);
             
@@ -210,4 +219,12 @@ pub fn get_user_delete_service() -> FFIResult<Arc<dyn DeleteService<User>>> {
         .map_err(|_| FFIError::internal("DELETE_SERVICE_USER lock poisoned".to_string()))?
         .clone()
         .ok_or_else(|| FFIError::internal("User delete service not initialized".to_string()))
+}
+
+/// Get pending deletion manager
+pub fn get_deletion_manager() -> FFIResult<Arc<PendingDeletionManager>> {
+    DELETION_MANAGER.lock()
+        .map_err(|_| FFIError::internal("DELETION_MANAGER lock poisoned".to_string()))?
+        .clone()
+        .ok_or_else(|| FFIError::internal("Pending deletion manager not initialized".to_string()))
 } 

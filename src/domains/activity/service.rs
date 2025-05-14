@@ -22,6 +22,9 @@ use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
 
+// Import PendingDeletionManager
+use crate::domains::core::delete_service::PendingDeletionManager;
+
 /// Trait defining activity service operations
 #[async_trait]
 pub trait ActivityService: DeleteService<Activity> + Send + Sync {
@@ -111,6 +114,7 @@ impl ActivityServiceImpl {
         change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         document_service: Arc<dyn DocumentService>,
+        deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         // Local adapter struct
         struct RepoAdapter(Arc<dyn ActivityRepository + Send + Sync>);
@@ -167,6 +171,7 @@ impl ActivityServiceImpl {
             change_log_repo,
             dependency_checker,
             None,
+            deletion_manager,
         ));
         
         Self {

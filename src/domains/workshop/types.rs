@@ -306,7 +306,7 @@ pub struct WorkshopRow {
     pub updated_by_user_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
-    pub sync_priority: i64,
+    pub sync_priority: String,
 }
 
 impl WorkshopRow {
@@ -390,7 +390,10 @@ impl WorkshopRow {
             updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
             deleted_at: parse_datetime(&self.deleted_at).transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
-            sync_priority: SyncPriority::from(self.sync_priority),
+            sync_priority: SyncPriority::from_str(&self.sync_priority).unwrap_or_else(|e| {
+                log::warn!("Invalid sync_priority string \'{}\' in WorkshopRow for ID {}: {:?}. Defaulting to Normal.", self.sync_priority, self.id, e);
+                SyncPriority::Normal
+            }),
         })
     }
 }

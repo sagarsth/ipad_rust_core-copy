@@ -10,6 +10,7 @@ use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetada
 use std::collections::{HashSet, HashMap};
 use std::str::FromStr;
 use crate::domains::project::types::ProjectSummary;
+use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
 
 /// Role a user can have in relation to a strategic goal
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -84,7 +85,7 @@ pub struct StrategicGoal {
     pub target_value: Option<f64>,
     pub target_value_updated_at: Option<DateTime<Utc>>,
     pub target_value_updated_by: Option<Uuid>,
-    pub actual_value: f64,
+    pub actual_value: Option<f64>,
     pub actual_value_updated_at: Option<DateTime<Utc>>,
     pub actual_value_updated_by: Option<Uuid>,
     pub status_id: Option<i64>,
@@ -99,7 +100,7 @@ pub struct StrategicGoal {
     pub updated_by_user_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
-    pub sync_priority: SyncPriority,
+    pub sync_priority: SyncPriorityFromSyncDomain,
 }
 
 impl StrategicGoal {
@@ -112,7 +113,7 @@ impl StrategicGoal {
     pub fn progress_percentage(&self) -> Option<f64> {
         if let Some(target) = self.target_value {
             if target > 0.0 {
-                return Some((self.actual_value / target) * 100.0);
+                return Some((self.actual_value.unwrap_or(0.0) / target) * 100.0);
             }
         }
         None
@@ -149,7 +150,7 @@ pub struct NewStrategicGoal {
     pub actual_value: Option<f64>,
     pub status_id: Option<i64>,
     pub responsible_team: Option<String>,
-    pub sync_priority: SyncPriority,
+    pub sync_priority: SyncPriorityFromSyncDomain,
     pub created_by_user_id: Option<Uuid>,
 }
 
@@ -190,7 +191,7 @@ pub struct UpdateStrategicGoal {
     pub actual_value: Option<f64>,
     pub status_id: Option<i64>,
     pub responsible_team: Option<String>,
-    pub sync_priority: Option<SyncPriority>,
+    pub sync_priority: Option<SyncPriorityFromSyncDomain>,
     pub updated_by_user_id: Uuid,
 }
 
@@ -238,7 +239,7 @@ pub struct StrategicGoalRow {
     pub target_value: Option<f64>,
     pub target_value_updated_at: Option<String>,
     pub target_value_updated_by: Option<String>,
-    pub actual_value: f64,
+    pub actual_value: Option<f64>,
     pub actual_value_updated_at: Option<String>,
     pub actual_value_updated_by: Option<String>,
     pub status_id: Option<i64>,
@@ -253,7 +254,7 @@ pub struct StrategicGoalRow {
     pub updated_by_user_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
-    pub sync_priority: i64,
+    pub sync_priority: String,
 }
 
 impl StrategicGoalRow {
@@ -325,7 +326,7 @@ impl StrategicGoalRow {
                 .transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id)
                 .transpose()?,
-            sync_priority: SyncPriority::from_i64(self.sync_priority).ok_or_else(|| DomainError::Internal(format!("Invalid sync_priority value: {}", self.sync_priority)))?,
+            sync_priority: SyncPriorityFromSyncDomain::from_str(&self.sync_priority).unwrap_or_default(),
         })
     }
 }
@@ -338,13 +339,13 @@ pub struct StrategicGoalResponse {
     pub outcome: Option<String>,
     pub kpi: Option<String>,
     pub target_value: Option<f64>,
-    pub actual_value: f64,
+    pub actual_value: Option<f64>,
     pub progress_percentage: Option<f64>,
     pub status_id: Option<i64>,
     pub responsible_team: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    pub sync_priority: SyncPriority,
+    pub sync_priority: SyncPriorityFromSyncDomain,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Vec<MediaDocumentResponse>>,
     #[serde(skip_serializing_if = "Option::is_none")]

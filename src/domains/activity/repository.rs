@@ -245,10 +245,11 @@ impl ActivityRepository for SqliteActivityRepository {
                 target_value, target_value_updated_at, target_value_updated_by,
                 actual_value, actual_value_updated_at, actual_value_updated_by,
                 status_id, status_id_updated_at, status_id_updated_by,
+                sync_priority,
                 created_at, updated_at, created_by_user_id, updated_by_user_id,
                 deleted_at, deleted_by_user_id
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
             )
             "#,
         )
@@ -258,7 +259,10 @@ impl ActivityRepository for SqliteActivityRepository {
         .bind(&new_activity.kpi).bind(new_activity.kpi.as_ref().map(|_| &now_str)).bind(new_activity.kpi.as_ref().map(|_| &user_id_str))
         .bind(new_activity.target_value).bind(new_activity.target_value.map(|_| &now_str)).bind(new_activity.target_value.map(|_| &user_id_str))
         .bind(new_activity.actual_value.unwrap_or(0.0)).bind(new_activity.actual_value.map(|_| &now_str)).bind(new_activity.actual_value.map(|_| &user_id_str))
-        .bind(new_activity.status_id).bind(new_activity.status_id.map(|_| &now_str)).bind(new_activity.status_id.map(|_| &user_id_str))
+        .bind(new_activity.status_id)
+        .bind(new_activity.status_id.map(|_| &now_str))
+        .bind(new_activity.status_id.map(|_| &user_id_str))
+        .bind(new_activity.sync_priority.as_str())
         .bind(&now_str).bind(&now_str)
         .bind(&user_id_str).bind(&user_id_str)
         .execute(&mut **tx)
@@ -358,6 +362,12 @@ impl ActivityRepository for SqliteActivityRepository {
         add_lww!(target_value, "target_value", &update_data.target_value.as_ref());
         add_lww!(actual_value, "actual_value", &update_data.actual_value.as_ref());
         add_lww!(status_id, "status_id", &update_data.status_id.as_ref());
+        // Update sync_priority if provided
+        if let Some(sp) = &update_data.sync_priority {
+            separated.push("sync_priority = ");
+            separated.push_bind_unseparated(sp.as_str());
+            fields_updated = true;
+        }
 
         if !fields_updated {
             return Ok(old_entity); // No fields present in DTO

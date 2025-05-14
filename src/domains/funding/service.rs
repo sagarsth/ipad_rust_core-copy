@@ -28,7 +28,7 @@ use crate::domains::compression::types::CompressionPriority;
 use crate::domains::core::document_linking::DocumentLinkable;
 use chrono::{self, Datelike};
 use std::collections::HashMap;
-
+use crate::domains::core::delete_service::PendingDeletionManager;
 /// Trait defining project funding service operations
 #[async_trait]
 pub trait ProjectFundingService: DeleteService<ProjectFunding> + Send + Sync {
@@ -188,6 +188,7 @@ pub struct ProjectFundingServiceImpl {
     donor_repo: Arc<dyn DonorRepository + Send + Sync>,
     delete_service: Arc<BaseDeleteService<ProjectFunding>>,
     document_service: Arc<dyn DocumentService>,
+    deletion_manager: Arc<PendingDeletionManager>,
 }
 
 impl ProjectFundingServiceImpl {
@@ -200,6 +201,7 @@ impl ProjectFundingServiceImpl {
         change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         document_service: Arc<dyn DocumentService>,
+        deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         // --- Adapter setup for BaseDeleteService ---
         struct RepoAdapter(Arc<dyn ProjectFundingRepository + Send + Sync>);
@@ -254,6 +256,7 @@ impl ProjectFundingServiceImpl {
             change_log_repo,
             dependency_checker,
             None, // No media repo needed for funding
+            deletion_manager.clone(),
         ));
 
         Self {
@@ -263,6 +266,7 @@ impl ProjectFundingServiceImpl {
             donor_repo,
             delete_service,
             document_service,
+            deletion_manager,
         }
     }
 

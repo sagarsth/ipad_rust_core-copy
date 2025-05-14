@@ -8,7 +8,9 @@ use crate::domains::project::types::{NewProject, Project, ProjectRow, UpdateProj
 use crate::domains::sync::repository::ChangeLogRepository;
 use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
-use crate::types::{PaginatedResult, PaginationParams, SyncPriority};
+use crate::types::{PaginatedResult, PaginationParams};
+use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
+use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::{Utc, DateTime};
 use sqlx::{query, query_as, query_scalar};
@@ -60,7 +62,7 @@ pub trait ProjectRepository: DeleteServiceRepository<Project> + Send + Sync {
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
-        priority: SyncPriority,
+        priority: SyncPriorityFromSyncDomain,
         auth: &AuthContext,
     ) -> DomainResult<u64>;
 
@@ -309,7 +311,7 @@ impl ProjectRepository for SqliteProjectRepository {
             new_project.status_id.clone(), new_project.status_id.as_ref().map(|_| &now_str), new_project.status_id.as_ref().map(|_| &user_id_str),
             new_project.timeline.clone(), new_project.timeline.as_ref().map(|_| &now_str), new_project.timeline.as_ref().map(|_| &user_id_str),
             new_project.responsible_team.clone(), new_project.responsible_team.as_ref().map(|_| &now_str), new_project.responsible_team.as_ref().map(|_| &user_id_str),
-            new_project.sync_priority as i64,
+            new_project.sync_priority.as_str(),
             now_str.clone(), now_str.clone(), created_by_id_str, user_id_str.clone(),
             Option::<String>::None, Option::<String>::None
         )], |mut b, values| {
@@ -422,7 +424,7 @@ impl ProjectRepository for SqliteProjectRepository {
 
         if let Some(priority) = update_data.sync_priority {
             separated.push("sync_priority = ");
-            separated.push_bind_unseparated(priority as i64);
+            separated.push_bind_unseparated(priority.as_str());
             fields_updated = true;
         }
 
@@ -587,8 +589,8 @@ impl ProjectRepository for SqliteProjectRepository {
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("sync_priority".to_string()),
-                old_value: serde_json::to_string(&(old_entity.sync_priority as i64)).ok(),
-                new_value: serde_json::to_string(&(new_entity.sync_priority as i64)).ok(),
+                old_value: serde_json::to_string(old_entity.sync_priority.as_str()).ok(),
+                new_value: serde_json::to_string(new_entity.sync_priority.as_str()).ok(),
                 timestamp: now,
                 user_id: user_id,
                 device_id: device_uuid.clone(),
@@ -676,54 +678,55 @@ impl ProjectRepository for SqliteProjectRepository {
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
-        priority: SyncPriority,
+        priority: SyncPriorityFromSyncDomain,
         auth: &AuthContext,
     ) -> DomainResult<u64> {
         if ids.is_empty() { return Ok(0); }
         
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
 
-        // 1. Fetch old priorities
+        // Fetch old priorities
         let id_strings: Vec<String> = ids.iter().map(Uuid::to_string).collect();
         let select_query = format!(
             "SELECT id, sync_priority FROM projects WHERE id IN ({})",
             vec!["?"; ids.len()].join(", ")
         );
-        let mut select_builder = query_as::<_, (String, i64)>(&select_query);
+        // Fetch as String
+        let mut select_builder = query_as::<_, (String, String)>(&select_query);
         for id_str in &id_strings {
             select_builder = select_builder.bind(id_str);
         }
-        let old_priorities: std::collections::HashMap<Uuid, SyncPriority> = select_builder
+        let old_priorities: HashMap<Uuid, SyncPriorityFromSyncDomain> = select_builder
             .fetch_all(&mut *tx)
             .await.map_err(DbError::from)?
             .into_iter()
-            .filter_map(|(id_str, prio_int)| 
-                 Uuid::parse_str(&id_str).ok()
-                 .and_then(|id| SyncPriority::from_i64(prio_int).map(|prio| (id, prio)))
-            ).collect();
+            .filter_map(|(id_str, prio_text)| {
+                match Uuid::parse_str(&id_str) {
+                    Ok(id) => Some((id, SyncPriorityFromSyncDomain::from_str(&prio_text).unwrap_or_default())),
+                    Err(_) => None,
+                }
+            }).collect();
 
-        // 2. Perform Update
+        // Perform Update
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        let user_id = auth.user_id;
-        let user_id_str = user_id.to_string();
-        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
-        let priority_val = priority as i64;
-        
+        let user_id_str = auth.user_id.to_string();
+        let priority_str = priority.as_str(); // Now correctly uses the method from SyncPriorityFromSyncDomain
+
         let mut update_builder = QueryBuilder::new("UPDATE projects SET ");
-        update_builder.push("sync_priority = "); update_builder.push_bind(priority_val);
+        update_builder.push("sync_priority = "); update_builder.push_bind(priority_str); // Bind TEXT
         update_builder.push(", updated_at = "); update_builder.push_bind(now_str.clone());
         update_builder.push(", updated_by_user_id = "); update_builder.push_bind(user_id_str.clone());
         update_builder.push(" WHERE id IN (");
         let mut id_separated = update_builder.separated(",");
         for id in ids { id_separated.push_bind(id.to_string()); }
         update_builder.push(") AND deleted_at IS NULL");
-        
+
         let query = update_builder.build();
         let result = query.execute(&mut *tx).await.map_err(DbError::from)?;
         let rows_affected = result.rows_affected();
 
-        // 3. Log changes
+        // Log changes
         for id in ids {
             if let Some(old_priority) = old_priorities.get(id) {
                 if *old_priority != priority {
@@ -733,11 +736,11 @@ impl ProjectRepository for SqliteProjectRepository {
                         entity_id: *id,
                         operation_type: ChangeOperationType::Update,
                         field_name: Some("sync_priority".to_string()),
-                        old_value: serde_json::to_string(&(*old_priority as i64)).ok(),
-                        new_value: serde_json::to_string(&priority_val).ok(),
+                        old_value: serde_json::to_string(old_priority.as_str()).ok(), // Log as TEXT
+                        new_value: serde_json::to_string(priority_str).ok(), // Log as TEXT
                         timestamp: now,
-                        user_id: user_id,
-                        device_id: device_uuid.clone(),
+                        user_id: auth.user_id,
+                        device_id: auth.device_id.parse::<Uuid>().ok(),
                         document_metadata: None,
                         sync_batch_id: None,
                         processed_at: None,

@@ -1,5 +1,5 @@
 use crate::auth::AuthContext;
-use sqlx::{Executor, Pool, Row, Sqlite, Transaction, SqlitePool, query, query_as};
+use sqlx::{Executor, Pool, Row, Sqlite, Transaction, SqlitePool, query, query_as, query_scalar};
 use crate::domains::workshop::types::{
     NewWorkshopParticipant, UpdateWorkshopParticipant, WorkshopParticipant, WorkshopParticipantRow, ParticipantSummary, ParticipantDetail, WorkshopSummary, ParticipantAttendance
 };
@@ -9,8 +9,11 @@ use async_trait::async_trait;
 use chrono::{Utc, Local}; // Added Local
 use uuid::Uuid;
 use std::collections::HashMap; // Added HashMap
-use crate::change_log::{ChangeLogEntry, ChangeLogRepository, ChangeOperation, EntityType}; // Added Change Log
+use crate::domains::sync::repository::ChangeLogRepository; // Corrected path
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, SyncPriority}; // Corrected path and type name, removed EntityType
 use serde_json; // Added serde_json for serialization
+use std::sync::Arc;
+use log::{debug, error, warn};
 
 /// Trait defining workshop-participant relationship repository operations
 #[async_trait]
@@ -105,14 +108,23 @@ pub trait WorkshopParticipantRepository: Send + Sync {
 }
 
 /// SQLite implementation for WorkshopParticipantRepository
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SqliteWorkshopParticipantRepository {
     pool: SqlitePool,
-    change_log_repo: Box<dyn ChangeLogRepository>, // Added ChangeLog repo
+    change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
+}
+
+impl std::fmt::Debug for SqliteWorkshopParticipantRepository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqliteWorkshopParticipantRepository")
+            .field("pool", &self.pool)
+            .field("change_log_repo", &"<ChangeLogRepository>")
+            .finish()
+    }
 }
 
 impl SqliteWorkshopParticipantRepository {
-    pub fn new(pool: SqlitePool, change_log_repo: Box<dyn ChangeLogRepository>) -> Self { // Updated constructor
+    pub fn new(pool: SqlitePool, change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>) -> Self { // Updated constructor
         Self { pool, change_log_repo }
     }
 
@@ -147,20 +159,27 @@ impl SqliteWorkshopParticipantRepository {
     async fn log_change(
         &self,
         entity_id: Uuid,
-        operation: ChangeOperation,
+        operation: ChangeOperationType,
         details: Option<serde_json::Value>,
         auth: &AuthContext,
     ) -> DomainResult<()> {
         let log_entry = ChangeLogEntry {
-            id: Uuid::new_v4(),
-            entity_type: EntityType::WorkshopParticipant, // Specific entity type
+            operation_id: Uuid::new_v4(),
+            entity_table: "workshop_participants".to_string(),
             entity_id,
-            operation,
-            user_id: auth.user_id,
+            operation_type: operation,
+            field_name: None,
+            old_value: None,
+            new_value: if operation == ChangeOperationType::Create { details.as_ref().map(|d| d.to_string()) } else { None },
+            document_metadata: None,
             timestamp: Utc::now(),
-            details,
+            user_id: auth.user_id,
+            device_id: Uuid::parse_str(&auth.device_id).ok(),
+            sync_batch_id: None,
+            processed_at: None,
+            sync_error: None,
         };
-        self.change_log_repo.log_change(&log_entry).await
+        self.change_log_repo.create_change_log(&log_entry).await
     }
 }
 
@@ -240,7 +259,7 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
                  "pre_evaluation": entity.pre_evaluation,
                  "post_evaluation": entity.post_evaluation,
              });
-             self.log_change(entity.id, ChangeOperation::Create, Some(details), auth).await?;
+             self.log_change(entity.id, ChangeOperationType::Create, Some(details), auth).await?;
 
              Ok(entity)
         } else {
@@ -309,7 +328,7 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
              // Log against one of the known IDs or a placeholder if necessary.
              // Using workshop_id as a stand-in entity ID for the log for now.
              // A better approach might be to fetch the link ID first.
-             self.log_change(workshop_id, ChangeOperation::Delete, Some(details), auth).await?;
+             self.log_change(workshop_id, ChangeOperationType::Delete, Some(details), auth).await?;
             Ok(())
         }
     }
@@ -404,7 +423,7 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
                     "updated_fields": update_data, // Log what was attempted to be updated
                     // Optionally include before/after state if `initial_state` was captured successfully
                 });
-                self.log_change(updated_link.id, ChangeOperation::Update, Some(details), auth).await?;
+                self.log_change(updated_link.id, ChangeOperationType::Update, Some(details), auth).await?;
                 
                 tx.commit().await.map_err(DbError::from)?;
                 Ok(updated_link)
@@ -847,7 +866,7 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
             Ok(_) => Ok(results),
             Err(e) => {
                 // Commit failed, return errors for all as uncertain
-                let commit_error = DbError::Transaction(format!("Commit failed after batch add: {}", e)).into();
+                let commit_error: DomainError = DbError::Transaction(format!("Commit failed after batch add: {}", e)).into();
                 Ok(participant_ids.iter().map(|&pid| (pid, Err(commit_error.clone()))).collect())
             }
         }

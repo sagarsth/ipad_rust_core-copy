@@ -28,7 +28,7 @@ use crate::domains::document::service::DocumentService;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
-
+use crate::domains::core::delete_service::PendingDeletionManager;
 /// Trait defining donor service operations
 #[async_trait]
 pub trait DonorService: DeleteService<Donor> + Send + Sync {
@@ -186,6 +186,7 @@ impl DonorServiceImpl {
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         media_doc_repo: Arc<dyn MediaDocumentRepository>,
         document_service: Arc<dyn DocumentService>,
+        deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         // --- Adapter setup for BaseDeleteService ---
         struct RepoAdapter(Arc<dyn DonorRepository + Send + Sync>);
@@ -240,6 +241,7 @@ impl DonorServiceImpl {
             change_log_repo,
             dependency_checker,
             Some(media_doc_repo), // Pass media repo for file handling
+            deletion_manager,
         ));
 
         Self {

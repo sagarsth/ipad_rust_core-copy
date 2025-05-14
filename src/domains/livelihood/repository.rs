@@ -12,6 +12,13 @@ use uuid::Uuid;
 use crate::validation::Validate;
 use async_trait::async_trait;
 use std::collections::HashMap;
+use crate::domains::sync::repository::ChangeLogRepository;
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+use crate::types::SyncPriority;
+use serde_json;
+use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
+use std::str::FromStr;
+use std::sync::Arc;
 
 /// Repository for livelihood entities and their subsequent grants
 #[async_trait]
@@ -118,6 +125,13 @@ pub trait LivehoodRepository:
         end_date: &str,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Livelihood>>;
+
+    async fn update_sync_priority(
+        &self,
+        ids: &[Uuid],
+        priority: SyncPriorityFromSyncDomain,
+        auth: &AuthContext,
+    ) -> DomainResult<u64>;
 }
 
 /// Repository for subsequent grants
@@ -210,12 +224,13 @@ pub trait SubsequentGrantRepository: Send + Sync {
 /// SQLite implementation of the livelihood repository
 pub struct SqliteLivelihoodRepository {
     pool: Pool<Sqlite>,
+    change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
 }
 
 impl SqliteLivelihoodRepository {
     /// Create a new SQLite livelihood repository
-    pub fn new(pool: Pool<Sqlite>) -> Self {
-        Self { pool }
+    pub fn new(pool: Pool<Sqlite>, change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>) -> Self {
+        Self { pool, change_log_repo }
     }
     
     /// Map a database row to a domain entity
@@ -392,54 +407,73 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<Livelihood> {
-        // Validate the input
-        new_livelihood.validate()?;
-        
-        let id = Uuid::new_v4();
+        let id = new_livelihood.id.unwrap_or_else(Uuid::new_v4);
         let now = Utc::now();
-        
-        // Get created by from auth context or from dto
-        let created_by = new_livelihood.created_by_user_id.unwrap_or(auth.user_id);
-        
-        // Insert the new livelihood
+        let now_str = now.to_rfc3339();
+        let user_id = auth.user_id;
+        let user_id_str = user_id.to_string();
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let created_by_user_id_for_query = new_livelihood.created_by_user_id.unwrap_or(user_id);
+        let created_by_user_id_str = created_by_user_id_for_query.to_string();
+
         query(
             r#"
             INSERT INTO livelihoods (
-                id, 
-                participant_id, 
-                project_id, 
-                grant_amount, 
-                grant_amount_updated_at,
-                grant_amount_updated_by,
-                purpose, 
-                purpose_updated_at,
-                purpose_updated_by,
-                created_at, 
-                updated_at,
-                created_by_user_id,
-                updated_by_user_id
-            ) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#
+                id, participant_id, project_id, 
+                type, type_updated_at, type_updated_by, 
+                description, description_updated_at, description_updated_by,
+                status_id, status_id_updated_at, status_id_updated_by, 
+                initial_grant_date, initial_grant_date_updated_at, initial_grant_date_updated_by, 
+                initial_grant_amount, initial_grant_amount_updated_at, initial_grant_amount_updated_by,
+                sync_priority, 
+                created_at, updated_at, created_by_user_id, updated_by_user_id, 
+                deleted_at, deleted_by_user_id
+            ) VALUES (
+                ?, ?, ?, /* id, participant_id, project_id */
+                ?, ?, ?, /* type, type_updated_at, type_updated_by */
+                ?, ?, ?, /* description, description_updated_at, description_updated_by */
+                ?, ?, ?, /* status_id, status_id_updated_at, status_id_updated_by */
+                ?, ?, ?, /* initial_grant_date, initial_grant_date_updated_at, initial_grant_date_updated_by */
+                ?, ?, ?, /* initial_grant_amount, initial_grant_amount_updated_at, initial_grant_amount_updated_by */
+                ?,       /* sync_priority */
+                ?, ?, ?, ?, /* created_at, updated_at, created_by_user_id, updated_by_user_id */
+                NULL, NULL  /* deleted_at, deleted_by_user_id */
+            )
+            "#,
         )
         .bind(id.to_string())
-        .bind(new_livelihood.participant_id.map(|id| id.to_string()))
-        .bind(new_livelihood.project_id.map(|id| id.to_string()))
-        .bind(new_livelihood.grant_amount)
-        .bind(new_livelihood.grant_amount.map(|_| now.to_rfc3339()))
-        .bind(new_livelihood.grant_amount.map(|_| auth.user_id.to_string()))
-        .bind(&new_livelihood.purpose)
-        .bind(new_livelihood.purpose.as_ref().map(|_| now.to_rfc3339()))
-        .bind(new_livelihood.purpose.as_ref().map(|_| auth.user_id.to_string()))
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .bind(created_by.to_string())
-        .bind(auth.user_id.to_string())
+        .bind(new_livelihood.participant_id.map(|uid| uid.to_string()))
+        .bind(new_livelihood.project_id.map(|uid| uid.to_string()))
+        .bind(&new_livelihood.type_)
+        .bind(&now_str).bind(&user_id_str) // type_ LWW
+        .bind(&new_livelihood.description)
+        .bind(new_livelihood.description.as_ref().map(|_| &now_str)).bind(new_livelihood.description.as_ref().map(|_| &user_id_str)) // description LWW
+        .bind(new_livelihood.status_id)
+        .bind(new_livelihood.status_id.map(|_| &now_str)).bind(new_livelihood.status_id.map(|_| &user_id_str)) // status_id LWW
+        .bind(&new_livelihood.initial_grant_date)
+        .bind(new_livelihood.initial_grant_date.as_ref().map(|_| &now_str)).bind(new_livelihood.initial_grant_date.as_ref().map(|_| &user_id_str)) // initial_grant_date LWW
+        .bind(new_livelihood.initial_grant_amount)
+        .bind(new_livelihood.initial_grant_amount.map(|_| &now_str)).bind(new_livelihood.initial_grant_amount.map(|_| &user_id_str)) // initial_grant_amount LWW
+        .bind(new_livelihood.sync_priority.as_str())
+        .bind(&now_str) // created_at
+        .bind(&now_str) // updated_at
+        .bind(&created_by_user_id_str) // created_by_user_id
+        .bind(&user_id_str) // updated_by_user_id
         .execute(&mut **tx)
         .await
         .map_err(DbError::from)?;
-        
-        // Fetch the newly created livelihood
+
+        let entry = ChangeLogEntry {
+            operation_id: Uuid::new_v4(),
+            entity_table: self.entity_name().to_string(),
+            entity_id: id,
+            operation_type: ChangeOperationType::Create,
+            field_name: None, old_value: None, new_value: None,
+            timestamp: now, user_id: created_by_user_id_for_query, device_id: device_uuid,
+            document_metadata: None, sync_batch_id: None, processed_at: None, sync_error: None,
+        };
+        self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
+
         self.find_by_id_with_tx(id, tx).await
     }
     
@@ -469,50 +503,36 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<Livelihood> {
-        // Validate the input
-        update_data.validate()?;
-        
-        // Fetch the existing record to ensure it exists and isn't deleted
-        let existing = self.find_by_id_with_tx(id, tx).await?;
-        
-        if existing.is_deleted() {
-            return Err(DomainError::DeletedEntity(self.entity_name().to_string(), id));
-        }
-        
+        let old_entity = self.find_by_id_with_tx(id, tx).await?;
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        let user_id_str = auth.user_id.to_string();
-        
-        // Use QueryBuilder to build the update query
+        let user_id = update_data.updated_by_user_id.unwrap_or(auth.user_id);
+        let user_id_str = user_id.to_string();
+        let id_str = id.to_string();
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+
         let mut builder = QueryBuilder::new("UPDATE livelihoods SET ");
         let mut separated = builder.separated(", ");
-        
-        // Flag to track if any actual fields are updated
         let mut fields_updated = false;
-        
-        // Macro to simplify adding LWW fields
-        macro_rules! add_lww {
-            ($field_name:ident, $field_sql:literal, $value:expr) => {
-                if let Some(val) = $value {
-                    separated.push(concat!($field_sql, " = "));
-                    separated.push_bind_unseparated(val.to_string());
 
-                    separated.push(concat!(" ", $field_sql, "_updated_at = "));
-                    separated.push_bind_unseparated(now_str.clone());
-
-                    separated.push(concat!(" ", $field_sql, "_updated_by = "));
-                    separated.push_bind_unseparated(user_id_str.clone());
-                    fields_updated = true;
-                }
-            };
-            ($field_name:ident, $field_sql:literal, $value:expr, $is_optional:expr) => {
-                if let Some(val) = $value {
+        macro_rules! add_lww_field {
+            ($field_ident:ident, $field_sql:literal, $value_expr:expr) => {
+                if let Some(val) = $value_expr {
                     separated.push(concat!($field_sql, " = "));
                     separated.push_bind_unseparated(val.clone());
-
                     separated.push(concat!(" ", $field_sql, "_updated_at = "));
                     separated.push_bind_unseparated(now_str.clone());
-
+                    separated.push(concat!(" ", $field_sql, "_updated_by = "));
+                    separated.push_bind_unseparated(user_id_str.clone());
+                    fields_updated = true;
+                }
+            };
+            ($field_ident:ident, $field_sql:literal, $value_expr:expr, opt_opt) => {
+                if let Some(opt_val) = $value_expr {
+                    separated.push(concat!($field_sql, " = "));
+                    separated.push_bind_unseparated(opt_val);
+                    separated.push(concat!(" ", $field_sql, "_updated_at = "));
+                    separated.push_bind_unseparated(now_str.clone());
                     separated.push(concat!(" ", $field_sql, "_updated_by = "));
                     separated.push_bind_unseparated(user_id_str.clone());
                     fields_updated = true;
@@ -520,50 +540,91 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
             };
         }
         
-        // Add grant amount
-        add_lww!(grant_amount, "grant_amount", update_data.grant_amount);
+        let participant_id_update = &update_data.participant_id.map(|opt_uuid| opt_uuid.map(|u| u.to_string()));
+        add_lww_field!(participant_id, "participant_id", participant_id_update, opt_opt);
         
-        // Add purpose
-        add_lww!(purpose, "purpose", &update_data.purpose, true);
+        let project_id_update = &update_data.project_id.map(|opt_uuid| opt_uuid.map(|u| u.to_string()));
+        add_lww_field!(project_id, "project_id", project_id_update, opt_opt);
+
+        add_lww_field!(type_, "type", &update_data.type_);
+        add_lww_field!(description, "description", &update_data.description, opt_opt);
+        add_lww_field!(status_id, "status_id", &update_data.status_id, opt_opt);
+        add_lww_field!(initial_grant_date, "initial_grant_date", &update_data.initial_grant_date, opt_opt);
+        add_lww_field!(initial_grant_amount, "initial_grant_amount", &update_data.initial_grant_amount, opt_opt);
         
-        // Add progress1
-        add_lww!(progress1, "progress1", &update_data.progress1, true);
-        
-        // Add progress2
-        add_lww!(progress2, "progress2", &update_data.progress2, true);
-        
-        // Add outcome
-        add_lww!(outcome, "outcome", &update_data.outcome, true);
-        
-        // If no actual fields were updated, return the existing record
+        if let Some(priority) = &update_data.sync_priority {
+            separated.push("sync_priority = ");
+            separated.push_bind_unseparated(priority.as_str());
+            fields_updated = true;
+        }
+
         if !fields_updated {
-            return Ok(existing);
+            return Ok(old_entity);
         }
-        
-        // Add common update fields
+
         separated.push("updated_at = ");
-        separated.push_bind_unseparated(now_str);
-        separated.push(" updated_by_user_id = ");
-        separated.push_bind_unseparated(update_data.updated_by_user_id.to_string());
-        
-        // Finish the query with WHERE clause
+        separated.push_bind_unseparated(now_str.clone());
+        separated.push("updated_by_user_id = ");
+        separated.push_bind_unseparated(user_id_str.clone());
+
         builder.push(" WHERE id = ");
-        builder.push_bind(id.to_string());
+        builder.push_bind(id_str);
         builder.push(" AND deleted_at IS NULL");
-        
-        // Execute the query
+
         let query = builder.build();
-        let result = query
-            .execute(&mut **tx)
-            .await
-            .map_err(DbError::from)?;
-            
+        let result = query.execute(&mut **tx).await.map_err(DbError::from)?;
+
         if result.rows_affected() == 0 {
-            return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
+            return self.find_by_id_with_tx(id, tx).await
+                .err()
+                .map_or(Err(DomainError::EntityNotFound(self.entity_name().to_string(), id)), |e| Err(e));
+        }
+
+        let new_entity = self.find_by_id_with_tx(id, tx).await?;
+
+        macro_rules! log_if_changed {
+            ($field:ident, $field_name_str:expr) => {
+                if old_entity.$field != new_entity.$field {
+                    let entry = ChangeLogEntry {
+                        operation_id: Uuid::new_v4(),
+                        entity_table: self.entity_name().to_string(),
+                        entity_id: id, 
+                        operation_type: ChangeOperationType::Update,
+                        field_name: Some($field_name_str.to_string()),
+                        old_value: serde_json::to_string(&old_entity.$field).ok(),
+                        new_value: serde_json::to_string(&new_entity.$field).ok(),
+                        timestamp: now, user_id: user_id, device_id: device_uuid.clone(),
+                        document_metadata: None, sync_batch_id: None, processed_at: None, sync_error: None,
+                    };
+                    self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
+                }
+            };
         }
         
-        // Return the updated record
-        self.find_by_id_with_tx(id, tx).await
+        log_if_changed!(participant_id, "participant_id");
+        log_if_changed!(project_id, "project_id");
+        log_if_changed!(type_, "type");
+        log_if_changed!(description, "description");
+        log_if_changed!(status_id, "status_id");
+        log_if_changed!(initial_grant_date, "initial_grant_date");
+        log_if_changed!(initial_grant_amount, "initial_grant_amount");
+
+        if old_entity.sync_priority != new_entity.sync_priority {
+            let entry = ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: self.entity_name().to_string(),
+                entity_id: id,
+                operation_type: ChangeOperationType::Update,
+                field_name: Some("sync_priority".to_string()),
+                old_value: serde_json::to_string(old_entity.sync_priority.as_str()).ok(),
+                new_value: serde_json::to_string(new_entity.sync_priority.as_str()).ok(),
+                timestamp: now, user_id: user_id, device_id: device_uuid.clone(),
+                document_metadata: None, sync_batch_id: None, processed_at: None, sync_error: None,
+            };
+            self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
+        }
+
+        Ok(new_entity)
     }
     
     async fn find_all(
@@ -667,71 +728,85 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
 
     /// Get livelihood statistics summary
     async fn get_livelihood_stats(&self) -> DomainResult<LivelioodStatsSummary> {
-        // 1. Get basic counts and amounts
-        let (total_livelihoods, total_amount, avg_amount) = query_as::<_, (i64, f64, f64)>(
-            r#"
+        // 1. Get basic counts and initial amounts
+        let basic_stats_query = r#"
             SELECT 
                 COUNT(*) as total,
-                COALESCE(SUM(grant_amount), 0) as total_amount,
-                CASE WHEN COUNT(*) > 0 THEN COALESCE(AVG(grant_amount), 0) ELSE 0 END as avg_amount
+                COALESCE(SUM(initial_grant_amount), 0) as total_amount,
+                CASE WHEN COUNT(initial_grant_amount) > 0 THEN COALESCE(AVG(initial_grant_amount), 0) ELSE 0 END as avg_amount
             FROM livelihoods
             WHERE deleted_at IS NULL
-            "#
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(DbError::from)?;
+            "#;
+        let (total_livelihoods, total_initial_amount, avg_initial_amount) = query_as::<_, (i64, f64, f64)>(basic_stats_query)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DbError::from)?;
 
-        // 2. Get project distribution
-        let project_distribution = query_as::<_, (Option<String>, i64, f64)>(
-            r#"
+        // 2. Get project distribution (counts and initial amounts)
+        let project_distribution_query = r#"
             SELECT 
-                p.name as project_name,
+                project_id, -- Select project_id (UUID)
                 COUNT(l.id) as livelihood_count,
-                COALESCE(SUM(l.grant_amount), 0) as total_amount
+                COALESCE(SUM(l.initial_grant_amount), 0) as total_initial_amount
             FROM livelihoods l
-            LEFT JOIN projects p ON l.project_id = p.id
-            WHERE l.deleted_at IS NULL
+            WHERE l.deleted_at IS NULL AND l.project_id IS NOT NULL
             GROUP BY l.project_id
-            "#
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(DbError::from)?;
+            "#;
+        let project_distribution_rows = query(project_distribution_query)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+            
+        let mut livelihoods_by_project: HashMap<Uuid, i64> = HashMap::new();
+        let mut initial_grant_amounts_by_project: HashMap<Uuid, f64> = HashMap::new();
+        for row in project_distribution_rows {
+            if let Some(id_str) = row.get::<Option<String>, _>("project_id") {
+                 if let Ok(id) = Uuid::parse_str(&id_str) {
+                     livelihoods_by_project.insert(id, row.get("livelihood_count"));
+                     initial_grant_amounts_by_project.insert(id, row.get("total_initial_amount"));
+                 }
+            }
+        }
 
         // 3. Get subsequent grants stats
-        let (total_subsequent_grants, total_subsequent_amount) = query_as::<_, (i64, f64)>(
-            r#"
+        let subsequent_stats_query = r#"
             SELECT 
                 COUNT(*) as total_grants,
                 COALESCE(SUM(amount), 0) as total_amount
             FROM subsequent_grants
             WHERE deleted_at IS NULL
-            "#
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(DbError::from)?;
+            "#;
+        let (total_subsequent_grants, total_subsequent_amount) = query_as::<_, (i64, f64)>(subsequent_stats_query)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+            
+        // 4. Get Livelihoods by type
+        let type_distribution_query = r#"
+            SELECT type, COUNT(*) as count
+            FROM livelihoods
+            WHERE deleted_at IS NULL
+            GROUP BY type
+        "#;
+        let type_rows = query(type_distribution_query)
+             .fetch_all(&self.pool)
+             .await
+             .map_err(DbError::from)?;
+        let livelihoods_by_type: HashMap<String, i64> = type_rows.into_iter()
+            .map(|row| (row.get("type"), row.get("count")))
+            .collect();
 
-        // 4. Build the response
-        let mut livelihoods_by_project = HashMap::new();
-        let mut grant_amounts_by_project = HashMap::new();
-
-        for (project_name, count, amount) in project_distribution {
-            let name = project_name.unwrap_or_else(|| "No Project".to_string());
-            livelihoods_by_project.insert(name.clone(), count);
-            grant_amounts_by_project.insert(name, amount);
-        }
-
+        // 5. Build the response
         Ok(LivelioodStatsSummary {
             total_livelihoods,
-            active_livelihoods: total_livelihoods, // All non-deleted livelihoods are considered active
-            total_grant_amount: total_amount,
-            average_grant_amount: avg_amount,
+            active_livelihoods: total_livelihoods, // Assuming active means not deleted
+            total_initial_grant_amount: total_initial_amount,
+            average_initial_grant_amount: avg_initial_amount,
             total_subsequent_grants,
             total_subsequent_grant_amount: total_subsequent_amount,
             livelihoods_by_project,
-            grant_amounts_by_project,
+            initial_grant_amounts_by_project,
+            livelihoods_by_type,
         })
     }
 
@@ -1049,6 +1124,103 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
             total as u64,
             params,
         ))
+    }
+
+    async fn update_sync_priority(
+        &self,
+        ids: &[Uuid],
+        priority: SyncPriorityFromSyncDomain,
+        auth: &AuthContext,
+    ) -> DomainResult<u64> {
+        if ids.is_empty() { return Ok(0); }
+        
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let user_id = auth.user_id;
+        let user_id_str = user_id.to_string();
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let priority_str = priority.as_str();
+
+        // Fetch old priorities (Map Uuid -> SyncPriorityFromSyncDomain)
+        let id_strings: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+        let select_query_placeholders = vec!["?"; ids.len()].join(", ");
+        let select_query = format!(
+            "SELECT id, sync_priority FROM livelihoods WHERE id IN ({}) AND deleted_at IS NULL",
+            select_query_placeholders
+        );
+        let mut select_builder = query_as::<_, (String, String)>(&select_query);
+        for id_str in &id_strings {
+            select_builder = select_builder.bind(id_str);
+        }
+        let old_priorities: HashMap<Uuid, SyncPriorityFromSyncDomain> = select_builder
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(DbError::from)?
+            .into_iter()
+            .filter_map(|(id_str, prio_text)| {
+                 Uuid::parse_str(&id_str).ok()
+                     .and_then(|id| SyncPriorityFromSyncDomain::from_str(&prio_text).ok().map(|prio| (id, prio)))
+            })
+            .collect();
+
+        // Perform Update
+        let mut update_builder = QueryBuilder::new("UPDATE livelihoods SET ");
+        update_builder.push("sync_priority = "); update_builder.push_bind(priority_str.clone());
+        update_builder.push(", updated_at = "); update_builder.push_bind(now_str.clone());
+        update_builder.push(", updated_by_user_id = "); update_builder.push_bind(user_id_str.clone());
+        update_builder.push(" WHERE id IN (");
+        let mut id_separated = update_builder.separated(",");
+        for id_str in &id_strings { id_separated.push_bind(id_str); }
+        update_builder.push(") AND deleted_at IS NULL");
+        
+        let query = update_builder.build();
+        let result = query.execute(&mut *tx).await.map_err(DbError::from)?;
+        let rows_affected = result.rows_affected();
+
+        // Log Changes
+        for id_uuid in ids {
+            if let Some(old_priority) = old_priorities.get(id_uuid) {
+                if *old_priority != priority { // Log only if changed
+                    let entry = ChangeLogEntry {
+                        operation_id: Uuid::new_v4(),
+                        entity_table: self.entity_name().to_string(),
+                        entity_id: *id_uuid,
+                        operation_type: ChangeOperationType::Update,
+                        field_name: Some("sync_priority".to_string()),
+                        old_value: serde_json::to_string(old_priority.as_str()).ok(),
+                        new_value: serde_json::to_string(priority_str).ok(),
+                        timestamp: now, user_id: user_id, device_id: device_uuid.clone(),
+                        document_metadata: None, sync_batch_id: None, processed_at: None, sync_error: None,
+                    };
+                    self.change_log_repo.create_change_log_with_tx(&entry, &mut tx).await?;
+                }
+            } else {
+                 // If the ID was in the input `ids` but not in `old_priorities`,
+                 // it implies either it didn't exist, was deleted, or had an unparseable priority before.
+                 // If rows_affected > 0, it means *some* rows were updated. We can infer that
+                 // this specific row *might* have been updated from an unknown state to the new priority.
+                 // It's safer to log this potential change from 'unknown'.
+                 if rows_affected > 0 {
+                     let entry = ChangeLogEntry {
+                        operation_id: Uuid::new_v4(),
+                        entity_table: self.entity_name().to_string(),
+                        entity_id: *id_uuid,
+                        operation_type: ChangeOperationType::Update,
+                        field_name: Some("sync_priority".to_string()),
+                        old_value: None, // Indicate unknown/null previous state
+                        new_value: serde_json::to_string(priority_str).ok(),
+                        timestamp: now, user_id: user_id, device_id: device_uuid.clone(),
+                        document_metadata: None, sync_batch_id: None, processed_at: None, sync_error: None,
+                    };
+                    // Avoid erroring if logging fails for a row that might not have existed
+                    let _ = self.change_log_repo.create_change_log_with_tx(&entry, &mut tx).await;
+                 }
+            }
+        }
+
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(rows_affected)
     }
 }
 

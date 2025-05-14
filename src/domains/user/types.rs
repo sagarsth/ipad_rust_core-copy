@@ -137,6 +137,18 @@ impl Validate for UpdateUser {
     }
 }
 
+impl UpdateUser {
+    /// Check whether the update payload carries any field changes.
+    /// This is useful to short-circuit update logic when nothing would be modified.
+    pub fn is_empty_update(&self) -> bool {
+        self.email.is_none()
+            && self.password.is_none()
+            && self.name.is_none()
+            && self.role.is_none()
+            && self.active.is_none()
+    }
+}
+
 /// Credentials DTO - used for login
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {

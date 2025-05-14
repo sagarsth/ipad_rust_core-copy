@@ -8,6 +8,9 @@ use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
 use std::collections::HashSet;
 use std::collections::HashMap;
+use crate::types::SyncPriority;
+use std::str::FromStr;
+use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
 
 /// Livelihood entity - represents a livelihood grant for a participant
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,21 +18,29 @@ pub struct Livelihood {
     pub id: Uuid,
     pub participant_id: Option<Uuid>,
     pub project_id: Option<Uuid>,
-    pub grant_amount: Option<f64>,
-    pub grant_amount_updated_at: Option<DateTime<Utc>>,
-    pub grant_amount_updated_by: Option<Uuid>,
-    pub purpose: Option<String>,
-    pub purpose_updated_at: Option<DateTime<Utc>>,
-    pub purpose_updated_by: Option<Uuid>,
-    pub progress1: Option<String>,
-    pub progress1_updated_at: Option<DateTime<Utc>>,
-    pub progress1_updated_by: Option<Uuid>,
-    pub progress2: Option<String>,
-    pub progress2_updated_at: Option<DateTime<Utc>>,
-    pub progress2_updated_by: Option<Uuid>,
-    pub outcome: Option<String>,
-    pub outcome_updated_at: Option<DateTime<Utc>>,
-    pub outcome_updated_by: Option<Uuid>,
+    
+    pub type_: String, // Renamed from 'type' to avoid keyword clash
+    pub type_updated_at: Option<DateTime<Utc>>,
+    pub type_updated_by: Option<Uuid>,
+    
+    pub description: Option<String>,
+    pub description_updated_at: Option<DateTime<Utc>>,
+    pub description_updated_by: Option<Uuid>,
+    
+    pub status_id: Option<i64>, // Assuming status_id refers to an integer key for a status_types table
+    pub status_id_updated_at: Option<DateTime<Utc>>,
+    pub status_id_updated_by: Option<Uuid>,
+
+    pub initial_grant_date: Option<String>, // ISO date format YYYY-MM-DD
+    pub initial_grant_date_updated_at: Option<DateTime<Utc>>,
+    pub initial_grant_date_updated_by: Option<Uuid>,
+
+    pub initial_grant_amount: Option<f64>,
+    pub initial_grant_amount_updated_at: Option<DateTime<Utc>>,
+    pub initial_grant_amount_updated_by: Option<Uuid>,
+
+    pub sync_priority: SyncPriorityFromSyncDomain,
+    
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
@@ -46,7 +57,7 @@ impl Livelihood {
     
     // Helper to calculate total grant amount (including subsequents)
     pub fn total_grant_amount(&self, subsequent_grants: &[SubsequentGrant]) -> f64 {
-        let initial = self.grant_amount.unwrap_or(0.0);
+        let initial = self.initial_grant_amount.unwrap_or(0.0);
         let subsequent: f64 = subsequent_grants.iter()
             .filter(|grant| !grant.is_deleted())
             .filter_map(|grant| grant.amount)
@@ -54,16 +65,19 @@ impl Livelihood {
         
         initial + subsequent
     }
+
+    pub fn parsed_initial_grant_date(&self) -> Option<NaiveDate> {
+        self.initial_grant_date.as_ref().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+    }
 }
 
 impl DocumentLinkable for Livelihood {
     fn field_metadata() -> Vec<EntityFieldMetadata> {
         vec![
-            EntityFieldMetadata { field_name: "grant_amount", display_name: "Initial Grant Amount", supports_documents: true, field_type: FieldType::Number, is_document_reference_only: false },
-            EntityFieldMetadata { field_name: "purpose", display_name: "Purpose", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
-            EntityFieldMetadata { field_name: "progress1", display_name: "Progress 1", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
-            EntityFieldMetadata { field_name: "progress2", display_name: "Progress 2", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
-            EntityFieldMetadata { field_name: "outcome", display_name: "Outcome", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "type", display_name: "Type", supports_documents: false, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "description", display_name: "Description", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "initial_grant_amount", display_name: "Initial Grant Amount", supports_documents: true, field_type: FieldType::Number, is_document_reference_only: false },
+            EntityFieldMetadata { field_name: "initial_grant_date", display_name: "Initial Grant Date", supports_documents: false, field_type: FieldType::Date, is_document_reference_only: false },
             EntityFieldMetadata { field_name: "participant_id", display_name: "Participant", supports_documents: false, field_type: FieldType::Uuid, is_document_reference_only: false },
             EntityFieldMetadata { field_name: "project_id", display_name: "Project", supports_documents: false, field_type: FieldType::Uuid, is_document_reference_only: false },
             // Document Reference Fields from Migration
@@ -99,12 +113,9 @@ pub struct SubsequentGrant {
 }
 
 impl SubsequentGrant {
-    // Helper to check if grant is deleted
     pub fn is_deleted(&self) -> bool {
         self.deleted_at.is_some()
     }
-    
-    // Helper to parse grant date
     pub fn parsed_grant_date(&self) -> Option<NaiveDate> {
         self.grant_date.as_ref().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
     }
@@ -117,10 +128,9 @@ impl DocumentLinkable for SubsequentGrant {
             EntityFieldMetadata { field_name: "purpose", display_name: "Purpose", supports_documents: true, field_type: FieldType::Text, is_document_reference_only: false },
             EntityFieldMetadata { field_name: "grant_date", display_name: "Grant Date", supports_documents: false, field_type: FieldType::Date, is_document_reference_only: false },
             EntityFieldMetadata { field_name: "livelihood_id", display_name: "Livelihood", supports_documents: false, field_type: FieldType::Uuid, is_document_reference_only: false },
-            // Document Reference Fields from Migration
             EntityFieldMetadata { field_name: "grant_application", display_name: "Grant Application", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
             EntityFieldMetadata { field_name: "grant_report", display_name: "Grant Report", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
-            EntityFieldMetadata { field_name: "receipts", display_name: "Receipts", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true }, // May represent multiple docs
+            EntityFieldMetadata { field_name: "receipts", display_name: "Receipts", supports_documents: true, field_type: FieldType::DocumentRef, is_document_reference_only: true },
         ]
     }
 }
@@ -128,36 +138,40 @@ impl DocumentLinkable for SubsequentGrant {
 /// NewLivelihood DTO - used when creating a new livelihood
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewLivelihood {
-    pub participant_id: Option<Uuid>,
-    pub project_id: Option<Uuid>,
-    pub grant_amount: Option<f64>,
-    pub purpose: Option<String>,
-    pub created_by_user_id: Option<Uuid>,
+    pub id: Option<Uuid>, // Added for pre-allocation if needed
+    pub participant_id: Option<Uuid>, // Made nullable in schema
+    pub project_id: Option<Uuid>,     // Made nullable in schema
+    pub type_: String, // Renamed from 'type'
+    pub description: Option<String>,
+    pub status_id: Option<i64>,
+    pub initial_grant_date: Option<String>, // YYYY-MM-DD
+    pub initial_grant_amount: Option<f64>,
+    pub sync_priority: SyncPriorityFromSyncDomain,
+    pub created_by_user_id: Option<Uuid>, // For explicit setting if needed
 }
 
 impl Validate for NewLivelihood {
     fn validate(&self) -> DomainResult<()> {
-        // Validate participant_id if provided
-        if let Some(participant_id) = self.participant_id {
-            ValidationBuilder::new("participant_id", Some(participant_id))
-                .not_nil()
-                .validate()?;
+        ValidationBuilder::new("type_", Some(self.type_.clone()))
+            .required()
+            .min_length(1) // Basic validation for type
+            .validate()?;
+
+        if let Some(date) = &self.initial_grant_date {
+            if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+                return Err(DomainError::Validation(
+                    crate::errors::ValidationError::format(
+                        "initial_grant_date", 
+                        "Invalid date format. Expected YYYY-MM-DD"
+                    )
+                ));
+            }
         }
-            
-        // Validate project_id if provided
-        if let Some(project_id) = self.project_id {
-            ValidationBuilder::new("project_id", Some(project_id))
-                .not_nil()
-                .validate()?;
-        }
-            
-        // Validate grant_amount if provided
-        if let Some(amount) = self.grant_amount {
-            ValidationBuilder::new("grant_amount", Some(amount))
+        if let Some(amount) = self.initial_grant_amount {
+            ValidationBuilder::new("initial_grant_amount", Some(amount))
                 .min(0.0)
                 .validate()?;
         }
-        
         Ok(())
     }
 }
@@ -165,97 +179,43 @@ impl Validate for NewLivelihood {
 /// UpdateLivelihood DTO - used when updating an existing livelihood
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateLivelihood {
-    pub grant_amount: Option<f64>,
-    pub purpose: Option<String>,
-    pub progress1: Option<String>,
-    pub progress2: Option<String>,
-    pub outcome: Option<String>,
-    pub updated_by_user_id: Uuid,
+    pub participant_id: Option<Option<Uuid>>, // Allow setting to NULL
+    pub project_id: Option<Option<Uuid>>,     // Allow setting to NULL
+    pub type_: Option<String>, // Renamed from 'type'
+    pub description: Option<Option<String>>, // Allow setting to NULL
+    pub status_id: Option<Option<i64>>,     // Allow setting to NULL
+    pub initial_grant_date: Option<Option<String>>, // YYYY-MM-DD, allow setting to NULL
+    pub initial_grant_amount: Option<Option<f64>>, // Allow setting to NULL
+    pub sync_priority: Option<SyncPriorityFromSyncDomain>,
+    pub updated_by_user_id: Option<Uuid>, // Keep Option for system updates, service layer ensures it for user ops
 }
 
 impl Validate for UpdateLivelihood {
     fn validate(&self) -> DomainResult<()> {
-        // Validate grant_amount if provided
-        if let Some(amount) = self.grant_amount {
-            ValidationBuilder::new("grant_amount", Some(amount))
-                .min(0.0)
+        if let Some(type_val) = &self.type_ {
+             ValidationBuilder::new("type_", Some(type_val.clone()))
+                .min_length(1)
                 .validate()?;
         }
-        
-        Ok(())
-    }
-}
-
-/// NewSubsequentGrant DTO - used when creating a new subsequent grant
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewSubsequentGrant {
-    pub livelihood_id: Uuid,
-    pub amount: Option<f64>,
-    pub purpose: Option<String>,
-    pub grant_date: Option<String>,
-    pub created_by_user_id: Option<Uuid>,
-}
-
-impl Validate for NewSubsequentGrant {
-    fn validate(&self) -> DomainResult<()> {
-        // Validate livelihood_id
-        ValidationBuilder::new("livelihood_id", Some(self.livelihood_id))
-            .not_nil()
-            .validate()?;
-            
-        // Validate amount if provided
-        if let Some(amount) = self.amount {
-            ValidationBuilder::new("amount", Some(amount))
-                .min(0.0)
-                .validate()?;
-        }
-        
-        // Validate grant_date if provided
-        if let Some(date) = &self.grant_date {
-            if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
-                return Err(DomainError::Validation(
-                    crate::errors::ValidationError::format(
-                        "grant_date", 
-                        "Invalid date format. Expected YYYY-MM-DD"
-                    )
-                ));
+        if let Some(date_opt) = &self.initial_grant_date {
+            if let Some(date_str) = date_opt {
+                if NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_err() {
+                    return Err(DomainError::Validation(
+                        crate::errors::ValidationError::format(
+                            "initial_grant_date", 
+                            "Invalid date format. Expected YYYY-MM-DD"
+                        )
+                    ));
+                }
             }
         }
-        
-        Ok(())
-    }
-}
-
-/// UpdateSubsequentGrant DTO - used when updating an existing subsequent grant
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct UpdateSubsequentGrant {
-    pub amount: Option<f64>,
-    pub purpose: Option<String>,
-    pub grant_date: Option<String>,
-    pub updated_by_user_id: Uuid,
-}
-
-impl Validate for UpdateSubsequentGrant {
-    fn validate(&self) -> DomainResult<()> {
-        // Validate amount if provided
-        if let Some(amount) = self.amount {
-            ValidationBuilder::new("amount", Some(amount))
-                .min(0.0)
-                .validate()?;
-        }
-        
-        // Validate grant_date if provided
-        if let Some(date) = &self.grant_date {
-            if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
-                return Err(DomainError::Validation(
-                    crate::errors::ValidationError::format(
-                        "grant_date", 
-                        "Invalid date format. Expected YYYY-MM-DD"
-                    )
-                ));
+        if let Some(amount_opt) = &self.initial_grant_amount {
+            if let Some(amount) = amount_opt {
+                 ValidationBuilder::new("initial_grant_amount", Some(*amount))
+                    .min(0.0)
+                    .validate()?;
             }
         }
-        
         Ok(())
     }
 }
@@ -266,21 +226,29 @@ pub struct LivelihoodRow {
     pub id: String,
     pub participant_id: Option<String>,
     pub project_id: Option<String>,
-    pub grant_amount: Option<f64>,
-    pub grant_amount_updated_at: Option<String>,
-    pub grant_amount_updated_by: Option<String>,
-    pub purpose: Option<String>,
-    pub purpose_updated_at: Option<String>,
-    pub purpose_updated_by: Option<String>,
-    pub progress1: Option<String>,
-    pub progress1_updated_at: Option<String>,
-    pub progress1_updated_by: Option<String>,
-    pub progress2: Option<String>,
-    pub progress2_updated_at: Option<String>,
-    pub progress2_updated_by: Option<String>,
-    pub outcome: Option<String>,
-    pub outcome_updated_at: Option<String>,
-    pub outcome_updated_by: Option<String>,
+    
+    pub type_: String, // Renamed from 'type'
+    pub type_updated_at: Option<String>,
+    pub type_updated_by: Option<String>,
+    
+    pub description: Option<String>,
+    pub description_updated_at: Option<String>,
+    pub description_updated_by: Option<String>,
+    
+    pub status_id: Option<i64>,
+    pub status_id_updated_at: Option<String>,
+    pub status_id_updated_by: Option<String>,
+
+    pub initial_grant_date: Option<String>,
+    pub initial_grant_date_updated_at: Option<String>,
+    pub initial_grant_date_updated_by: Option<String>,
+
+    pub initial_grant_amount: Option<f64>,
+    pub initial_grant_amount_updated_at: Option<String>,
+    pub initial_grant_amount_updated_by: Option<String>,
+
+    pub sync_priority: String, // Will be parsed to SyncPriorityFromSyncDomain
+    
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
@@ -301,132 +269,50 @@ impl LivelihoodRow {
         let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
             s.as_ref().map(|dt| {
                 DateTime::parse_from_rfc3339(dt)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", dt)))
+                    .map(|dt_with_tz| dt_with_tz.with_timezone(&Utc))
+                    .map_err(|e| DomainError::Internal(format!("Invalid date format: {} ({})", dt, e)))
             })
         };
         
         Ok(Livelihood {
             id: Uuid::parse_str(&self.id)
-                .map_err(|_| DomainError::InvalidUuid(self.id))?,
+                .map_err(|_| DomainError::InvalidUuid(self.id.clone()))?,
             participant_id: parse_uuid(&self.participant_id).transpose()?,
             project_id: parse_uuid(&self.project_id).transpose()?,
-            grant_amount: self.grant_amount,
-            grant_amount_updated_at: parse_datetime(&self.grant_amount_updated_at)
-                .transpose()?,
-            grant_amount_updated_by: parse_uuid(&self.grant_amount_updated_by)
-                .transpose()?,
-            purpose: self.purpose,
-            purpose_updated_at: parse_datetime(&self.purpose_updated_at)
-                .transpose()?,
-            purpose_updated_by: parse_uuid(&self.purpose_updated_by)
-                .transpose()?,
-            progress1: self.progress1,
-            progress1_updated_at: parse_datetime(&self.progress1_updated_at)
-                .transpose()?,
-            progress1_updated_by: parse_uuid(&self.progress1_updated_by)
-                .transpose()?,
-            progress2: self.progress2,
-            progress2_updated_at: parse_datetime(&self.progress2_updated_at)
-                .transpose()?,
-            progress2_updated_by: parse_uuid(&self.progress2_updated_by)
-                .transpose()?,
-            outcome: self.outcome,
-            outcome_updated_at: parse_datetime(&self.outcome_updated_at)
-                .transpose()?,
-            outcome_updated_by: parse_uuid(&self.outcome_updated_by)
-                .transpose()?,
+            
+            type_: self.type_,
+            type_updated_at: parse_datetime(&self.type_updated_at).transpose()?,
+            type_updated_by: parse_uuid(&self.type_updated_by).transpose()?,
+            
+            description: self.description,
+            description_updated_at: parse_datetime(&self.description_updated_at).transpose()?,
+            description_updated_by: parse_uuid(&self.description_updated_by).transpose()?,
+            
+            status_id: self.status_id,
+            status_id_updated_at: parse_datetime(&self.status_id_updated_at).transpose()?,
+            status_id_updated_by: parse_uuid(&self.status_id_updated_by).transpose()?,
+
+            initial_grant_date: self.initial_grant_date,
+            initial_grant_date_updated_at: parse_datetime(&self.initial_grant_date_updated_at).transpose()?,
+            initial_grant_date_updated_by: parse_uuid(&self.initial_grant_date_updated_by).transpose()?,
+
+            initial_grant_amount: self.initial_grant_amount,
+            initial_grant_amount_updated_at: parse_datetime(&self.initial_grant_amount_updated_at).transpose()?,
+            initial_grant_amount_updated_by: parse_uuid(&self.initial_grant_amount_updated_by).transpose()?,
+
+            sync_priority: SyncPriorityFromSyncDomain::from_str(&self.sync_priority)
+                .map_err(|e| DomainError::Internal(format!("Failed to parse sync_priority: {}", e)))?,
+            
             created_at: DateTime::parse_from_rfc3339(&self.created_at)
                 .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.created_at)))?,
+                .map_err(|_| DomainError::Internal(format!("Invalid created_at date format: {}", self.created_at)))?,
             updated_at: DateTime::parse_from_rfc3339(&self.updated_at)
                 .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.updated_at)))?,
-            created_by_user_id: parse_uuid(&self.created_by_user_id)
-                .transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id)
-                .transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at)
-                .transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id)
-                .transpose()?,
-        })
-    }
-}
-
-/// SubsequentGrantRow - SQLite row representation for mapping from database
-#[derive(Debug, Clone, FromRow)]
-pub struct SubsequentGrantRow {
-    pub id: String,
-    pub livelihood_id: String,
-    pub amount: Option<f64>,
-    pub amount_updated_at: Option<String>,
-    pub amount_updated_by: Option<String>,
-    pub purpose: Option<String>,
-    pub purpose_updated_at: Option<String>,
-    pub purpose_updated_by: Option<String>,
-    pub grant_date: Option<String>,
-    pub grant_date_updated_at: Option<String>,
-    pub grant_date_updated_by: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-    pub created_by_user_id: Option<String>,
-    pub updated_by_user_id: Option<String>,
-    pub deleted_at: Option<String>,
-    pub deleted_by_user_id: Option<String>,
-}
-
-impl SubsequentGrantRow {
-    /// Convert database row to domain entity
-    pub fn into_entity(self) -> DomainResult<SubsequentGrant> {
-        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
-            s.as_ref().map(|id| {
-                Uuid::parse_str(id).map_err(|_| DomainError::InvalidUuid(id.clone()))
-            })
-        };
-        
-        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
-            s.as_ref().map(|dt| {
-                DateTime::parse_from_rfc3339(dt)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", dt)))
-            })
-        };
-        
-        Ok(SubsequentGrant {
-            id: Uuid::parse_str(&self.id)
-                .map_err(|_| DomainError::InvalidUuid(self.id))?,
-            livelihood_id: Uuid::parse_str(&self.livelihood_id)
-                .map_err(|_| DomainError::InvalidUuid(self.livelihood_id))?,
-            amount: self.amount,
-            amount_updated_at: parse_datetime(&self.amount_updated_at)
-                .transpose()?,
-            amount_updated_by: parse_uuid(&self.amount_updated_by)
-                .transpose()?,
-            purpose: self.purpose,
-            purpose_updated_at: parse_datetime(&self.purpose_updated_at)
-                .transpose()?,
-            purpose_updated_by: parse_uuid(&self.purpose_updated_by)
-                .transpose()?,
-            grant_date: self.grant_date,
-            grant_date_updated_at: parse_datetime(&self.grant_date_updated_at)
-                .transpose()?,
-            grant_date_updated_by: parse_uuid(&self.grant_date_updated_by)
-                .transpose()?,
-            created_at: DateTime::parse_from_rfc3339(&self.created_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.created_at)))?,
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.updated_at)))?,
-            created_by_user_id: parse_uuid(&self.created_by_user_id)
-                .transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id)
-                .transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at)
-                .transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id)
-                .transpose()?,
+                .map_err(|_| DomainError::Internal(format!("Invalid updated_at date format: {}", self.updated_at)))?,
+            created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
+            updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
+            deleted_at: parse_datetime(&self.deleted_at).transpose()?,
+            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
         })
     }
 }
@@ -476,11 +362,12 @@ pub struct LivelihoodResponse {
     pub participant: Option<ParticipantSummary>,
     pub project_id: Option<Uuid>,
     pub project: Option<ProjectSummary>,
-    pub grant_amount: Option<f64>,
-    pub purpose: Option<String>,
-    pub progress1: Option<String>,
-    pub progress2: Option<String>,
-    pub outcome: Option<String>,
+    pub type_: String,
+    pub description: Option<String>,
+    pub status_id: Option<i64>,
+    pub initial_grant_date: Option<String>,
+    pub initial_grant_amount: Option<f64>,
+    pub sync_priority: SyncPriorityFromSyncDomain,
     pub created_at: String,
     pub updated_at: String,
     pub subsequent_grants: Option<Vec<SubsequentGrantSummary>>,
@@ -497,15 +384,16 @@ impl From<Livelihood> for LivelihoodResponse {
             participant: None,
             project_id: livelihood.project_id,
             project: None,
-            grant_amount: livelihood.grant_amount,
-            purpose: livelihood.purpose,
-            progress1: livelihood.progress1,
-            progress2: livelihood.progress2,
-            outcome: livelihood.outcome,
+            type_: livelihood.type_,
+            description: livelihood.description,
+            status_id: livelihood.status_id,
+            initial_grant_date: livelihood.initial_grant_date,
+            initial_grant_amount: livelihood.initial_grant_amount,
+            sync_priority: livelihood.sync_priority,
             created_at: livelihood.created_at.to_rfc3339(),
             updated_at: livelihood.updated_at.to_rfc3339(),
             subsequent_grants: None,
-            total_grant_amount: livelihood.grant_amount,
+            total_grant_amount: livelihood.initial_grant_amount,
             documents: None,
         }
     }
@@ -526,7 +414,7 @@ impl LivelihoodResponse {
     
     /// Add subsequent grants
     pub fn with_subsequent_grants(mut self, grants: Vec<SubsequentGrantSummary>) -> Self {
-        let total = self.grant_amount.unwrap_or(0.0) + 
+        let total = self.initial_grant_amount.unwrap_or(0.0) + 
             grants.iter().filter_map(|g| g.amount).sum::<f64>();
         
         self.subsequent_grants = Some(grants);
@@ -565,10 +453,9 @@ pub struct SubsequentGrantResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LivelihoodSummary {
     pub id: Uuid,
-    pub participant_id: Uuid,
-    pub participant_name: String,
-    pub grant_amount: Option<f64>,
-    pub purpose: Option<String>,
+    pub type_: String,
+    pub description: Option<String>,
+    pub initial_grant_amount: Option<f64>,
 }
 
 impl From<SubsequentGrant> for SubsequentGrantResponse {
@@ -599,12 +486,13 @@ impl SubsequentGrantResponse {
 pub struct LivelioodStatsSummary {
     pub total_livelihoods: i64,
     pub active_livelihoods: i64,
-    pub total_grant_amount: f64,
-    pub average_grant_amount: f64,
+    pub total_initial_grant_amount: f64,
+    pub average_initial_grant_amount: f64,
     pub total_subsequent_grants: i64,
     pub total_subsequent_grant_amount: f64,
-    pub livelihoods_by_project: HashMap<String, i64>,
-    pub grant_amounts_by_project: HashMap<String, f64>,
+    pub livelihoods_by_project: HashMap<Uuid, i64>,
+    pub initial_grant_amounts_by_project: HashMap<Uuid, f64>,
+    pub livelihoods_by_type: HashMap<String, i64>,
 }
 
 /// Livelihood with full participant details
@@ -688,4 +576,104 @@ pub struct LivelioodWithDocumentTimeline {
     pub livelihood: LivelihoodResponse,
     pub documents_by_month: HashMap<String, Vec<MediaDocumentResponse>>,
     pub total_document_count: u64,
+}
+
+/// NewSubsequentGrant DTO
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewSubsequentGrant {
+    pub livelihood_id: Uuid,
+    pub amount: Option<f64>,
+    pub purpose: Option<String>,
+    pub grant_date: Option<String>,
+    pub created_by_user_id: Option<Uuid>,
+}
+
+impl Validate for NewSubsequentGrant {
+    fn validate(&self) -> DomainResult<()> {
+        ValidationBuilder::new("livelihood_id", Some(self.livelihood_id)).not_nil().validate()?;
+        if let Some(amount) = self.amount {
+            ValidationBuilder::new("amount", Some(amount)).min(0.0).validate()?;
+        }
+        if let Some(date) = &self.grant_date {
+            if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+                return Err(DomainError::Validation(crate::errors::ValidationError::format("grant_date", "Invalid date format. Expected YYYY-MM-DD")));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// UpdateSubsequentGrant DTO
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateSubsequentGrant {
+    pub amount: Option<f64>,
+    pub purpose: Option<String>,
+    pub grant_date: Option<String>,
+    pub updated_by_user_id: Uuid, 
+}
+
+impl Validate for UpdateSubsequentGrant {
+    fn validate(&self) -> DomainResult<()> {
+        if let Some(amount) = self.amount {
+            ValidationBuilder::new("amount", Some(amount)).min(0.0).validate()?;
+        }
+        if let Some(date) = &self.grant_date {
+            if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+                return Err(DomainError::Validation(crate::errors::ValidationError::format("grant_date", "Invalid date format. Expected YYYY-MM-DD")));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// SubsequentGrantRow - SQLite row representation
+#[derive(Debug, Clone, FromRow)]
+pub struct SubsequentGrantRow {
+    pub id: String,
+    pub livelihood_id: String,
+    pub amount: Option<f64>,
+    pub amount_updated_at: Option<String>,
+    pub amount_updated_by: Option<String>,
+    pub purpose: Option<String>,
+    pub purpose_updated_at: Option<String>,
+    pub purpose_updated_by: Option<String>,
+    pub grant_date: Option<String>,
+    pub grant_date_updated_at: Option<String>,
+    pub grant_date_updated_by: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by_user_id: Option<String>,
+    pub updated_by_user_id: Option<String>,
+    pub deleted_at: Option<String>,
+    pub deleted_by_user_id: Option<String>,
+}
+
+impl SubsequentGrantRow {
+    pub fn into_entity(self) -> DomainResult<SubsequentGrant> {
+        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
+            s.as_ref().map(|id_str| Uuid::parse_str(id_str).map_err(|_| DomainError::InvalidUuid(id_str.clone())))
+        };
+        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
+            s.as_ref().map(|dt_str| DateTime::parse_from_rfc3339(dt_str).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid date format: {}", dt_str))))
+        };
+        Ok(SubsequentGrant {
+            id: Uuid::parse_str(&self.id).map_err(|_| DomainError::InvalidUuid(self.id.clone()))?,
+            livelihood_id: Uuid::parse_str(&self.livelihood_id).map_err(|_| DomainError::InvalidUuid(self.livelihood_id.clone()))?,
+            amount: self.amount,
+            amount_updated_at: parse_datetime(&self.amount_updated_at).transpose()?,
+            amount_updated_by: parse_uuid(&self.amount_updated_by).transpose()?,
+            purpose: self.purpose,
+            purpose_updated_at: parse_datetime(&self.purpose_updated_at).transpose()?,
+            purpose_updated_by: parse_uuid(&self.purpose_updated_by).transpose()?,
+            grant_date: self.grant_date,
+            grant_date_updated_at: parse_datetime(&self.grant_date_updated_at).transpose()?,
+            grant_date_updated_by: parse_uuid(&self.grant_date_updated_by).transpose()?,
+            created_at: DateTime::parse_from_rfc3339(&self.created_at).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid created_at date format: {}", self.created_at)))?,
+            updated_at: DateTime::parse_from_rfc3339(&self.updated_at).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid updated_at date format: {}", self.updated_at)))?,
+            created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
+            updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
+            deleted_at: parse_datetime(&self.deleted_at).transpose()?,
+            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+        })
+    }
 }

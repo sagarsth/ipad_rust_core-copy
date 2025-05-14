@@ -34,7 +34,7 @@ use std::str::FromStr;
 use std::path::Path;
 use chrono::{Utc, DateTime};
 use serde_json;
-
+use crate::domains::core::delete_service::PendingDeletionManager;
 // --- Includes Enum ---
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocumentInclude {
@@ -214,6 +214,7 @@ impl DocumentServiceImpl {
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         file_storage_service: Arc<dyn FileStorageService>,
         compression_service: Arc<dyn CompressionService>,
+        deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         // --- Adapters for Delete Services ---
         struct DocTypeRepoAdapter(Arc<dyn DocumentTypeRepository>);
@@ -301,6 +302,7 @@ impl DocumentServiceImpl {
             change_log_repo.clone(),
             dependency_checker.clone(),
             None,
+            deletion_manager.clone(),
         ));
 
         let delete_service_media_doc = Arc::new(BaseDeleteService::new(
@@ -309,7 +311,8 @@ impl DocumentServiceImpl {
             tombstone_repo,
             change_log_repo,
             dependency_checker,
-            Some(media_doc_repo.clone()), // Pass repo for potential file path access during delete
+            Some(media_doc_repo.clone()),
+            deletion_manager,
         ));
 
         Self {

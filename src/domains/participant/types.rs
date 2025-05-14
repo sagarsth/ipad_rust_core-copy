@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use std::fmt;
+use std::str::FromStr;
 
 // Added imports
 use crate::domains::document::types::MediaDocumentResponse;
@@ -242,7 +243,7 @@ pub struct ParticipantRow {
     pub updated_by_user_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
-    pub sync_priority: i64,
+    pub sync_priority: String,
 }
 
 impl ParticipantRow {
@@ -294,7 +295,7 @@ impl ParticipantRow {
             updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
             deleted_at: parse_datetime(&self.deleted_at).transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
-            sync_priority: Some(SyncPriority::from(self.sync_priority)),
+            sync_priority: Some(SyncPriority::from_str(&self.sync_priority).unwrap_or_default()),
         })
     }
 }

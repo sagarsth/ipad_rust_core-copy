@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
 
 /// Activity entity - represents a specific activity within a project
 /// Aligned with v1_schema.sql
@@ -38,6 +39,7 @@ pub struct Activity {
     pub status_id: Option<i64>,
     pub status_id_updated_at: Option<DateTime<Utc>>,
     pub status_id_updated_by: Option<Uuid>,
+    pub sync_priority: SyncPriorityFromSyncDomain,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Uuid, // Changed to Uuid
@@ -114,6 +116,7 @@ pub struct NewActivity {
     pub actual_value: Option<f64>, // Optional on create, defaults to 0 in DB
     // Removed start/end date
     pub status_id: Option<i64>,
+    pub sync_priority: SyncPriorityFromSyncDomain,
     pub created_by_user_id: Option<Uuid>,
 }
 
@@ -166,6 +169,7 @@ pub struct UpdateActivity {
     pub actual_value: Option<f64>,
     // Removed start/end date
     pub status_id: Option<i64>,
+    pub sync_priority: Option<SyncPriorityFromSyncDomain>,
     pub updated_by_user_id: Uuid, // Required for tracking who made the update
 }
 
@@ -234,6 +238,7 @@ pub struct ActivityRow {
     pub status_id: Option<i64>,
     pub status_id_updated_at: Option<String>,
     pub status_id_updated_by: Option<String>,
+    pub sync_priority: String,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: String, // Keep as String for FromRow
@@ -256,6 +261,7 @@ impl ActivityRow {
         let parse_uuid_opt = |s: Option<String>| s.map(parse_uuid).transpose();
         let parse_datetime = |s: String| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid date format: {}", s)));
         let parse_datetime_opt = |s: Option<String>| s.map(parse_datetime).transpose();
+        let parse_sync_priority = |s: String| SyncPriorityFromSyncDomain::from_str(&s).map_err(|_| DomainError::Internal(format!("Invalid sync priority format: {}", s)));
 
         Ok(Activity {
             id: parse_uuid(self.id)?,
@@ -275,6 +281,7 @@ impl ActivityRow {
             status_id: self.status_id,
             status_id_updated_at: parse_datetime_opt(self.status_id_updated_at)?,
             status_id_updated_by: parse_uuid_opt(self.status_id_updated_by)?,
+            sync_priority: parse_sync_priority(self.sync_priority.clone())?,
             created_at: parse_datetime(self.created_at)?,
             updated_at: parse_datetime(self.updated_at)?,
             created_by_user_id: parse_uuid(self.created_by_user_id)?, // Parse from String
@@ -314,6 +321,7 @@ pub struct StatusInfo {
 pub struct ActivityResponse {
     pub id: Uuid,
     pub project_id: Option<Uuid>,
+    pub sync_priority: SyncPriorityFromSyncDomain,
     // Removed name
     pub description: Option<String>,
     // Added KPI, Target, Actual
@@ -343,6 +351,7 @@ impl From<Activity> for ActivityResponse {
         Self {
             id: activity.id,
             project_id: activity.project_id,
+            sync_priority: activity.sync_priority,
             // name removed
             description: activity.description,
             // kpi, target, actual added

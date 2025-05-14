@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 use chrono::Datelike;
-
+use crate::domains::core::delete_service::PendingDeletionManager;
 /// Trait defining participant service operations
 #[async_trait]
 pub trait ParticipantService: DeleteService<Participant> + Send + Sync {
@@ -208,6 +208,7 @@ impl ParticipantServiceImpl {
         change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>,
         dependency_checker: Arc<dyn DependencyChecker + Send + Sync>,
         document_service: Arc<dyn DocumentService>,
+        deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         // Local adapter struct
         struct RepoAdapter(Arc<dyn ParticipantRepository + Send + Sync>);
@@ -264,6 +265,7 @@ impl ParticipantServiceImpl {
             change_log_repo,
             dependency_checker,
             None,
+            deletion_manager,
         ));
         
         Self {
