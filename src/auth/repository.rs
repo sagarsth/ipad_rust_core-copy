@@ -68,14 +68,15 @@ impl AuthRepository for SqliteAuthRepository {
         
         // Use sqlx::query for INSERT
         sqlx::query(
-            "INSERT INTO audit_logs (id, user_id, action, entity_table, entity_id, details, timestamp) 
-             VALUES (?, ?, ?, 'users', ?, ?, ?)")
+            "INSERT INTO audit_logs (id, user_id, action, entity_table, entity_id, details, timestamp, device_id) 
+             VALUES (?, ?, ?, 'users', ?, ?, ?, ?)")
             .bind(log_id.to_string())
             .bind(user_id_str.as_deref())
             .bind(action)
             .bind(user_id_str.as_deref())
-            .bind(format!("{{\"email\":\"{}\",\"device_id\":\"{}\"}}", email, device_id))
+            .bind(format!("{{\"email\":\"{}\"}}", email))
             .bind(now)
+            .bind(device_id)
             .execute(&self.pool)
             .await
             .map_err(DbError::from)?;
@@ -89,13 +90,14 @@ impl AuthRepository for SqliteAuthRepository {
         
         // Use sqlx::query for INSERT
         sqlx::query(
-            "INSERT INTO audit_logs (id, user_id, action, entity_table, entity_id, details, timestamp) 
-             VALUES (?, ?, 'logout', 'users', ?, ?, ?)")
+            "INSERT INTO audit_logs (id, user_id, action, entity_table, entity_id, details, timestamp, device_id) 
+             VALUES (?, ?, 'logout', 'users', ?, ?, ?, ?)")
             .bind(log_id.to_string())
             .bind(user_id.to_string())
             .bind(user_id.to_string())
-            .bind(format!("{{\"device_id\":\"{}\"}}", device_id))
+            .bind(Option::<String>::None)
             .bind(now)
+            .bind(device_id)
             .execute(&self.pool)
             .await
             .map_err(DbError::from)?;

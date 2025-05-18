@@ -174,6 +174,7 @@ pub struct DonorServiceImpl {
     funding_repo: Arc<dyn ProjectFundingRepository + Send + Sync>,
     delete_service: Arc<BaseDeleteService<Donor>>,
     document_service: Arc<dyn DocumentService>,
+    
 }
 
 impl DonorServiceImpl {

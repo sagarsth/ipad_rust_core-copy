@@ -8,6 +8,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 use sqlx::FromRow;
 use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain; // Import SyncPriority from the correct path
+use async_trait::async_trait;
 
 // --- Domain Entities ---
 
@@ -18,22 +19,63 @@ pub struct DocumentType {
     pub name: String,
     pub name_updated_at: Option<DateTime<Utc>>,
     pub name_updated_by: Option<Uuid>,
+    pub name_updated_by_device_id: Option<Uuid>,
+
+    pub allowed_extensions: String,
+    pub allowed_extensions_updated_at: Option<DateTime<Utc>>,
+    pub allowed_extensions_updated_by: Option<Uuid>,
+    pub allowed_extensions_updated_by_device_id: Option<Uuid>,
+
+    pub max_size: i64,
+    pub max_size_updated_at: Option<DateTime<Utc>>,
+    pub max_size_updated_by: Option<Uuid>,
+    pub max_size_updated_by_device_id: Option<Uuid>,
+
+    pub compression_level: i32,
+    pub compression_level_updated_at: Option<DateTime<Utc>>,
+    pub compression_level_updated_by: Option<Uuid>,
+    pub compression_level_updated_by_device_id: Option<Uuid>,
+
+    pub compression_method: Option<String>,
+    pub compression_method_updated_at: Option<DateTime<Utc>>,
+    pub compression_method_updated_by: Option<Uuid>,
+    pub compression_method_updated_by_device_id: Option<Uuid>,
+
+    pub min_size_for_compression: Option<i64>,
+    pub min_size_for_compression_updated_at: Option<DateTime<Utc>>,
+    pub min_size_for_compression_updated_by: Option<Uuid>,
+    pub min_size_for_compression_updated_by_device_id: Option<Uuid>,
+    
     pub description: Option<String>,
     pub description_updated_at: Option<DateTime<Utc>>,
     pub description_updated_by: Option<Uuid>,
+    pub description_updated_by_device_id: Option<Uuid>,
+    
+    pub default_priority: String,
+    pub default_priority_updated_at: Option<DateTime<Utc>>,
+    pub default_priority_updated_by: Option<Uuid>,
+    pub default_priority_updated_by_device_id: Option<Uuid>,
+
     pub icon: Option<String>,
     pub icon_updated_at: Option<DateTime<Utc>>,
     pub icon_updated_by: Option<Uuid>,
-    pub color: Option<String>,
-    pub color_updated_at: Option<DateTime<Utc>>,
-    pub color_updated_by: Option<Uuid>,
-    pub default_priority: String, // ADDED - As String matching CompressionPriority names
+    pub icon_updated_by_device_id: Option<Uuid>,
+
+    pub related_tables: Option<String>,
+    pub related_tables_updated_at: Option<DateTime<Utc>>,
+    pub related_tables_updated_by: Option<Uuid>,
+    pub related_tables_updated_by_device_id: Option<Uuid>,
+
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
     pub updated_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
+    
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
 }
 
 /// Media/Document record (Immutable after creation)
@@ -260,8 +302,13 @@ pub struct NewDocumentType {
     pub name: String,
     pub description: Option<String>,
     pub icon: Option<String>,
-    pub color: Option<String>,
-    pub default_priority: String, // ADDED - e.g., "NORMAL"
+    pub default_priority: String, // e.g., "NORMAL"
+    pub allowed_extensions: String, // ADDED - Comma-separated: 'jpg,png,pdf'
+    pub max_size: i64, // ADDED - Maximum file size in bytes
+    pub compression_level: i32, // ADDED - 0-9 (0=none, 9=max)
+    pub compression_method: Option<String>, // ADDED - 'lossless', 'lossy', etc.
+    pub min_size_for_compression: Option<i64>, // ADDED - Don't compress if smaller (bytes)
+    pub related_tables: Option<String>, // ADDED - JSON array of table names
 }
 
 impl Validate for NewDocumentType {
@@ -271,8 +318,38 @@ impl Validate for NewDocumentType {
             .min_length(2)
             .max_length(100)
             .validate()?;
-        // Validate default_priority is a valid CompressionPriority string
         CompressionPriority::from_str(&self.default_priority)?;
+        ValidationBuilder::new("allowed_extensions", Some(self.allowed_extensions.clone()))
+            .required()
+            .min_length(1) // At least one extension
+            .max_length(255)
+            .validate()?;
+        ValidationBuilder::new("max_size", Some(self.max_size))
+            .required()
+            .min(0) // Max size cannot be negative
+            .validate()?;
+        ValidationBuilder::new("compression_level", Some(self.compression_level))
+            .required()
+            .min(0)
+            .max(9) // Assuming 0-9 range
+            .validate()?;
+        if let Some(method) = &self.compression_method {
+            // TODO: Validate against specific allowed values if enum/set defined
+            ValidationBuilder::new("compression_method", Some(method.clone()))
+                .max_length(50)
+                .validate()?;
+        }
+        if let Some(min_size) = self.min_size_for_compression {
+            ValidationBuilder::new("min_size_for_compression", Some(min_size))
+                .min(0)
+                .validate()?;
+        }
+        if let Some(tables) = &self.related_tables {
+            // Basic validation for JSON-like string, could be more robust
+             if !(tables.starts_with('[') && tables.ends_with(']')) && !(tables.starts_with('{') && tables.ends_with('}')) {
+                 return Err(DomainError::Validation(ValidationError::custom("related_tables must be a valid JSON array or object string")));
+             }
+        }
         Ok(())
     }
 }
@@ -283,8 +360,13 @@ pub struct UpdateDocumentType {
     pub name: Option<String>,
     pub description: Option<String>,
     pub icon: Option<String>,
-    pub color: Option<String>,
-    pub default_priority: Option<String>, // ADDED
+    pub default_priority: Option<String>,
+    pub allowed_extensions: Option<String>,
+    pub max_size: Option<i64>,
+    pub compression_level: Option<i32>,
+    pub compression_method: Option<String>,
+    pub min_size_for_compression: Option<i64>,
+    pub related_tables: Option<String>,
 }
 
 impl Validate for UpdateDocumentType {
@@ -298,6 +380,27 @@ impl Validate for UpdateDocumentType {
         }
         if let Some(prio) = &self.default_priority {
              CompressionPriority::from_str(prio)?;
+        }
+        if let Some(ext) = &self.allowed_extensions {
+            ValidationBuilder::new("allowed_extensions", Some(ext.clone()))
+                .required().min_length(1).max_length(255).validate()?;
+        }
+        if let Some(size) = self.max_size {
+            ValidationBuilder::new("max_size", Some(size)).required().min(0).validate()?;
+        }
+        if let Some(level) = self.compression_level {
+            ValidationBuilder::new("compression_level", Some(level)).required().min(0).max(9).validate()?;
+        }
+        if let Some(method) = &self.compression_method {
+            ValidationBuilder::new("compression_method", Some(method.clone())).max_length(50).validate()?;
+        }
+        if let Some(min_size) = self.min_size_for_compression {
+            ValidationBuilder::new("min_size_for_compression", Some(min_size)).min(0).validate()?;
+        }
+        if let Some(tables) = &self.related_tables {
+             if !(tables.starts_with('[') && tables.ends_with(']')) && !(tables.starts_with('{') && tables.ends_with('}')) {
+                 return Err(DomainError::Validation(ValidationError::custom("related_tables must be a valid JSON array or object string")));
+             }
         }
         Ok(())
     }
@@ -393,8 +496,13 @@ pub struct DocumentTypeResponse {
     pub name: String,
     pub description: Option<String>,
     pub icon: Option<String>,
-    pub color: Option<String>,
-    pub default_priority: String, // ADDED
+    pub default_priority: String,
+    pub allowed_extensions: String,
+    pub max_size: i64,
+    pub compression_level: i32,
+    pub compression_method: Option<String>,
+    pub min_size_for_compression: Option<i64>,
+    pub related_tables: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -406,8 +514,13 @@ impl From<DocumentType> for DocumentTypeResponse {
             name: entity.name,
             description: entity.description,
             icon: entity.icon,
-            color: entity.color,
-            default_priority: entity.default_priority, // ADDED
+            default_priority: entity.default_priority,
+            allowed_extensions: entity.allowed_extensions,
+            max_size: entity.max_size,
+            compression_level: entity.compression_level,
+            compression_method: entity.compression_method,
+            min_size_for_compression: entity.min_size_for_compression,
+            related_tables: entity.related_tables,
             created_at: entity.created_at.to_rfc3339(),
             updated_at: entity.updated_at.to_rfc3339(),
         }
@@ -515,6 +628,55 @@ pub struct DocumentFileInfo {
     pub compression_status: CompressionStatus, // Return enum for internal logic
 }
 
+/// Represents the full state of a MediaDocument for synchronization purposes.
+/// All fields that are synced should be included here, especially LWW timestamps.
+#[derive(Debug, Clone, Serialize, Deserialize)]pub struct MediaDocumentFullState {
+    pub id: Uuid,
+    pub original_filename: Option<String>,
+    pub original_filename_updated_at: Option<DateTime<Utc>>,
+    pub original_filename_updated_by: Option<Uuid>,
+
+    pub mime_type: Option<String>,
+    pub mime_type_updated_at: Option<DateTime<Utc>>,
+    pub mime_type_updated_by: Option<Uuid>,
+
+    pub file_path: Option<String>, // Relative path where the blob is stored/expected locally
+    pub file_path_updated_at: Option<DateTime<Utc>>,
+    pub file_path_updated_by: Option<Uuid>,
+
+    pub size_bytes: Option<i64>,
+    pub size_bytes_updated_at: Option<DateTime<Utc>>,
+    pub size_bytes_updated_by: Option<Uuid>,
+
+    pub blob_status: Option<String>, // e.g., "local_only", "pending_upload", "uploaded", "pending_download", "downloaded"
+    pub blob_status_updated_at: Option<DateTime<Utc>>,
+    pub blob_status_updated_by: Option<Uuid>,
+
+    pub checksum_sha256: Option<String>,
+    pub checksum_sha256_updated_at: Option<DateTime<Utc>>,
+    pub checksum_sha256_updated_by: Option<Uuid>,
+
+    pub related_table: Option<String>,
+    pub related_id: Option<Uuid>,
+    // LWW for related_table/id if they can change independently and need merging
+    pub related_entity_updated_at: Option<DateTime<Utc>>, 
+    pub related_entity_updated_by: Option<Uuid>,
+
+    pub document_type: Option<String>, // e.g., "profile_picture", "report_attachment"
+    pub document_type_updated_at: Option<DateTime<Utc>>,
+    pub document_type_updated_by: Option<Uuid>,
+
+    pub description: Option<String>,
+    pub description_updated_at: Option<DateTime<Utc>>,
+    pub description_updated_by: Option<Uuid>,
+
+    pub created_at: DateTime<Utc>,
+    pub created_by_user_id: Uuid,
+    pub updated_at: DateTime<Utc>,
+    pub updated_by_user_id: Uuid,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub deleted_by_user_id: Option<Uuid>,
+}
 
 // --- Database Row Mappers ---
 
@@ -525,22 +687,63 @@ pub struct DocumentTypeRow {
     pub name: String,
     pub description: Option<String>,
     pub icon: Option<String>,
-    pub color: Option<String>,
-    pub default_priority: String, // CHANGE: Must be String
+    pub default_priority: String,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
     pub updated_by_user_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    
     pub name_updated_at: Option<String>,
     pub name_updated_by: Option<String>,
+    pub name_updated_by_device_id: Option<String>,
+
+    pub allowed_extensions: String,
+    pub allowed_extensions_updated_at: Option<String>,
+    pub allowed_extensions_updated_by: Option<String>,
+    pub allowed_extensions_updated_by_device_id: Option<String>,
+
+    pub max_size: i64,
+    pub max_size_updated_at: Option<String>,
+    pub max_size_updated_by: Option<String>,
+    pub max_size_updated_by_device_id: Option<String>,
+
+    pub compression_level: i32,
+    pub compression_level_updated_at: Option<String>,
+    pub compression_level_updated_by: Option<String>,
+    pub compression_level_updated_by_device_id: Option<String>,
+
+    pub compression_method: Option<String>,
+    pub compression_method_updated_at: Option<String>,
+    pub compression_method_updated_by: Option<String>,
+    pub compression_method_updated_by_device_id: Option<String>,
+
+    pub min_size_for_compression: Option<i64>,
+    pub min_size_for_compression_updated_at: Option<String>,
+    pub min_size_for_compression_updated_by: Option<String>,
+    pub min_size_for_compression_updated_by_device_id: Option<String>,
+    
     pub description_updated_at: Option<String>,
     pub description_updated_by: Option<String>,
+    pub description_updated_by_device_id: Option<String>,
+
+    pub default_priority_updated_at: Option<String>,
+    pub default_priority_updated_by: Option<String>,
+    pub default_priority_updated_by_device_id: Option<String>,
+    
     pub icon_updated_at: Option<String>,
     pub icon_updated_by: Option<String>,
-    pub color_updated_at: Option<String>,
-    pub color_updated_by: Option<String>,
+    pub icon_updated_by_device_id: Option<String>,
+
+    pub related_tables: Option<String>,
+    pub related_tables_updated_at: Option<String>,
+    pub related_tables_updated_by: Option<String>,
+    pub related_tables_updated_by_device_id: Option<String>,
+
+    pub created_by_device_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
 }
 
 impl DocumentTypeRow {
@@ -565,7 +768,6 @@ impl DocumentTypeRow {
             name: self.name,
             description: self.description,
             icon: self.icon,
-            color: self.color,
             default_priority: SyncPriorityFromSyncDomain::from_str(&self.default_priority).unwrap_or_default().as_str().to_string(),
             created_at: DateTime::parse_from_rfc3339(&self.created_at)
                  .map(|dt| dt.with_timezone(&Utc))
@@ -577,14 +779,56 @@ impl DocumentTypeRow {
             updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
             deleted_at: parse_datetime(&self.deleted_at).transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+            
             name_updated_at: parse_datetime(&self.name_updated_at).transpose()?,
             name_updated_by: parse_uuid(&self.name_updated_by).transpose()?,
+            name_updated_by_device_id: parse_uuid(&self.name_updated_by_device_id).transpose()?,
+
+            allowed_extensions: self.allowed_extensions,
+            allowed_extensions_updated_at: parse_datetime(&self.allowed_extensions_updated_at).transpose()?,
+            allowed_extensions_updated_by: parse_uuid(&self.allowed_extensions_updated_by).transpose()?,
+            allowed_extensions_updated_by_device_id: parse_uuid(&self.allowed_extensions_updated_by_device_id).transpose()?,
+
+            max_size: self.max_size,
+            max_size_updated_at: parse_datetime(&self.max_size_updated_at).transpose()?,
+            max_size_updated_by: parse_uuid(&self.max_size_updated_by).transpose()?,
+            max_size_updated_by_device_id: parse_uuid(&self.max_size_updated_by_device_id).transpose()?,
+
+            compression_level: self.compression_level,
+            compression_level_updated_at: parse_datetime(&self.compression_level_updated_at).transpose()?,
+            compression_level_updated_by: parse_uuid(&self.compression_level_updated_by).transpose()?,
+            compression_level_updated_by_device_id: parse_uuid(&self.compression_level_updated_by_device_id).transpose()?,
+
+            compression_method: self.compression_method,
+            compression_method_updated_at: parse_datetime(&self.compression_method_updated_at).transpose()?,
+            compression_method_updated_by: parse_uuid(&self.compression_method_updated_by).transpose()?,
+            compression_method_updated_by_device_id: parse_uuid(&self.compression_method_updated_by_device_id).transpose()?,
+
+            min_size_for_compression: self.min_size_for_compression,
+            min_size_for_compression_updated_at: parse_datetime(&self.min_size_for_compression_updated_at).transpose()?,
+            min_size_for_compression_updated_by: parse_uuid(&self.min_size_for_compression_updated_by).transpose()?,
+            min_size_for_compression_updated_by_device_id: parse_uuid(&self.min_size_for_compression_updated_by_device_id).transpose()?,
+            
             description_updated_at: parse_datetime(&self.description_updated_at).transpose()?,
             description_updated_by: parse_uuid(&self.description_updated_by).transpose()?,
+            description_updated_by_device_id: parse_uuid(&self.description_updated_by_device_id).transpose()?,
+
+            default_priority_updated_at: parse_datetime(&self.default_priority_updated_at).transpose()?,
+            default_priority_updated_by: parse_uuid(&self.default_priority_updated_by).transpose()?,
+            default_priority_updated_by_device_id: parse_uuid(&self.default_priority_updated_by_device_id).transpose()?,
+            
             icon_updated_at: parse_datetime(&self.icon_updated_at).transpose()?,
             icon_updated_by: parse_uuid(&self.icon_updated_by).transpose()?,
-            color_updated_at: parse_datetime(&self.color_updated_at).transpose()?,
-            color_updated_by: parse_uuid(&self.color_updated_by).transpose()?,
+            icon_updated_by_device_id: parse_uuid(&self.icon_updated_by_device_id).transpose()?,
+            
+            related_tables: self.related_tables,
+            related_tables_updated_at: parse_datetime(&self.related_tables_updated_at).transpose()?,
+            related_tables_updated_by: parse_uuid(&self.related_tables_updated_by).transpose()?,
+            related_tables_updated_by_device_id: parse_uuid(&self.related_tables_updated_by_device_id).transpose()?,
+
+            created_by_device_id: parse_uuid(&self.created_by_device_id).transpose()?,
+            updated_by_device_id: parse_uuid(&self.updated_by_device_id).transpose()?,
+            deleted_by_device_id: parse_uuid(&self.deleted_by_device_id).transpose()?,
         })
     }
 }

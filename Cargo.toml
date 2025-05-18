@@ -25,6 +25,7 @@ refinery = { version = "0.8.16", features = ["rusqlite"] }
 
 # Async runtime
 tokio = { version = "1.44.1", features = ["full"] }
+futures = "0.3"
 async-trait = "0.1.88"
 
 # UUID and time

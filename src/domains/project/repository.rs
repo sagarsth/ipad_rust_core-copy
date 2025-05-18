@@ -174,12 +174,14 @@ impl SoftDeletable for SqliteProjectRepository {
     ) -> DomainResult<()> {
         let now = Utc::now().to_rfc3339();
         let deleted_by = auth.user_id.to_string();
+        let deleted_by_device_id = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
         
         let result = query(
-            "UPDATE projects SET deleted_at = ?, deleted_by_user_id = ? WHERE id = ? AND deleted_at IS NULL"
+            "UPDATE projects SET deleted_at = ?, deleted_by_user_id = ?, deleted_by_device_id = ? WHERE id = ? AND deleted_at IS NULL"
         )
         .bind(now)
         .bind(deleted_by)
+        .bind(deleted_by_device_id)
         .bind(id.to_string())
         .execute(&mut **tx) 
         .await
@@ -283,6 +285,7 @@ impl ProjectRepository for SqliteProjectRepository {
         let user_id = auth.user_id;
         let user_id_str = user_id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
         let strategic_goal_id_str = new_project.strategic_goal_id.map(|id| id.to_string());
         let created_by_id_str = new_project.created_by_user_id
             .map(|id| id.to_string())
@@ -291,40 +294,43 @@ impl ProjectRepository for SqliteProjectRepository {
         let mut builder = QueryBuilder::new(
             r#"INSERT INTO projects (
                 id, strategic_goal_id, 
-                name, name_updated_at, name_updated_by,
-                objective, objective_updated_at, objective_updated_by,
-                outcome, outcome_updated_at, outcome_updated_by,
-                status_id, status_id_updated_at, status_id_updated_by,
-                timeline, timeline_updated_at, timeline_updated_by,
-                responsible_team, responsible_team_updated_at, responsible_team_updated_by,
+                name, name_updated_at, name_updated_by, name_updated_by_device_id,
+                objective, objective_updated_at, objective_updated_by, objective_updated_by_device_id,
+                outcome, outcome_updated_at, outcome_updated_by, outcome_updated_by_device_id,
+                status_id, status_id_updated_at, status_id_updated_by, status_id_updated_by_device_id,
+                timeline, timeline_updated_at, timeline_updated_by, timeline_updated_by_device_id,
+                responsible_team, responsible_team_updated_at, responsible_team_updated_by, responsible_team_updated_by_device_id,
                 sync_priority,
                 created_at, updated_at, created_by_user_id, updated_by_user_id,
-                deleted_at, deleted_by_user_id
+                created_by_device_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
             ) "#
         );
 
         builder.push_values([ (
             id.to_string(), strategic_goal_id_str,
-            new_project.name.clone(), now_str.clone(), user_id_str.clone(),
-            new_project.objective.clone(), new_project.objective.as_ref().map(|_| &now_str), new_project.objective.as_ref().map(|_| &user_id_str),
-            new_project.outcome.clone(), new_project.outcome.as_ref().map(|_| &now_str), new_project.outcome.as_ref().map(|_| &user_id_str),
-            new_project.status_id.clone(), new_project.status_id.as_ref().map(|_| &now_str), new_project.status_id.as_ref().map(|_| &user_id_str),
-            new_project.timeline.clone(), new_project.timeline.as_ref().map(|_| &now_str), new_project.timeline.as_ref().map(|_| &user_id_str),
-            new_project.responsible_team.clone(), new_project.responsible_team.as_ref().map(|_| &now_str), new_project.responsible_team.as_ref().map(|_| &user_id_str),
+            new_project.name.clone(), now_str.clone(), user_id_str.clone(), device_id_str.clone(),
+            new_project.objective.clone(), new_project.objective.as_ref().map(|_| &now_str), new_project.objective.as_ref().map(|_| &user_id_str), new_project.objective.as_ref().map(|_| &device_id_str),
+            new_project.outcome.clone(), new_project.outcome.as_ref().map(|_| &now_str), new_project.outcome.as_ref().map(|_| &user_id_str), new_project.outcome.as_ref().map(|_| &device_id_str),
+            new_project.status_id.clone(), new_project.status_id.as_ref().map(|_| &now_str), new_project.status_id.as_ref().map(|_| &user_id_str), new_project.status_id.as_ref().map(|_| &device_id_str),
+            new_project.timeline.clone(), new_project.timeline.as_ref().map(|_| &now_str), new_project.timeline.as_ref().map(|_| &user_id_str), new_project.timeline.as_ref().map(|_| &device_id_str),
+            new_project.responsible_team.clone(), new_project.responsible_team.as_ref().map(|_| &now_str), new_project.responsible_team.as_ref().map(|_| &user_id_str), new_project.responsible_team.as_ref().map(|_| &device_id_str),
             new_project.sync_priority.as_str(),
             now_str.clone(), now_str.clone(), created_by_id_str, user_id_str.clone(),
-            Option::<String>::None, Option::<String>::None
+            device_id_str.clone(), device_id_str.clone(), // created_by_device_id, updated_by_device_id
+            Option::<String>::None, Option::<String>::None, Option::<String>::None // deleted_at, deleted_by_user_id, deleted_by_device_id
         )], |mut b, values| {
              b.push_bind(values.0); b.push_bind(values.1);
-             b.push_bind(values.2); b.push_bind(values.3); b.push_bind(values.4);
-             b.push_bind(values.5); b.push_bind(values.6); b.push_bind(values.7);
-             b.push_bind(values.8); b.push_bind(values.9); b.push_bind(values.10);
-             b.push_bind(values.11); b.push_bind(values.12); b.push_bind(values.13);
-             b.push_bind(values.14); b.push_bind(values.15); b.push_bind(values.16);
-             b.push_bind(values.17); b.push_bind(values.18); b.push_bind(values.19);
-             b.push_bind(values.20);
-             b.push_bind(values.21); b.push_bind(values.22); b.push_bind(values.23); b.push_bind(values.24);
-             b.push_bind(values.25); b.push_bind(values.26);
+             b.push_bind(values.2); b.push_bind(values.3); b.push_bind(values.4); b.push_bind(values.5.clone());
+             b.push_bind(values.6); b.push_bind(values.7); b.push_bind(values.8); b.push_bind(values.9.clone());
+             b.push_bind(values.10); b.push_bind(values.11); b.push_bind(values.12); b.push_bind(values.13.clone());
+             b.push_bind(values.14); b.push_bind(values.15); b.push_bind(values.16); b.push_bind(values.17.clone());
+             b.push_bind(values.18); b.push_bind(values.19); b.push_bind(values.20); b.push_bind(values.21.clone());
+             b.push_bind(values.22); b.push_bind(values.23); b.push_bind(values.24); b.push_bind(values.25.clone());
+             b.push_bind(values.26);
+             b.push_bind(values.27); b.push_bind(values.28); b.push_bind(values.29); b.push_bind(values.30);
+             b.push_bind(values.31); b.push_bind(values.32); // created_by_device_id, updated_by_device_id
+             b.push_bind(values.33); b.push_bind(values.34); b.push_bind(values.35); // deleted_at, deleted_by_user_id, deleted_by_device_id
         });
 
         let query = builder.build();
@@ -387,6 +393,7 @@ impl ProjectRepository for SqliteProjectRepository {
         let user_id_str = user_id.to_string();
         let id_str = id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
 
         let mut builder = QueryBuilder::new("UPDATE projects SET ");
         let mut separated = builder.separated(", ");
@@ -401,6 +408,8 @@ impl ProjectRepository for SqliteProjectRepository {
                     separated.push_bind_unseparated(now_str.clone());
                     separated.push(concat!(" ", $field_sql, "_updated_by = "));
                     separated.push_bind_unseparated(user_id_str.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_by_device_id = "));
+                    separated.push_bind_unseparated(device_id_str.clone());
                     fields_updated = true;
                 }
             };
@@ -436,6 +445,8 @@ impl ProjectRepository for SqliteProjectRepository {
         separated.push_bind_unseparated(now_str.clone());
         separated.push("updated_by_user_id = ");
         separated.push_bind_unseparated(user_id_str.clone());
+        separated.push("updated_by_device_id = ");
+        separated.push_bind_unseparated(device_id_str.clone());
 
         builder.push(" WHERE id = ");
         builder.push_bind(id_str);

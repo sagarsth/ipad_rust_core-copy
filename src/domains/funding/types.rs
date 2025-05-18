@@ -1,4 +1,4 @@
-use crate::errors::{DomainError, DomainResult};
+use crate::errors::{DomainError, DomainResult, ValidationError};
 use crate::validation::{Validate, ValidationBuilder};
 use uuid::Uuid;
 use chrono::{DateTime, Utc, NaiveDate};
@@ -56,39 +56,52 @@ pub struct ProjectFunding {
     pub project_id: Uuid,
     pub project_id_updated_at: Option<DateTime<Utc>>,
     pub project_id_updated_by: Option<Uuid>,
+    pub project_id_updated_by_device_id: Option<Uuid>,
     pub donor_id: Uuid,
     pub donor_id_updated_at: Option<DateTime<Utc>>,
     pub donor_id_updated_by: Option<Uuid>,
+    pub donor_id_updated_by_device_id: Option<Uuid>,
     pub grant_id: Option<String>,
     pub grant_id_updated_at: Option<DateTime<Utc>>,
     pub grant_id_updated_by: Option<Uuid>,
+    pub grant_id_updated_by_device_id: Option<Uuid>,
     pub amount: Option<f64>,
     pub amount_updated_at: Option<DateTime<Utc>>,
     pub amount_updated_by: Option<Uuid>,
+    pub amount_updated_by_device_id: Option<Uuid>,
     pub currency: String,
     pub currency_updated_at: Option<DateTime<Utc>>,
     pub currency_updated_by: Option<Uuid>,
+    pub currency_updated_by_device_id: Option<Uuid>,
     pub start_date: Option<String>, // ISO date format YYYY-MM-DD
     pub start_date_updated_at: Option<DateTime<Utc>>,
     pub start_date_updated_by: Option<Uuid>,
+    pub start_date_updated_by_device_id: Option<Uuid>,
     pub end_date: Option<String>, // ISO date format YYYY-MM-DD
     pub end_date_updated_at: Option<DateTime<Utc>>,
     pub end_date_updated_by: Option<Uuid>,
+    pub end_date_updated_by_device_id: Option<Uuid>,
     pub status: Option<String>,
     pub status_updated_at: Option<DateTime<Utc>>,
     pub status_updated_by: Option<Uuid>,
+    pub status_updated_by_device_id: Option<Uuid>,
     pub reporting_requirements: Option<String>,
     pub reporting_requirements_updated_at: Option<DateTime<Utc>>,
     pub reporting_requirements_updated_by: Option<Uuid>,
+    pub reporting_requirements_updated_by_device_id: Option<Uuid>,
     pub notes: Option<String>,
     pub notes_updated_at: Option<DateTime<Utc>>,
     pub notes_updated_by: Option<Uuid>,
+    pub notes_updated_by_device_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
     pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
 }
 
 impl ProjectFunding {
@@ -367,127 +380,127 @@ pub struct ProjectFundingRow {
     pub project_id: String,
     pub project_id_updated_at: Option<String>,
     pub project_id_updated_by: Option<String>,
+    pub project_id_updated_by_device_id: Option<String>,
     pub donor_id: String,
     pub donor_id_updated_at: Option<String>,
     pub donor_id_updated_by: Option<String>,
+    pub donor_id_updated_by_device_id: Option<String>,
     pub grant_id: Option<String>,
     pub grant_id_updated_at: Option<String>,
     pub grant_id_updated_by: Option<String>,
+    pub grant_id_updated_by_device_id: Option<String>,
     pub amount: Option<f64>,
     pub amount_updated_at: Option<String>,
     pub amount_updated_by: Option<String>,
+    pub amount_updated_by_device_id: Option<String>,
     pub currency: String,
     pub currency_updated_at: Option<String>,
     pub currency_updated_by: Option<String>,
+    pub currency_updated_by_device_id: Option<String>,
     pub start_date: Option<String>,
     pub start_date_updated_at: Option<String>,
     pub start_date_updated_by: Option<String>,
+    pub start_date_updated_by_device_id: Option<String>,
     pub end_date: Option<String>,
     pub end_date_updated_at: Option<String>,
     pub end_date_updated_by: Option<String>,
+    pub end_date_updated_by_device_id: Option<String>,
     pub status: Option<String>,
     pub status_updated_at: Option<String>,
     pub status_updated_by: Option<String>,
+    pub status_updated_by_device_id: Option<String>,
     pub reporting_requirements: Option<String>,
     pub reporting_requirements_updated_at: Option<String>,
     pub reporting_requirements_updated_by: Option<String>,
+    pub reporting_requirements_updated_by_device_id: Option<String>,
     pub notes: Option<String>,
     pub notes_updated_at: Option<String>,
     pub notes_updated_by: Option<String>,
+    pub notes_updated_by_device_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
+    pub created_by_device_id: Option<String>,
     pub updated_by_user_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
 }
 
 impl ProjectFundingRow {
     /// Convert database row to domain entity
     pub fn into_entity(self) -> DomainResult<ProjectFunding> {
-        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
-            s.as_ref().map(|id| {
-                Uuid::parse_str(id).map_err(|_| DomainError::InvalidUuid(id.clone()))
-            })
+        let parse_uuid = |s: &str, field_name: &str| Uuid::parse_str(s).map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid UUID format: {}", s))));
+        let parse_optional_uuid = |s: &Option<String>, field_name: &str| -> DomainResult<Option<Uuid>> {
+            match s {
+                Some(id_str) => Uuid::parse_str(id_str)
+                    .map(Some)
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid UUID format: {}", id_str)))),
+                None => Ok(None),
+            }
         };
-        
-        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
-            s.as_ref().map(|dt| {
-                DateTime::parse_from_rfc3339(dt)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", dt)))
-            })
+        let parse_datetime = |s: &str, field_name: &str| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", s))));
+        let parse_optional_datetime = |s: &Option<String>, field_name: &str| -> DomainResult<Option<DateTime<Utc>>> {
+            match s {
+                Some(dt_str) => DateTime::parse_from_rfc3339(dt_str)
+                    .map(|dt| Some(dt.with_timezone(&Utc)))
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", dt_str)))),
+                None => Ok(None),
+            }
         };
-        
+
         Ok(ProjectFunding {
-            id: Uuid::parse_str(&self.id)
-                .map_err(|_| DomainError::InvalidUuid(self.id))?,
-            project_id: Uuid::parse_str(&self.project_id)
-                .map_err(|_| DomainError::InvalidUuid(self.project_id))?,
-            project_id_updated_at: parse_datetime(&self.project_id_updated_at)
-                .transpose()?,
-            project_id_updated_by: parse_uuid(&self.project_id_updated_by)
-                .transpose()?,
-            donor_id: Uuid::parse_str(&self.donor_id)
-                .map_err(|_| DomainError::InvalidUuid(self.donor_id))?,
-            donor_id_updated_at: parse_datetime(&self.donor_id_updated_at)
-                .transpose()?,
-            donor_id_updated_by: parse_uuid(&self.donor_id_updated_by)
-                .transpose()?,
+            id: parse_uuid(&self.id, "id")?,
+            project_id: parse_uuid(&self.project_id, "project_id")?,
+            project_id_updated_at: parse_optional_datetime(&self.project_id_updated_at, "project_id_updated_at")?,
+            project_id_updated_by: parse_optional_uuid(&self.project_id_updated_by, "project_id_updated_by")?,
+            project_id_updated_by_device_id: parse_optional_uuid(&self.project_id_updated_by_device_id, "project_id_updated_by_device_id")?,
+            donor_id: parse_uuid(&self.donor_id, "donor_id")?,
+            donor_id_updated_at: parse_optional_datetime(&self.donor_id_updated_at, "donor_id_updated_at")?,
+            donor_id_updated_by: parse_optional_uuid(&self.donor_id_updated_by, "donor_id_updated_by")?,
+            donor_id_updated_by_device_id: parse_optional_uuid(&self.donor_id_updated_by_device_id, "donor_id_updated_by_device_id")?,
             grant_id: self.grant_id,
-            grant_id_updated_at: parse_datetime(&self.grant_id_updated_at)
-                .transpose()?,
-            grant_id_updated_by: parse_uuid(&self.grant_id_updated_by)
-                .transpose()?,
+            grant_id_updated_at: parse_optional_datetime(&self.grant_id_updated_at, "grant_id_updated_at")?,
+            grant_id_updated_by: parse_optional_uuid(&self.grant_id_updated_by, "grant_id_updated_by")?,
+            grant_id_updated_by_device_id: parse_optional_uuid(&self.grant_id_updated_by_device_id, "grant_id_updated_by_device_id")?,
             amount: self.amount,
-            amount_updated_at: parse_datetime(&self.amount_updated_at)
-                .transpose()?,
-            amount_updated_by: parse_uuid(&self.amount_updated_by)
-                .transpose()?,
+            amount_updated_at: parse_optional_datetime(&self.amount_updated_at, "amount_updated_at")?,
+            amount_updated_by: parse_optional_uuid(&self.amount_updated_by, "amount_updated_by")?,
+            amount_updated_by_device_id: parse_optional_uuid(&self.amount_updated_by_device_id, "amount_updated_by_device_id")?,
             currency: self.currency,
-            currency_updated_at: parse_datetime(&self.currency_updated_at)
-                .transpose()?,
-            currency_updated_by: parse_uuid(&self.currency_updated_by)
-                .transpose()?,
+            currency_updated_at: parse_optional_datetime(&self.currency_updated_at, "currency_updated_at")?,
+            currency_updated_by: parse_optional_uuid(&self.currency_updated_by, "currency_updated_by")?,
+            currency_updated_by_device_id: parse_optional_uuid(&self.currency_updated_by_device_id, "currency_updated_by_device_id")?,
             start_date: self.start_date,
-            start_date_updated_at: parse_datetime(&self.start_date_updated_at)
-                .transpose()?,
-            start_date_updated_by: parse_uuid(&self.start_date_updated_by)
-                .transpose()?,
+            start_date_updated_at: parse_optional_datetime(&self.start_date_updated_at, "start_date_updated_at")?,
+            start_date_updated_by: parse_optional_uuid(&self.start_date_updated_by, "start_date_updated_by")?,
+            start_date_updated_by_device_id: parse_optional_uuid(&self.start_date_updated_by_device_id, "start_date_updated_by_device_id")?,
             end_date: self.end_date,
-            end_date_updated_at: parse_datetime(&self.end_date_updated_at)
-                .transpose()?,
-            end_date_updated_by: parse_uuid(&self.end_date_updated_by)
-                .transpose()?,
+            end_date_updated_at: parse_optional_datetime(&self.end_date_updated_at, "end_date_updated_at")?,
+            end_date_updated_by: parse_optional_uuid(&self.end_date_updated_by, "end_date_updated_by")?,
+            end_date_updated_by_device_id: parse_optional_uuid(&self.end_date_updated_by_device_id, "end_date_updated_by_device_id")?,
             status: self.status,
-            status_updated_at: parse_datetime(&self.status_updated_at)
-                .transpose()?,
-            status_updated_by: parse_uuid(&self.status_updated_by)
-                .transpose()?,
+            status_updated_at: parse_optional_datetime(&self.status_updated_at, "status_updated_at")?,
+            status_updated_by: parse_optional_uuid(&self.status_updated_by, "status_updated_by")?,
+            status_updated_by_device_id: parse_optional_uuid(&self.status_updated_by_device_id, "status_updated_by_device_id")?,
             reporting_requirements: self.reporting_requirements,
-            reporting_requirements_updated_at: parse_datetime(&self.reporting_requirements_updated_at)
-                .transpose()?,
-            reporting_requirements_updated_by: parse_uuid(&self.reporting_requirements_updated_by)
-                .transpose()?,
+            reporting_requirements_updated_at: parse_optional_datetime(&self.reporting_requirements_updated_at, "reporting_requirements_updated_at")?,
+            reporting_requirements_updated_by: parse_optional_uuid(&self.reporting_requirements_updated_by, "reporting_requirements_updated_by")?,
+            reporting_requirements_updated_by_device_id: parse_optional_uuid(&self.reporting_requirements_updated_by_device_id, "reporting_requirements_updated_by_device_id")?,
             notes: self.notes,
-            notes_updated_at: parse_datetime(&self.notes_updated_at)
-                .transpose()?,
-            notes_updated_by: parse_uuid(&self.notes_updated_by)
-                .transpose()?,
-            created_at: DateTime::parse_from_rfc3339(&self.created_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.created_at)))?,
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.updated_at)))?,
-            created_by_user_id: parse_uuid(&self.created_by_user_id)
-                .transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id)
-                .transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at)
-                .transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id)
-                .transpose()?,
+            notes_updated_at: parse_optional_datetime(&self.notes_updated_at, "notes_updated_at")?,
+            notes_updated_by: parse_optional_uuid(&self.notes_updated_by, "notes_updated_by")?,
+            notes_updated_by_device_id: parse_optional_uuid(&self.notes_updated_by_device_id, "notes_updated_by_device_id")?,
+            created_at: parse_datetime(&self.created_at, "created_at")?,
+            updated_at: parse_datetime(&self.updated_at, "updated_at")?,
+            created_by_user_id: parse_optional_uuid(&self.created_by_user_id, "created_by_user_id")?,
+            created_by_device_id: parse_optional_uuid(&self.created_by_device_id, "created_by_device_id")?,
+            updated_by_user_id: parse_optional_uuid(&self.updated_by_user_id, "updated_by_user_id")?,
+            updated_by_device_id: parse_optional_uuid(&self.updated_by_device_id, "updated_by_device_id")?,
+            deleted_at: parse_optional_datetime(&self.deleted_at, "deleted_at")?,
+            deleted_by_user_id: parse_optional_uuid(&self.deleted_by_user_id, "deleted_by_user_id")?,
+            deleted_by_device_id: parse_optional_uuid(&self.deleted_by_device_id, "deleted_by_device_id")?,
         })
     }
 }

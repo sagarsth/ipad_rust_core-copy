@@ -1,25 +1,25 @@
 {
   "db_name": "SQLite",
-  "query": "\n             SELECT \n                 operation_id, entity_table, entity_id, operation_type, \n                 field_name, old_value, new_value, timestamp, user_id, \n                 device_id, sync_batch_id, processed_at, sync_error,\n                 document_metadata\n             FROM change_log\n             WHERE entity_table = ? AND entity_id = ?\n             ORDER BY timestamp ASC\n             ",
+  "query": "\n            SELECT \n                operation_id as \"operation_id!\", entity_table as \"entity_table!\",\n                entity_id as \"entity_id!\", operation_type as \"operation_type!\",\n                field_name, old_value, new_value, document_metadata,\n                timestamp as \"timestamp!\", user_id as \"user_id!\", device_id,\n                sync_batch_id, processed_at, sync_error\n            FROM change_log\n            WHERE sync_batch_id = ? AND sync_error IS NOT NULL\n            ",
   "describe": {
     "columns": [
       {
-        "name": "operation_id",
+        "name": "operation_id!",
         "ordinal": 0,
         "type_info": "Text"
       },
       {
-        "name": "entity_table",
+        "name": "entity_table!",
         "ordinal": 1,
         "type_info": "Text"
       },
       {
-        "name": "entity_id",
+        "name": "entity_id!",
         "ordinal": 2,
         "type_info": "Text"
       },
       {
-        "name": "operation_type",
+        "name": "operation_type!",
         "ordinal": 3,
         "type_info": "Text"
       },
@@ -39,43 +39,43 @@
         "type_info": "Text"
       },
       {
-        "name": "timestamp",
+        "name": "document_metadata",
         "ordinal": 7,
         "type_info": "Text"
       },
       {
-        "name": "user_id",
+        "name": "timestamp!",
         "ordinal": 8,
         "type_info": "Text"
       },
       {
-        "name": "device_id",
+        "name": "user_id!",
         "ordinal": 9,
         "type_info": "Text"
       },
       {
-        "name": "sync_batch_id",
+        "name": "device_id",
         "ordinal": 10,
         "type_info": "Text"
       },
       {
-        "name": "processed_at",
+        "name": "sync_batch_id",
         "ordinal": 11,
         "type_info": "Text"
       },
       {
-        "name": "sync_error",
+        "name": "processed_at",
         "ordinal": 12,
         "type_info": "Text"
       },
       {
-        "name": "document_metadata",
+        "name": "sync_error",
         "ordinal": 13,
         "type_info": "Text"
       }
     ],
     "parameters": {
-      "Right": 2
+      "Right": 1
     },
     "nullable": [
       true,
@@ -85,14 +85,14 @@
       true,
       true,
       true,
-      false,
-      false,
       true,
+      false,
+      false,
       true,
       true,
       true,
       true
     ]
   },
-  "hash": "a43f01d00210453c8dce0d95315c4f7d70c915c7a56854992bbd0d20deaee358"
+  "hash": "53cca014823819248b4c8f01cfdc79f6f83f43aa67564a07d0af833eedfa9e08"
 }

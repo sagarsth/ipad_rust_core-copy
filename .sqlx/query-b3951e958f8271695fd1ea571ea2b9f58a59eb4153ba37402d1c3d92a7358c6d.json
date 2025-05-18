@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT COUNT(*) as count \n            FROM media_documents \n            WHERE blob_status = 'pending' AND deleted_at IS NULL \n            AND created_by_user_id = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "count",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b3951e958f8271695fd1ea571ea2b9f58a59eb4153ba37402d1c3d92a7358c6d"
+}

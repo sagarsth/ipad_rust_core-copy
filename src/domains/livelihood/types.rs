@@ -1,4 +1,4 @@
-use crate::errors::{DomainError, DomainResult};
+use crate::errors::{DomainError, DomainResult, ValidationError};
 use crate::validation::{Validate, ValidationBuilder};
 use uuid::Uuid;
 use chrono::{DateTime, Utc, NaiveDate};
@@ -22,31 +22,39 @@ pub struct Livelihood {
     pub type_: String, // Renamed from 'type' to avoid keyword clash
     pub type_updated_at: Option<DateTime<Utc>>,
     pub type_updated_by: Option<Uuid>,
+    pub type_updated_by_device_id: Option<Uuid>,
     
     pub description: Option<String>,
     pub description_updated_at: Option<DateTime<Utc>>,
     pub description_updated_by: Option<Uuid>,
+    pub description_updated_by_device_id: Option<Uuid>,
     
     pub status_id: Option<i64>, // Assuming status_id refers to an integer key for a status_types table
     pub status_id_updated_at: Option<DateTime<Utc>>,
     pub status_id_updated_by: Option<Uuid>,
+    pub status_id_updated_by_device_id: Option<Uuid>,
 
     pub initial_grant_date: Option<String>, // ISO date format YYYY-MM-DD
     pub initial_grant_date_updated_at: Option<DateTime<Utc>>,
     pub initial_grant_date_updated_by: Option<Uuid>,
+    pub initial_grant_date_updated_by_device_id: Option<Uuid>,
 
     pub initial_grant_amount: Option<f64>,
     pub initial_grant_amount_updated_at: Option<DateTime<Utc>>,
     pub initial_grant_amount_updated_by: Option<Uuid>,
+    pub initial_grant_amount_updated_by_device_id: Option<Uuid>,
 
     pub sync_priority: SyncPriorityFromSyncDomain,
     
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
     pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
 }
 
 impl Livelihood {
@@ -98,18 +106,25 @@ pub struct SubsequentGrant {
     pub amount: Option<f64>,
     pub amount_updated_at: Option<DateTime<Utc>>,
     pub amount_updated_by: Option<Uuid>,
+    pub amount_updated_by_device_id: Option<Uuid>,
     pub purpose: Option<String>,
     pub purpose_updated_at: Option<DateTime<Utc>>,
     pub purpose_updated_by: Option<Uuid>,
+    pub purpose_updated_by_device_id: Option<Uuid>,
     pub grant_date: Option<String>, // ISO date format YYYY-MM-DD
     pub grant_date_updated_at: Option<DateTime<Utc>>,
     pub grant_date_updated_by: Option<Uuid>,
+    pub grant_date_updated_by_device_id: Option<Uuid>,
+    pub sync_priority: SyncPriorityFromSyncDomain,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
     pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
 }
 
 impl SubsequentGrant {
@@ -230,89 +245,96 @@ pub struct LivelihoodRow {
     pub type_: String, // Renamed from 'type'
     pub type_updated_at: Option<String>,
     pub type_updated_by: Option<String>,
+    pub type_updated_by_device_id: Option<String>,
     
     pub description: Option<String>,
     pub description_updated_at: Option<String>,
     pub description_updated_by: Option<String>,
+    pub description_updated_by_device_id: Option<String>,
     
     pub status_id: Option<i64>,
     pub status_id_updated_at: Option<String>,
     pub status_id_updated_by: Option<String>,
+    pub status_id_updated_by_device_id: Option<String>,
 
     pub initial_grant_date: Option<String>,
     pub initial_grant_date_updated_at: Option<String>,
     pub initial_grant_date_updated_by: Option<String>,
+    pub initial_grant_date_updated_by_device_id: Option<String>,
 
     pub initial_grant_amount: Option<f64>,
     pub initial_grant_amount_updated_at: Option<String>,
     pub initial_grant_amount_updated_by: Option<String>,
+    pub initial_grant_amount_updated_by_device_id: Option<String>,
 
     pub sync_priority: String, // Will be parsed to SyncPriorityFromSyncDomain
     
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
+    pub created_by_device_id: Option<String>,
     pub updated_by_user_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
 }
 
 impl LivelihoodRow {
     /// Convert database row to domain entity
     pub fn into_entity(self) -> DomainResult<Livelihood> {
-        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
-            s.as_ref().map(|id| {
-                Uuid::parse_str(id).map_err(|_| DomainError::InvalidUuid(id.clone()))
-            })
+        let parse_optional_uuid = |s: &Option<String>, field_name: &str| -> DomainResult<Option<Uuid>> {
+            match s {
+                Some(id_str) => Uuid::parse_str(id_str)
+                    .map(Some)
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid UUID format: {}", id_str)))),
+                None => Ok(None),
+            }
         };
-        
-        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
-            s.as_ref().map(|dt| {
-                DateTime::parse_from_rfc3339(dt)
-                    .map(|dt_with_tz| dt_with_tz.with_timezone(&Utc))
-                    .map_err(|e| DomainError::Internal(format!("Invalid date format: {} ({})", dt, e)))
-            })
+        let parse_datetime = |s: &str, field_name: &str| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", s))));
+        let parse_optional_datetime = |s: &Option<String>, field_name: &str| -> DomainResult<Option<DateTime<Utc>>> {
+            match s {
+                Some(dt_str) => DateTime::parse_from_rfc3339(dt_str)
+                    .map(|dt| Some(dt.with_timezone(&Utc)))
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", dt_str)))),
+                None => Ok(None),
+            }
         };
         
         Ok(Livelihood {
-            id: Uuid::parse_str(&self.id)
-                .map_err(|_| DomainError::InvalidUuid(self.id.clone()))?,
-            participant_id: parse_uuid(&self.participant_id).transpose()?,
-            project_id: parse_uuid(&self.project_id).transpose()?,
-            
+            id: Uuid::parse_str(&self.id).map_err(|_| DomainError::Validation(ValidationError::format("id", &format!("Invalid UUID format: {}", self.id))))?,
+            participant_id: parse_optional_uuid(&self.participant_id, "participant_id")?,
+            project_id: parse_optional_uuid(&self.project_id, "project_id")?,
             type_: self.type_,
-            type_updated_at: parse_datetime(&self.type_updated_at).transpose()?,
-            type_updated_by: parse_uuid(&self.type_updated_by).transpose()?,
-            
+            type_updated_at: parse_optional_datetime(&self.type_updated_at, "type_updated_at")?,
+            type_updated_by: parse_optional_uuid(&self.type_updated_by, "type_updated_by")?,
+            type_updated_by_device_id: parse_optional_uuid(&self.type_updated_by_device_id, "type_updated_by_device_id")?,
             description: self.description,
-            description_updated_at: parse_datetime(&self.description_updated_at).transpose()?,
-            description_updated_by: parse_uuid(&self.description_updated_by).transpose()?,
-            
+            description_updated_at: parse_optional_datetime(&self.description_updated_at, "description_updated_at")?,
+            description_updated_by: parse_optional_uuid(&self.description_updated_by, "description_updated_by")?,
+            description_updated_by_device_id: parse_optional_uuid(&self.description_updated_by_device_id, "description_updated_by_device_id")?,
             status_id: self.status_id,
-            status_id_updated_at: parse_datetime(&self.status_id_updated_at).transpose()?,
-            status_id_updated_by: parse_uuid(&self.status_id_updated_by).transpose()?,
-
+            status_id_updated_at: parse_optional_datetime(&self.status_id_updated_at, "status_id_updated_at")?,
+            status_id_updated_by: parse_optional_uuid(&self.status_id_updated_by, "status_id_updated_by")?,
+            status_id_updated_by_device_id: parse_optional_uuid(&self.status_id_updated_by_device_id, "status_id_updated_by_device_id")?,
             initial_grant_date: self.initial_grant_date,
-            initial_grant_date_updated_at: parse_datetime(&self.initial_grant_date_updated_at).transpose()?,
-            initial_grant_date_updated_by: parse_uuid(&self.initial_grant_date_updated_by).transpose()?,
-
+            initial_grant_date_updated_at: parse_optional_datetime(&self.initial_grant_date_updated_at, "initial_grant_date_updated_at")?,
+            initial_grant_date_updated_by: parse_optional_uuid(&self.initial_grant_date_updated_by, "initial_grant_date_updated_by")?,
+            initial_grant_date_updated_by_device_id: parse_optional_uuid(&self.initial_grant_date_updated_by_device_id, "initial_grant_date_updated_by_device_id")?,
             initial_grant_amount: self.initial_grant_amount,
-            initial_grant_amount_updated_at: parse_datetime(&self.initial_grant_amount_updated_at).transpose()?,
-            initial_grant_amount_updated_by: parse_uuid(&self.initial_grant_amount_updated_by).transpose()?,
-
-            sync_priority: SyncPriorityFromSyncDomain::from_str(&self.sync_priority)
-                .map_err(|e| DomainError::Internal(format!("Failed to parse sync_priority: {}", e)))?,
-            
-            created_at: DateTime::parse_from_rfc3339(&self.created_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid created_at date format: {}", self.created_at)))?,
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid updated_at date format: {}", self.updated_at)))?,
-            created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at).transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+            initial_grant_amount_updated_at: parse_optional_datetime(&self.initial_grant_amount_updated_at, "initial_grant_amount_updated_at")?,
+            initial_grant_amount_updated_by: parse_optional_uuid(&self.initial_grant_amount_updated_by, "initial_grant_amount_updated_by")?,
+            initial_grant_amount_updated_by_device_id: parse_optional_uuid(&self.initial_grant_amount_updated_by_device_id, "initial_grant_amount_updated_by_device_id")?,
+            sync_priority: SyncPriorityFromSyncDomain::from_str(&self.sync_priority).unwrap_or_default(),
+            created_at: parse_datetime(&self.created_at, "created_at")?,
+            updated_at: parse_datetime(&self.updated_at, "updated_at")?,
+            created_by_user_id: parse_optional_uuid(&self.created_by_user_id, "created_by_user_id")?,
+            created_by_device_id: parse_optional_uuid(&self.created_by_device_id, "created_by_device_id")?,
+            updated_by_user_id: parse_optional_uuid(&self.updated_by_user_id, "updated_by_user_id")?,
+            updated_by_device_id: parse_optional_uuid(&self.updated_by_device_id, "updated_by_device_id")?,
+            deleted_at: parse_optional_datetime(&self.deleted_at, "deleted_at")?,
+            deleted_by_user_id: parse_optional_uuid(&self.deleted_by_user_id, "deleted_by_user_id")?,
+            deleted_by_device_id: parse_optional_uuid(&self.deleted_by_device_id, "deleted_by_device_id")?,
         })
     }
 }
@@ -586,6 +608,7 @@ pub struct NewSubsequentGrant {
     pub purpose: Option<String>,
     pub grant_date: Option<String>,
     pub created_by_user_id: Option<Uuid>,
+    pub sync_priority: SyncPriorityFromSyncDomain,
 }
 
 impl Validate for NewSubsequentGrant {
@@ -609,7 +632,8 @@ pub struct UpdateSubsequentGrant {
     pub amount: Option<f64>,
     pub purpose: Option<String>,
     pub grant_date: Option<String>,
-    pub updated_by_user_id: Uuid, 
+    pub updated_by_user_id: Option<Uuid>,
+    pub sync_priority: Option<SyncPriorityFromSyncDomain>,
 }
 
 impl Validate for UpdateSubsequentGrant {
@@ -634,46 +658,68 @@ pub struct SubsequentGrantRow {
     pub amount: Option<f64>,
     pub amount_updated_at: Option<String>,
     pub amount_updated_by: Option<String>,
+    pub amount_updated_by_device_id: Option<String>,
     pub purpose: Option<String>,
     pub purpose_updated_at: Option<String>,
     pub purpose_updated_by: Option<String>,
+    pub purpose_updated_by_device_id: Option<String>,
     pub grant_date: Option<String>,
     pub grant_date_updated_at: Option<String>,
     pub grant_date_updated_by: Option<String>,
+    pub grant_date_updated_by_device_id: Option<String>,
+    pub sync_priority: String,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
+    pub created_by_device_id: Option<String>,
     pub updated_by_user_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
 }
 
 impl SubsequentGrantRow {
+    /// Convert database row to domain entity
     pub fn into_entity(self) -> DomainResult<SubsequentGrant> {
-        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
-            s.as_ref().map(|id_str| Uuid::parse_str(id_str).map_err(|_| DomainError::InvalidUuid(id_str.clone())))
+        let parse_optional_datetime = |s: Option<String>| {
+            s.map(|dt| DateTime::parse_from_rfc3339(&dt).map(|dt_fixed| dt_fixed.with_timezone(&Utc))).transpose()
         };
-        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
-            s.as_ref().map(|dt_str| DateTime::parse_from_rfc3339(dt_str).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid date format: {}", dt_str))))
+        let parse_datetime = |s: String| {
+            DateTime::parse_from_rfc3339(&s).map(|dt_fixed| dt_fixed.with_timezone(&Utc))
         };
+        let parse_optional_uuid = |s: Option<String>| {
+            s.map(|id_str| Uuid::parse_str(&id_str)).transpose()
+        };
+
+        let sync_priority = SyncPriorityFromSyncDomain::from_str(&self.sync_priority)
+            .map_err(|e| DomainError::Validation(ValidationError::format("sync_priority", &e.to_string())))?;
+
         Ok(SubsequentGrant {
-            id: Uuid::parse_str(&self.id).map_err(|_| DomainError::InvalidUuid(self.id.clone()))?,
-            livelihood_id: Uuid::parse_str(&self.livelihood_id).map_err(|_| DomainError::InvalidUuid(self.livelihood_id.clone()))?,
+            id: Uuid::parse_str(&self.id).map_err(|e| ValidationError::format("id", &e.to_string()))?,
+            livelihood_id: Uuid::parse_str(&self.livelihood_id).map_err(|e| ValidationError::format("livelihood_id", &e.to_string()))?,
             amount: self.amount,
-            amount_updated_at: parse_datetime(&self.amount_updated_at).transpose()?,
-            amount_updated_by: parse_uuid(&self.amount_updated_by).transpose()?,
+            amount_updated_at: parse_optional_datetime(self.amount_updated_at).map_err(|e| ValidationError::format("amount_updated_at", &e.to_string()))?,
+            amount_updated_by: parse_optional_uuid(self.amount_updated_by).map_err(|e| ValidationError::format("amount_updated_by", &e.to_string()))?,
+            amount_updated_by_device_id: parse_optional_uuid(self.amount_updated_by_device_id).map_err(|e| ValidationError::format("amount_updated_by_device_id", &e.to_string()))?,
             purpose: self.purpose,
-            purpose_updated_at: parse_datetime(&self.purpose_updated_at).transpose()?,
-            purpose_updated_by: parse_uuid(&self.purpose_updated_by).transpose()?,
+            purpose_updated_at: parse_optional_datetime(self.purpose_updated_at).map_err(|e| ValidationError::format("purpose_updated_at", &e.to_string()))?,
+            purpose_updated_by: parse_optional_uuid(self.purpose_updated_by).map_err(|e| ValidationError::format("purpose_updated_by", &e.to_string()))?,
+            purpose_updated_by_device_id: parse_optional_uuid(self.purpose_updated_by_device_id).map_err(|e| ValidationError::format("purpose_updated_by_device_id", &e.to_string()))?,
             grant_date: self.grant_date,
-            grant_date_updated_at: parse_datetime(&self.grant_date_updated_at).transpose()?,
-            grant_date_updated_by: parse_uuid(&self.grant_date_updated_by).transpose()?,
-            created_at: DateTime::parse_from_rfc3339(&self.created_at).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid created_at date format: {}", self.created_at)))?,
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid updated_at date format: {}", self.updated_at)))?,
-            created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at).transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+            grant_date_updated_at: parse_optional_datetime(self.grant_date_updated_at).map_err(|e| ValidationError::format("grant_date_updated_at", &e.to_string()))?,
+            grant_date_updated_by: parse_optional_uuid(self.grant_date_updated_by).map_err(|e| ValidationError::format("grant_date_updated_by", &e.to_string()))?,
+            grant_date_updated_by_device_id: parse_optional_uuid(self.grant_date_updated_by_device_id).map_err(|e| ValidationError::format("grant_date_updated_by_device_id", &e.to_string()))?,
+            sync_priority,
+            created_at: parse_datetime(self.created_at).map_err(|e| ValidationError::format("created_at", &e.to_string()))?,
+            updated_at: parse_datetime(self.updated_at).map_err(|e| ValidationError::format("updated_at", &e.to_string()))?,
+            created_by_user_id: parse_optional_uuid(self.created_by_user_id).map_err(|e| ValidationError::format("created_by_user_id", &e.to_string()))?,
+            created_by_device_id: parse_optional_uuid(self.created_by_device_id).map_err(|e| ValidationError::format("created_by_device_id", &e.to_string()))?,
+            updated_by_user_id: parse_optional_uuid(self.updated_by_user_id).map_err(|e| ValidationError::format("updated_by_user_id", &e.to_string()))?,
+            updated_by_device_id: parse_optional_uuid(self.updated_by_device_id).map_err(|e| ValidationError::format("updated_by_device_id", &e.to_string()))?,
+            deleted_at: parse_optional_datetime(self.deleted_at).map_err(|e| ValidationError::format("deleted_at", &e.to_string()))?,
+            deleted_by_user_id: parse_optional_uuid(self.deleted_by_user_id).map_err(|e| ValidationError::format("deleted_by_user_id", &e.to_string()))?,
+            deleted_by_device_id: parse_optional_uuid(self.deleted_by_device_id).map_err(|e| ValidationError::format("deleted_by_device_id", &e.to_string()))?,
         })
     }
 }

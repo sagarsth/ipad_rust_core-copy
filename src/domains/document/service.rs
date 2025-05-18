@@ -25,7 +25,7 @@ use crate::errors::{DbError, DomainError, DomainResult, ServiceError, ServiceRes
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::validation::Validate;
 use async_trait::async_trait;
-use sqlx::{SqlitePool, Transaction, Sqlite};
+use sqlx::{SqlitePool, Transaction, Sqlite, query_scalar};
 use std::sync::Arc;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -279,7 +279,7 @@ impl DocumentServiceImpl {
         #[async_trait]
         impl HardDeletable for MediaDocRepoAdapter {
             fn entity_name(&self) -> &'static str { 
-                self.0.entity_name() 
+                HardDeletable::entity_name(self.0.as_ref())
             }
 
             async fn hard_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> { 
@@ -335,8 +335,8 @@ impl DocumentServiceImpl {
         include: Option<&[DocumentInclude]>,
     ) -> ServiceResult<MediaDocumentResponse> {
         // Determine the primary path and size to display based on compression
-        let mut display_path = response.file_path.clone();
-        let mut display_size = response.size_bytes;
+        let mut _display_path = response.file_path.clone();
+        let mut _display_size = response.size_bytes;
 
         // Skip availability check for error documents
         if response.has_error {
@@ -344,15 +344,20 @@ impl DocumentServiceImpl {
         } else {
             if let Some(compressed_path) = &response.compressed_file_path {
                 if response.compression_status == CompressionStatus::Completed.as_str() {
-                    display_path = compressed_path.clone();
+                    _display_path = compressed_path.clone();
                     if let Some(compressed_size) = response.compressed_size_bytes {
-                        display_size = compressed_size;
+                        _display_size = compressed_size;
                     }
                 }
             }
 
             // Check if the relevant file (original or completed compressed) is available locally
-            let absolute_path = self.file_storage_service.get_absolute_path(&display_path);
+            let path_to_check = if response.compression_status == CompressionStatus::Completed.as_str() && response.compressed_file_path.is_some() {
+                response.compressed_file_path.as_ref().unwrap()
+            } else {
+                &response.file_path
+            };
+            let absolute_path = self.file_storage_service.get_absolute_path(path_to_check);
 
             // Set availability flag based on file existence check
             match fs::metadata(&absolute_path).await {
@@ -967,8 +972,9 @@ impl DocumentService for DocumentServiceImpl {
 
         // *** ADDED: Register usage ***
         // Attempt to parse device_id, use a placeholder if invalid
-        let device_id = Uuid::parse_str(&auth.device_id).unwrap_or_else(|_| Uuid::new_v4()); 
-        if let Err(e) = self.register_document_in_use(document_id, auth.user_id, device_id, "view").await {
+        let parsed_device_id: Option<Uuid> = if auth.device_id.is_empty() { None } else { auth.device_id.as_str().parse().ok() };
+        let device_id_for_registration: Uuid = parsed_device_id.unwrap_or_else(Uuid::nil);
+        if let Err(e) = self.register_document_in_use(document_id, auth.user_id, device_id_for_registration, "view").await {
             eprintln!("Failed to register document {} in use: {:?}", document_id, e);
             // Log error, but proceed with opening anyway
         }
@@ -1055,7 +1061,8 @@ impl DocumentService for DocumentServiceImpl {
         if active_users > 0 { return Err(ServiceError::Ui(format!("Document is currently in use by {} user(s). Please try again later.", active_users))); }
         
         let mut tx = self.pool.begin().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
-        let mut tombstone = Tombstone::new(id, "media_documents", auth.user_id);
+        let device_id_op_uuid: Option<Uuid> = if auth.device_id.is_empty() { None } else { auth.device_id.as_str().parse().ok() };
+        let mut tombstone = Tombstone::new(id, "media_documents", auth.user_id, device_id_op_uuid);
         let metadata = serde_json::json!({
             "file_path": doc_to_delete.file_path,
             "compressed_file_path": doc_to_delete.compressed_file_path,

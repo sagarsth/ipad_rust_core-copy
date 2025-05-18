@@ -501,7 +501,7 @@ impl WorkshopService for WorkshopServiceImpl {
                 "User does not have permission to edit workshops".to_string(),
             ));
         }
-        update_data.updated_by_user_id = auth.user_id; 
+        update_data.updated_by_user_id = Some(auth.user_id);
         update_data.validate()?;
         if let Some(opt_proj_id) = update_data.project_id {
             if let Some(proj_id) = opt_proj_id {

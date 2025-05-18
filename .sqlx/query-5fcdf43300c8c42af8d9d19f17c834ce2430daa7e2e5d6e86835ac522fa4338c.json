@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT \n                device_id,\n                user_id,\n                last_upload_timestamp,\n                last_download_timestamp,\n                last_sync_status,\n                last_sync_attempt_at,\n                server_version,\n                sync_enabled,\n                created_at,\n                updated_at\n            FROM device_sync_state\n            WHERE device_id = ?\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "device_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "user_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_upload_timestamp",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_download_timestamp",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_sync_status",
+        "ordinal": 4,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_sync_attempt_at",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "server_version",
+        "ordinal": 6,
+        "type_info": "Integer"
+      },
+      {
+        "name": "sync_enabled",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 9,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "5fcdf43300c8c42af8d9d19f17c834ce2430daa7e2e5d6e86835ac522fa4338c"
+}

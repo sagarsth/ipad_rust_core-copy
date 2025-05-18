@@ -29,6 +29,16 @@ impl AuthContext {
         }
     }
     
+    /// Create a new authentication context for internal system operations
+    pub fn internal_system_context() -> Self {
+        Self {
+            user_id: Uuid::nil(), // Or a specific system UUID
+            role: UserRole::Admin, // System operations usually have admin privileges
+            device_id: "system".to_string(),
+            offline_mode: false, // System operations are typically not in offline mode
+        }
+    }
+    
     /// Check if user has a specific permission
     pub fn has_permission(&self, permission: Permission) -> bool {
         self.role.has_permission(permission)

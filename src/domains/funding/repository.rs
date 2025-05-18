@@ -199,13 +199,15 @@ impl SoftDeletable for SqliteProjectFundingRepository {
         let now_str = now.to_rfc3339();
         let user_id = auth.user_id;
         let user_id_str = user_id.to_string();
+        let device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
       
 
         let result = query(
-            "UPDATE project_funding SET deleted_at = ?, deleted_by_user_id = ? WHERE id = ? AND deleted_at IS NULL"
+            "UPDATE project_funding SET deleted_at = ?, deleted_by_user_id = ?, deleted_by_device_id = ? WHERE id = ? AND deleted_at IS NULL"
         )
         .bind(now_str)
         .bind(user_id_str)
+        .bind(device_id_str)
         .bind(id.to_string())
         .execute(&mut **tx)
         .await
@@ -289,46 +291,52 @@ impl ProjectFundingRepository for SqliteProjectFundingRepository {
         let user_id = auth.user_id;
         let user_id_str = user_id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
         let project_id_str = new_funding.project_id.to_string();
         let donor_id_str = new_funding.donor_id.to_string();
         
-        // Define the default currency if none is provided
         let currency = new_funding.currency.clone().unwrap_or_else(|| "AUD".to_string());
 
         query(
             r#"
             INSERT INTO project_funding (
-                id, project_id, project_id_updated_at, project_id_updated_by,
-                donor_id, donor_id_updated_at, donor_id_updated_by,
-                grant_id, grant_id_updated_at, grant_id_updated_by,
-                amount, amount_updated_at, amount_updated_by,
-                currency, currency_updated_at, currency_updated_by,
-                start_date, start_date_updated_at, start_date_updated_by,
-                end_date, end_date_updated_at, end_date_updated_by,
-                status, status_updated_at, status_updated_by,
-                reporting_requirements, reporting_requirements_updated_at, reporting_requirements_updated_by,
-                notes, notes_updated_at, notes_updated_by,
+                id, project_id, project_id_updated_at, project_id_updated_by, project_id_updated_by_device_id,
+                donor_id, donor_id_updated_at, donor_id_updated_by, donor_id_updated_by_device_id,
+                grant_id, grant_id_updated_at, grant_id_updated_by, grant_id_updated_by_device_id,
+                amount, amount_updated_at, amount_updated_by, amount_updated_by_device_id,
+                currency, currency_updated_at, currency_updated_by, currency_updated_by_device_id,
+                start_date, start_date_updated_at, start_date_updated_by, start_date_updated_by_device_id,
+                end_date, end_date_updated_at, end_date_updated_by, end_date_updated_by_device_id,
+                status, status_updated_at, status_updated_by, status_updated_by_device_id,
+                reporting_requirements, reporting_requirements_updated_at, reporting_requirements_updated_by, reporting_requirements_updated_by_device_id,
+                notes, notes_updated_at, notes_updated_by, notes_updated_by_device_id,
                 created_at, updated_at, created_by_user_id, updated_by_user_id,
-                deleted_at, deleted_by_user_id
+                created_by_device_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             "#
         )
         .bind(id.to_string())
-        .bind(project_id_str).bind(&now_str).bind(&user_id_str) // project_id with LWW metadata
-        .bind(donor_id_str).bind(&now_str).bind(&user_id_str) // donor_id with LWW metadata
-        .bind(&new_funding.grant_id).bind(new_funding.grant_id.as_ref().map(|_| &now_str)).bind(new_funding.grant_id.as_ref().map(|_| &user_id_str))
-        .bind(new_funding.amount).bind(new_funding.amount.map(|_| &now_str)).bind(new_funding.amount.map(|_| &user_id_str))
-        .bind(&currency).bind(&now_str).bind(&user_id_str) // currency with LWW metadata
-        .bind(&new_funding.start_date).bind(new_funding.start_date.as_ref().map(|_| &now_str)).bind(new_funding.start_date.as_ref().map(|_| &user_id_str))
-        .bind(&new_funding.end_date).bind(new_funding.end_date.as_ref().map(|_| &now_str)).bind(new_funding.end_date.as_ref().map(|_| &user_id_str))
-        .bind(&new_funding.status).bind(new_funding.status.as_ref().map(|_| &now_str)).bind(new_funding.status.as_ref().map(|_| &user_id_str))
-        .bind(&new_funding.reporting_requirements).bind(new_funding.reporting_requirements.as_ref().map(|_| &now_str)).bind(new_funding.reporting_requirements.as_ref().map(|_| &user_id_str))
-        .bind(&new_funding.notes).bind(new_funding.notes.as_ref().map(|_| &now_str)).bind(new_funding.notes.as_ref().map(|_| &user_id_str))
+        .bind(&project_id_str).bind(&now_str).bind(&user_id_str).bind(device_id_str.clone())
+        .bind(&donor_id_str).bind(&now_str).bind(&user_id_str).bind(device_id_str.clone())
+        .bind(&new_funding.grant_id).bind(new_funding.grant_id.as_ref().map(|_| &now_str)).bind(new_funding.grant_id.as_ref().map(|_| &user_id_str)).bind(new_funding.grant_id.as_ref().map(|_| &device_id_str))
+        .bind(new_funding.amount).bind(new_funding.amount.map(|_| &now_str)).bind(new_funding.amount.map(|_| &user_id_str)).bind(new_funding.amount.map(|_| &device_id_str))
+        .bind(&currency).bind(&now_str).bind(&user_id_str).bind(device_id_str.clone())
+        .bind(&new_funding.start_date).bind(new_funding.start_date.as_ref().map(|_| &now_str)).bind(new_funding.start_date.as_ref().map(|_| &user_id_str)).bind(new_funding.start_date.as_ref().map(|_| &device_id_str))
+        .bind(&new_funding.end_date).bind(new_funding.end_date.as_ref().map(|_| &now_str)).bind(new_funding.end_date.as_ref().map(|_| &user_id_str)).bind(new_funding.end_date.as_ref().map(|_| &device_id_str))
+        .bind(&new_funding.status).bind(new_funding.status.as_ref().map(|_| &now_str)).bind(new_funding.status.as_ref().map(|_| &user_id_str)).bind(new_funding.status.as_ref().map(|_| &device_id_str))
+        .bind(&new_funding.reporting_requirements).bind(new_funding.reporting_requirements.as_ref().map(|_| &now_str)).bind(new_funding.reporting_requirements.as_ref().map(|_| &user_id_str)).bind(new_funding.reporting_requirements.as_ref().map(|_| &device_id_str))
+        .bind(&new_funding.notes).bind(new_funding.notes.as_ref().map(|_| &now_str)).bind(new_funding.notes.as_ref().map(|_| &user_id_str)).bind(new_funding.notes.as_ref().map(|_| &device_id_str))
         .bind(&now_str).bind(&now_str) // created_at, updated_at
-        .bind(new_funding.created_by_user_id.as_ref().map(|id| id.to_string()).unwrap_or(user_id_str.clone())).bind(&user_id_str) // created_by, updated_by
+        .bind(new_funding.created_by_user_id.as_ref().map(|id| id.to_string()).unwrap_or_else(||user_id_str.clone()))
+        .bind(&user_id_str) // updated_by_user_id
+        .bind(device_id_str.clone()) // created_by_device_id
+        .bind(device_id_str.clone()) // updated_by_device_id
+        .bind(Option::<String>::None) // deleted_at
+        .bind(Option::<String>::None) // deleted_by_user_id
+        .bind(Option::<String>::None) // deleted_by_device_id
         .execute(&mut **tx)
         .await
         .map_err(DbError::from)?;
@@ -375,7 +383,6 @@ impl ProjectFundingRepository for SqliteProjectFundingRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<ProjectFunding> {
-        // --- Fetch Old State --- 
         let old_entity = self.find_by_id_with_tx(id, tx).await?;
         
         let now = Utc::now();
@@ -384,37 +391,40 @@ impl ProjectFundingRepository for SqliteProjectFundingRepository {
         let user_id_str = user_id.to_string();
         let id_str = id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
 
         let mut builder = sqlx::QueryBuilder::new("UPDATE project_funding SET ");
         let mut separated = builder.separated(", ");
         let mut fields_updated = false;
 
-        // --- Update LWW Macros (No comparison here) --- 
         macro_rules! add_lww_option {($field_name:ident, $field_sql:literal, $value:expr) => {
-            if let Some(val) = $value { // Check if update DTO contains field
+            if let Some(val) = $value { 
                 separated.push(concat!($field_sql, " = "));
-                separated.push_bind_unseparated(val.clone()); // Bind value
+                separated.push_bind_unseparated(val.clone()); 
                 separated.push(concat!(" ", $field_sql, "_updated_at = "));
-                separated.push_bind_unseparated(now_str.clone()); // Bind timestamp
+                separated.push_bind_unseparated(now_str.clone()); 
                 separated.push(concat!(" ", $field_sql, "_updated_by = "));
-                separated.push_bind_unseparated(user_id_str.clone()); // Bind user
-                fields_updated = true; // Mark SQL update needed
+                separated.push_bind_unseparated(user_id_str.clone()); 
+                separated.push(concat!(" ", $field_sql, "_updated_by_device_id = "));
+                separated.push_bind_unseparated(device_id_str.clone());
+                fields_updated = true; 
             }
         };}
 
         macro_rules! add_lww_uuid {($field_name:ident, $field_sql:literal, $value:expr) => {
-            if let Some(val) = $value { // Check if update DTO contains field
+            if let Some(val) = $value { 
                 separated.push(concat!($field_sql, " = "));
-                separated.push_bind_unseparated(val.to_string()); // Bind UUID as string
+                separated.push_bind_unseparated(val.to_string()); 
                 separated.push(concat!(" ", $field_sql, "_updated_at = "));
-                separated.push_bind_unseparated(now_str.clone()); // Bind timestamp
+                separated.push_bind_unseparated(now_str.clone()); 
                 separated.push(concat!(" ", $field_sql, "_updated_by = "));
-                separated.push_bind_unseparated(user_id_str.clone()); // Bind user
-                fields_updated = true; // Mark SQL update needed
+                separated.push_bind_unseparated(user_id_str.clone()); 
+                separated.push(concat!(" ", $field_sql, "_updated_by_device_id = "));
+                separated.push_bind_unseparated(device_id_str.clone());
+                fields_updated = true; 
             }
         };}
 
-        // --- Apply updates using macros --- 
         add_lww_uuid!(project_id, "project_id", &update_data.project_id);
         add_lww_uuid!(donor_id, "donor_id", &update_data.donor_id);
         add_lww_option!(grant_id, "grant_id", &update_data.grant_id);
@@ -427,16 +437,16 @@ impl ProjectFundingRepository for SqliteProjectFundingRepository {
         add_lww_option!(notes, "notes", &update_data.notes);
 
         if !fields_updated {
-            return Ok(old_entity); // No fields present in update DTO
+            return Ok(old_entity); 
         }
 
-        // --- Always update main timestamps --- 
         separated.push("updated_at = ");
         separated.push_bind_unseparated(now_str.clone());
         separated.push("updated_by_user_id = ");
         separated.push_bind_unseparated(user_id_str.clone());
+        separated.push("updated_by_device_id = ");
+        separated.push_bind_unseparated(device_id_str.clone());
 
-        // --- Finalize and Execute SQL --- 
         builder.push(" WHERE id = ");
         builder.push_bind(id_str);
         builder.push(" AND deleted_at IS NULL");

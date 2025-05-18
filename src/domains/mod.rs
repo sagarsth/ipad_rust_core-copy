@@ -1,19 +1,19 @@
 pub mod user;
 
-mod document;
-mod compression;
-mod activity;
-mod participant;
-mod livelihood;
+pub mod document;
+pub mod compression;
+pub mod activity;
+pub mod participant;
+pub mod livelihood;
 pub mod sync;
-mod workshop;
+pub mod workshop;
 pub mod core;
-mod settings;
-mod strategic_goal;
-mod project;
+pub mod settings;
+pub mod strategic_goal;
+pub mod project;
 pub mod permission;
-mod donor;
-mod funding;
+pub mod donor;
+pub mod funding;
 
 pub use user::{User, UserService};
 pub use sync::repository::{ChangeLogRepository, SqliteChangeLogRepository};

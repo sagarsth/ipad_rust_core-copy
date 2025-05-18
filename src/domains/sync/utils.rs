@@ -51,13 +51,15 @@ pub fn format_sync_operation(
     operation: &str,
     entity_type: &str,
     entity_id: &str,
+    device_id: Option<&str>,
     status: &str,
     error: Option<&str>,
 ) -> String {
+    let device_info = device_id.map_or_else(String::new, |id| format!(" (Device: {})", id));
     if let Some(err) = error {
-        format!("{} {}:{} - {} - Error: {}", operation, entity_type, entity_id, status, err)
+        format!("{}{} {}:{} - {} - Error: {}", operation, device_info, entity_type, entity_id, status, err)
     } else {
-        format!("{} {}:{} - {}", operation, entity_type, entity_id, status)
+        format!("{}{} {}:{} - {}", operation, device_info, entity_type, entity_id, status)
     }
 }
 
@@ -79,7 +81,20 @@ mod tests {
     fn test_validate_entity_type() {
         assert!(validate_entity_type("projects").is_ok());
         assert!(validate_entity_type("media_documents").is_ok());
+        assert!(validate_entity_type("strategic_goals").is_ok());
         assert!(validate_entity_type("invalid_entity").is_err());
         assert!(validate_entity_type("DROP TABLE;").is_err());
+    }
+
+    #[test]
+    fn test_format_sync_operation() {
+        assert_eq!(
+            format_sync_operation("UPLOAD", "projects", "uuid1", Some("device123"), "COMPLETED", None),
+            "UPLOAD (Device: device123) projects:uuid1 - COMPLETED"
+        );
+        assert_eq!(
+            format_sync_operation("DOWNLOAD", "activities", "uuid2", None, "FAILED", Some("Network error")),
+            "DOWNLOAD activities:uuid2 - FAILED - Error: Network error"
+        );
     }
 }

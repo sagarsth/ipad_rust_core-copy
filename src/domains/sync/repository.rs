@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use sqlx::{SqlitePool, Sqlite, Transaction, query, query_as, QueryBuilder, Row};
+use sqlx::{SqlitePool, Sqlite, Transaction, query, QueryBuilder};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use async_trait::async_trait;
@@ -11,6 +10,7 @@ use crate::domains::sync::types::{
     SyncPriority, SyncBatchStatus, SyncDirection, SyncBatch, SyncConfig, SyncStatus,
     DeviceSyncState, ChangeLogEntry, ChangeOperationType, Tombstone, SyncConflict,
 };
+pub use crate::domains::user::repository::MergeableEntityRepository; // Assuming this is still needed
 
 /// Repository for sync-related operations and tracking
 #[async_trait]
@@ -49,7 +49,7 @@ pub trait SyncRepository: Send + Sync {
     async fn get_sync_config(&self, user_id: Uuid) -> DomainResult<SyncConfig>;
 
     /// Update a user's sync configuration
-    async fn update_sync_config(&self, config: &SyncConfig) -> DomainResult<()>;
+    async fn update_sync_config(&self, config: &SyncConfig, auth: &AuthContext) -> DomainResult<()>;
 
     /// Get a user's sync status overview
     async fn get_sync_status(&self, user_id: Uuid) -> DomainResult<SyncStatus>;
@@ -195,7 +195,6 @@ impl SyncRepository for SqliteSyncRepository {
         builder.push_bind(status);
         builder.push(", ");
         
-        // Handle optional fields
         if let Some(item_count) = batch.item_count {
             builder.push_bind(item_count);
         } else {
@@ -254,7 +253,7 @@ impl SyncRepository for SqliteSyncRepository {
         let query = builder.build();
         query.execute(&self.pool)
             .await
-            .map_err(DbError::from)?;
+            .map_err(|e| DomainError::Database(DbError::from(e)))?;
 
         Ok(())
     }
@@ -287,7 +286,7 @@ impl SyncRepository for SqliteSyncRepository {
         let query = query_builder.build();
         query.execute(&self.pool)
             .await
-            .map_err(DbError::from)?;
+            .map_err(|e| DomainError::Database(DbError::from(e)))?;
 
         Ok(())
     }
@@ -296,7 +295,7 @@ impl SyncRepository for SqliteSyncRepository {
         &self,
         batch_id: &str,
         processed: u32,
-        _conflicts: u32,
+        _conflicts: u32, // Not used in current query, but kept for signature compatibility
         errors: u32,
         tx: &mut Transaction<'t, Sqlite>
     ) -> DomainResult<()> {
@@ -314,7 +313,7 @@ impl SyncRepository for SqliteSyncRepository {
         .bind(batch_id)
         .execute(&mut **tx)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
 
         Ok(())
     }
@@ -350,7 +349,7 @@ impl SyncRepository for SqliteSyncRepository {
         let query = builder.build();
         query.execute(&self.pool)
             .await
-            .map_err(DbError::from)?;
+            .map_err(|e| DomainError::Database(DbError::from(e)))?;
 
         Ok(())
     }
@@ -358,177 +357,234 @@ impl SyncRepository for SqliteSyncRepository {
     async fn get_sync_config(&self, user_id: Uuid) -> DomainResult<SyncConfig> {
         let user_id_str = user_id.to_string();
         
-        let row = query!(
+        let row = sqlx::query_as::<_, crate::domains::sync::types::SyncConfigRow>(
             r#"
             SELECT 
-                user_id,
-                sync_interval_minutes,
-                background_sync_enabled,
-                wifi_only,
-                charging_only,
-                sync_priority_threshold,
-                document_sync_enabled,
-                metadata_sync_enabled,
-                server_token,
+                id, user_id, 
+                sync_interval_minutes, sync_interval_minutes_updated_at, sync_interval_minutes_updated_by_user_id, sync_interval_minutes_updated_by_device_id,
+                background_sync_enabled, background_sync_enabled_updated_at, background_sync_enabled_updated_by_user_id, background_sync_enabled_updated_by_device_id,
+                wifi_only, wifi_only_updated_at, wifi_only_updated_by_user_id, wifi_only_updated_by_device_id,
+                charging_only, charging_only_updated_at, charging_only_updated_by_user_id, charging_only_updated_by_device_id,
+                sync_priority_threshold, sync_priority_threshold_updated_at, sync_priority_threshold_updated_by_user_id, sync_priority_threshold_updated_by_device_id,
+                document_sync_enabled, document_sync_enabled_updated_at, document_sync_enabled_updated_by_user_id, document_sync_enabled_updated_by_device_id,
+                metadata_sync_enabled, metadata_sync_enabled_updated_at, metadata_sync_enabled_updated_by_user_id, metadata_sync_enabled_updated_by_device_id,
+                server_token, server_token_updated_at, server_token_updated_by_user_id, server_token_updated_by_device_id,
                 last_sync_timestamp,
-                created_at,
-                updated_at
+                created_at, created_by_device_id, 
+                updated_at, updated_by_user_id, updated_by_device_id
             FROM sync_configs 
             WHERE user_id = ?
-            "#,
-            user_id_str
+            "#
         )
+        .bind(user_id_str)
         .fetch_optional(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
 
         match row {
-            Some(row) => {
-                let last_sync = match &row.last_sync_timestamp {
-                    Some(ts) => Some(
-                        DateTime::parse_from_rfc3339(ts)
-                            .map_err(|_| DomainError::Validation(ValidationError::format(
-                                "last_sync_timestamp", &format!("Invalid RFC3339 format: {}", ts)
-                            )))?
-                            .with_timezone(&Utc)
-                    ),
-                    None => None,
-                };
-
-                let created_at = DateTime::parse_from_rfc3339(&row.created_at)
-                    .map_err(|_| DomainError::Validation(ValidationError::format(
-                        "created_at", &format!("Invalid RFC3339 format: {}", row.created_at)
-                    )))?
-                    .with_timezone(&Utc);
-
-                let updated_at = DateTime::parse_from_rfc3339(&row.updated_at)
-                    .map_err(|_| DomainError::Validation(ValidationError::format(
-                        "updated_at", &format!("Invalid RFC3339 format: {}", row.updated_at)
-                    )))?
-                    .with_timezone(&Utc);
-                
-                Ok(SyncConfig {
-                    user_id,
-                    sync_interval_minutes: row.sync_interval_minutes,
-                    background_sync_enabled: row.background_sync_enabled == 1,
-                    wifi_only: row.wifi_only == 1,
-                    charging_only: row.charging_only == 1,
-                    sync_priority_threshold: row.sync_priority_threshold,
-                    document_sync_enabled: row.document_sync_enabled == 1,
-                    metadata_sync_enabled: row.metadata_sync_enabled == 1,
-                    server_token: row.server_token,
-                    last_sync_timestamp: last_sync,
-                    created_at,
-                    updated_at,
-                })
-            },
+            Some(r) => SyncConfig::try_from(r),
             None => {
-                // Create default config
+                log::info!("No sync_config found for user {}, creating default.", user_id);
+                let new_id = Uuid::new_v4();
                 let now = Utc::now();
                 let default_config = SyncConfig {
+                    id: new_id,
                     user_id,
                     sync_interval_minutes: 60,
+                    sync_interval_minutes_updated_at: Some(now),
+                    sync_interval_minutes_updated_by_user_id: Some(user_id),
+                    sync_interval_minutes_updated_by_device_id: None,
                     background_sync_enabled: true,
+                    background_sync_enabled_updated_at: Some(now),
+                    background_sync_enabled_updated_by_user_id: Some(user_id),
+                    background_sync_enabled_updated_by_device_id: None,
                     wifi_only: true,
+                    wifi_only_updated_at: Some(now),
+                    wifi_only_updated_by_user_id: Some(user_id),
+                    wifi_only_updated_by_device_id: None,
                     charging_only: false,
+                    charging_only_updated_at: Some(now),
+                    charging_only_updated_by_user_id: Some(user_id),
+                    charging_only_updated_by_device_id: None,
                     sync_priority_threshold: 1,
+                    sync_priority_threshold_updated_at: Some(now),
+                    sync_priority_threshold_updated_by_user_id: Some(user_id),
+                    sync_priority_threshold_updated_by_device_id: None,
                     document_sync_enabled: true,
+                    document_sync_enabled_updated_at: Some(now),
+                    document_sync_enabled_updated_by_user_id: Some(user_id),
+                    document_sync_enabled_updated_by_device_id: None,
                     metadata_sync_enabled: true,
+                    metadata_sync_enabled_updated_at: Some(now),
+                    metadata_sync_enabled_updated_by_user_id: Some(user_id),
+                    metadata_sync_enabled_updated_by_device_id: None,
                     server_token: None,
+                    server_token_updated_at: None,
+                    server_token_updated_by_user_id: None,
+                    server_token_updated_by_device_id: None,
                     last_sync_timestamp: None,
                     created_at: now,
+                    created_by_device_id: None,
                     updated_at: now,
+                    updated_by_user_id: Some(user_id),
+                    updated_by_device_id: None,
                 };
-
-                let config_id = Uuid::new_v4().to_string();
-                let now_str = now.to_rfc3339();
-                let user_id_str = user_id.to_string();
-                let bg_sync_enabled = if default_config.background_sync_enabled { 1 } else { 0 };
-                let wifi_only = if default_config.wifi_only { 1 } else { 0 };
-                let charging_only = if default_config.charging_only { 1 } else { 0 };
-                let doc_sync_enabled = if default_config.document_sync_enabled { 1 } else { 0 };
-                let meta_sync_enabled = if default_config.metadata_sync_enabled { 1 } else { 0 };
-
-                query!(
-                    r#"
-                    INSERT INTO sync_configs (
-                        id, user_id, sync_interval_minutes, background_sync_enabled, wifi_only,
-                        charging_only, sync_priority_threshold, document_sync_enabled,
-                        metadata_sync_enabled, server_token, last_sync_timestamp, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    "#,
-                    config_id,
-                    user_id_str,
-                    default_config.sync_interval_minutes,
-                    bg_sync_enabled,
-                    wifi_only,
-                    charging_only,
-                    default_config.sync_priority_threshold,
-                    doc_sync_enabled,
-                    meta_sync_enabled,
-                    default_config.server_token,
-                    None::<String>, // last_sync_timestamp is None initially
-                    now_str,
-                    now_str
-                )
-                .execute(&self.pool)
-                .await
-                .map_err(DbError::from)?;
-
+                self.update_sync_config(&default_config, &AuthContext::internal_system_context()).await?;
                 Ok(default_config)
             }
         }
     }
 
-    async fn update_sync_config(&self, config: &SyncConfig) -> DomainResult<()> {
-        let now_str = Utc::now().to_rfc3339();
-        let last_sync_str = config.last_sync_timestamp.map(|dt| dt.to_rfc3339());
-        let user_id_str = config.user_id.to_string();
-        let bg_sync_enabled = if config.background_sync_enabled { 1 } else { 0 };
-        let wifi_only = if config.wifi_only { 1 } else { 0 };
-        let charging_only = if config.charging_only { 1 } else { 0 };
-        let doc_sync_enabled = if config.document_sync_enabled { 1 } else { 0 };
-        let meta_sync_enabled = if config.metadata_sync_enabled { 1 } else { 0 };
+    async fn update_sync_config(&self, config: &SyncConfig, auth: &AuthContext) -> DomainResult<()> {
+        let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
 
-        query!(
-            r#"
-            UPDATE sync_configs SET
-                sync_interval_minutes = ?,
-                background_sync_enabled = ?,
-                wifi_only = ?,
-                charging_only = ?,
-                sync_priority_threshold = ?,
-                document_sync_enabled = ?,
-                metadata_sync_enabled = ?,
-                server_token = ?,
-                last_sync_timestamp = ?,
-                updated_at = ?
-            WHERE user_id = ?
-            "#,
-            config.sync_interval_minutes,
-            bg_sync_enabled,
-            wifi_only,
-            charging_only,
-            config.sync_priority_threshold,
-            doc_sync_enabled,
-            meta_sync_enabled,
-            config.server_token,
-            last_sync_str,
-            now_str,
-            user_id_str
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(DbError::from)?;
+        let existing_row = sqlx::query("SELECT id FROM sync_configs WHERE user_id = ?")
+            .bind(config.user_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await.map_err(|e| DomainError::Database(DbError::from(e)))?;
 
-        Ok(())
+        if existing_row.is_none() {
+            // Bind all potentially temporary values to local variables
+            let id_str = config.id.to_string();
+            let user_id_str_bind = config.user_id.to_string(); // Renamed to avoid conflict with auth.user_id_str
+            
+            let sim_updated_at_str = config.sync_interval_minutes_updated_at.map(|dt| dt.to_rfc3339());
+            let sim_updated_by_user_id_str = config.sync_interval_minutes_updated_by_user_id.map(|id| id.to_string());
+            let sim_updated_by_device_id_str = config.sync_interval_minutes_updated_by_device_id.map(|id| id.to_string());
+
+            let bse_updated_at_str = config.background_sync_enabled_updated_at.map(|dt| dt.to_rfc3339());
+            let bse_updated_by_user_id_str = config.background_sync_enabled_updated_by_user_id.map(|id| id.to_string());
+            let bse_updated_by_device_id_str = config.background_sync_enabled_updated_by_device_id.map(|id| id.to_string());
+
+            let wo_updated_at_str = config.wifi_only_updated_at.map(|dt| dt.to_rfc3339());
+            let wo_updated_by_user_id_str = config.wifi_only_updated_by_user_id.map(|id| id.to_string());
+            let wo_updated_by_device_id_str = config.wifi_only_updated_by_device_id.map(|id| id.to_string());
+
+            let co_updated_at_str = config.charging_only_updated_at.map(|dt| dt.to_rfc3339());
+            let co_updated_by_user_id_str = config.charging_only_updated_by_user_id.map(|id| id.to_string());
+            let co_updated_by_device_id_str = config.charging_only_updated_by_device_id.map(|id| id.to_string());
+
+            let spt_updated_at_str = config.sync_priority_threshold_updated_at.map(|dt| dt.to_rfc3339());
+            let spt_updated_by_user_id_str = config.sync_priority_threshold_updated_by_user_id.map(|id| id.to_string());
+            let spt_updated_by_device_id_str = config.sync_priority_threshold_updated_by_device_id.map(|id| id.to_string());
+
+            let dse_updated_at_str = config.document_sync_enabled_updated_at.map(|dt| dt.to_rfc3339());
+            let dse_updated_by_user_id_str = config.document_sync_enabled_updated_by_user_id.map(|id| id.to_string());
+            let dse_updated_by_device_id_str = config.document_sync_enabled_updated_by_device_id.map(|id| id.to_string());
+
+            let mse_updated_at_str = config.metadata_sync_enabled_updated_at.map(|dt| dt.to_rfc3339());
+            let mse_updated_by_user_id_str = config.metadata_sync_enabled_updated_by_user_id.map(|id| id.to_string());
+            let mse_updated_by_device_id_str = config.metadata_sync_enabled_updated_by_device_id.map(|id| id.to_string());
+            
+            let st_updated_at_str = config.server_token_updated_at.map(|dt| dt.to_rfc3339());
+            let st_updated_by_user_id_str = config.server_token_updated_by_user_id.map(|id| id.to_string());
+            let st_updated_by_device_id_str = config.server_token_updated_by_device_id.map(|id| id.to_string());
+
+            let last_sync_timestamp_str = config.last_sync_timestamp.map(|dt| dt.to_rfc3339());
+            let created_at_str = config.created_at.to_rfc3339();
+            let created_by_device_id_str = config.created_by_device_id.map(|id| id.to_string());
+            let updated_at_str_insert = config.updated_at.to_rfc3339(); // Renamed for insert clarity
+            let updated_by_user_id_str_insert = config.updated_by_user_id.map(|id| id.to_string());
+            let updated_by_device_id_str_insert = config.updated_by_device_id.map(|id| id.to_string());
+
+            sqlx::query!(
+                r#"
+                INSERT INTO sync_configs (
+                    id, user_id,
+                    sync_interval_minutes, sync_interval_minutes_updated_at, sync_interval_minutes_updated_by_user_id, sync_interval_minutes_updated_by_device_id,
+                    background_sync_enabled, background_sync_enabled_updated_at, background_sync_enabled_updated_by_user_id, background_sync_enabled_updated_by_device_id,
+                    wifi_only, wifi_only_updated_at, wifi_only_updated_by_user_id, wifi_only_updated_by_device_id,
+                    charging_only, charging_only_updated_at, charging_only_updated_by_user_id, charging_only_updated_by_device_id,
+                    sync_priority_threshold, sync_priority_threshold_updated_at, sync_priority_threshold_updated_by_user_id, sync_priority_threshold_updated_by_device_id,
+                    document_sync_enabled, document_sync_enabled_updated_at, document_sync_enabled_updated_by_user_id, document_sync_enabled_updated_by_device_id,
+                    metadata_sync_enabled, metadata_sync_enabled_updated_at, metadata_sync_enabled_updated_by_user_id, metadata_sync_enabled_updated_by_device_id,
+                    server_token, server_token_updated_at, server_token_updated_by_user_id, server_token_updated_by_device_id,
+                    last_sync_timestamp,
+                    created_at, created_by_device_id,
+                    updated_at, updated_by_user_id, updated_by_device_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                "#,
+                id_str, user_id_str_bind,
+                config.sync_interval_minutes, sim_updated_at_str, sim_updated_by_user_id_str, sim_updated_by_device_id_str,
+                config.background_sync_enabled, bse_updated_at_str, bse_updated_by_user_id_str, bse_updated_by_device_id_str,
+                config.wifi_only, wo_updated_at_str, wo_updated_by_user_id_str, wo_updated_by_device_id_str,
+                config.charging_only, co_updated_at_str, co_updated_by_user_id_str, co_updated_by_device_id_str,
+                config.sync_priority_threshold, spt_updated_at_str, spt_updated_by_user_id_str, spt_updated_by_device_id_str,
+                config.document_sync_enabled, dse_updated_at_str, dse_updated_by_user_id_str, dse_updated_by_device_id_str,
+                config.metadata_sync_enabled, mse_updated_at_str, mse_updated_by_user_id_str, mse_updated_by_device_id_str,
+                config.server_token, st_updated_at_str, st_updated_by_user_id_str, st_updated_by_device_id_str,
+                last_sync_timestamp_str,
+                created_at_str, created_by_device_id_str,
+                updated_at_str_insert, updated_by_user_id_str_insert, updated_by_device_id_str_insert
+            )
+            .execute(&mut *tx)
+            .await.map_err(|e| DomainError::Database(DbError::from(e)))?;
+        } else {
+            let mut qb = QueryBuilder::new("UPDATE sync_configs SET ");
+            let mut separated = qb.separated(", ");
+
+            macro_rules! add_lww_field_update {
+                ($field_name:ident, $db_col:literal) => {
+                    separated.push(concat!($db_col, " = "));
+                    separated.push_bind_unseparated(config.$field_name);
+                    separated.push(concat!(", ", $db_col, "_updated_at = "));
+                    separated.push_bind_unseparated(now_str.clone());
+                    separated.push(concat!(", ", $db_col, "_updated_by_user_id = "));
+                    separated.push_bind_unseparated(user_id_str.clone());
+                    separated.push(concat!(", ", $db_col, "_updated_by_device_id = "));
+                    separated.push_bind_unseparated(device_id_str.clone());
+                };
+            }
+            macro_rules! add_lww_field_option_update {
+                ($field_name:ident, $db_col:literal) => {
+                    separated.push(concat!($db_col, " = "));
+                    separated.push_bind_unseparated(config.$field_name.clone()); // Assuming `config.field_name` is Option<T>
+                    separated.push(concat!(", ", $db_col, "_updated_at = "));
+                    separated.push_bind_unseparated(now_str.clone());
+                    separated.push(concat!(", ", $db_col, "_updated_by_user_id = "));
+                    separated.push_bind_unseparated(user_id_str.clone());
+                    separated.push(concat!(", ", $db_col, "_updated_by_device_id = "));
+                    separated.push_bind_unseparated(device_id_str.clone());
+                };
+            }
+
+            add_lww_field_update!(sync_interval_minutes, "sync_interval_minutes");
+            add_lww_field_update!(background_sync_enabled, "background_sync_enabled");
+            add_lww_field_update!(wifi_only, "wifi_only");
+            add_lww_field_update!(charging_only, "charging_only");
+            add_lww_field_update!(sync_priority_threshold, "sync_priority_threshold");
+            add_lww_field_update!(document_sync_enabled, "document_sync_enabled");
+            add_lww_field_update!(metadata_sync_enabled, "metadata_sync_enabled");
+            add_lww_field_option_update!(server_token, "server_token");
+            
+            separated.push("updated_at = ");
+            separated.push_bind_unseparated(now_str.clone());
+            separated.push("updated_by_user_id = ");
+            separated.push_bind_unseparated(user_id_str.clone());
+            separated.push("updated_by_device_id = ");
+            separated.push_bind_unseparated(device_id_str.clone());
+
+            if config.last_sync_timestamp.is_some() {
+                separated.push("last_sync_timestamp = ");
+                separated.push_bind_unseparated(config.last_sync_timestamp.map(|dt| dt.to_rfc3339()));
+            }
+
+            qb.push(" WHERE user_id = ");
+            qb.push_bind(config.user_id.to_string());
+
+            qb.build().execute(&mut *tx).await.map_err(|e| DomainError::Database(DbError::from(e)))?;
+        }
+        
+        tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))
     }
 
     async fn get_sync_status(&self, user_id: Uuid) -> DomainResult<SyncStatus> {
-        // Get basic config
         let config = self.get_sync_config(user_id).await?;
         
-        // Get device sync state with last attempt timestamp
         let user_id_str = user_id.to_string();
         let device_state_row = query!(
             r#"
@@ -544,7 +600,7 @@ impl SyncRepository for SqliteSyncRepository {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
         let last_device_sync = match device_state_row {
             Some(row) => match &row.last_sync_attempt_at {
@@ -554,7 +610,6 @@ impl SyncRepository for SqliteSyncRepository {
             None => None
         };
         
-        // Get pending changes count
         let pending_changes = query!(
             r#"
             SELECT COUNT(*) as count 
@@ -565,10 +620,9 @@ impl SyncRepository for SqliteSyncRepository {
         )
         .fetch_one(&self.pool)
         .await
-        .map_err(DbError::from)?
+        .map_err(|e| DomainError::Database(DbError::from(e)))?
         .count;
         
-        // Get pending document uploads count
         let pending_docs = query!(
             r#"
             SELECT COUNT(*) as count 
@@ -580,10 +634,9 @@ impl SyncRepository for SqliteSyncRepository {
         )
         .fetch_one(&self.pool)
         .await
-        .map_err(DbError::from)?
+        .map_err(|e| DomainError::Database(DbError::from(e)))?
         .count;
         
-        // Check for active sync
         let active_syncs = query!(
             r#"
             SELECT COUNT(*) as count 
@@ -595,7 +648,7 @@ impl SyncRepository for SqliteSyncRepository {
         )
         .fetch_one(&self.pool)
         .await
-        .map_err(DbError::from)?
+        .map_err(|e| DomainError::Database(DbError::from(e)))?
         .count;
 
         Ok(SyncStatus {
@@ -603,7 +656,7 @@ impl SyncRepository for SqliteSyncRepository {
             last_sync_timestamp: config.last_sync_timestamp,
             last_device_sync,
             sync_enabled: config.background_sync_enabled,
-            offline_mode: false,
+            offline_mode: false, // This seems to be a placeholder or needs a source
             pending_changes,
             pending_documents: pending_docs,
             sync_in_progress: active_syncs > 0,
@@ -617,15 +670,15 @@ impl SyncRepository for SqliteSyncRepository {
             r#"
             UPDATE sync_configs
             SET server_token = ?,
-                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-            WHERE user_id = ?
-            "#,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') 
+            WHERE user_id = ? 
+            "#, // Assuming updated_by fields are also needed for LWW on server_token
             token,
             user_id_str
         )
         .execute(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
         Ok(())
     }
@@ -653,17 +706,15 @@ impl SyncRepository for SqliteSyncRepository {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
         match row {
             Some(row) => {
-                // Parse user_id
                 let user_id = Uuid::parse_str(&row.user_id)
                     .map_err(|_| DomainError::Validation(ValidationError::format(
                         "user_id", &format!("Invalid UUID format: {}", row.user_id)
                     )))?;
                 
-                // Parse timestamps
                 let last_upload = match &row.last_upload_timestamp {
                     Some(ts) => Some(
                         DateTime::parse_from_rfc3339(ts)
@@ -709,14 +760,13 @@ impl SyncRepository for SqliteSyncRepository {
                     )))?
                     .with_timezone(&Utc);
                 
-                // Convert last_sync_status string to DeviceSyncStatus enum if present
                 let last_sync_status = match &row.last_sync_status {
                     Some(status_str) => match status_str.as_str() {
                         "success" => Some(crate::domains::sync::types::DeviceSyncStatus::Success),
                         "partial_success" => Some(crate::domains::sync::types::DeviceSyncStatus::PartialSuccess),
                         "failed" => Some(crate::domains::sync::types::DeviceSyncStatus::Failed),
                         "in_progress" => Some(crate::domains::sync::types::DeviceSyncStatus::InProgress),
-                        _ => None
+                        _ => None 
                     },
                     None => None
                 };
@@ -747,10 +797,8 @@ impl SyncRepository for SqliteSyncRepository {
         let last_attempt_str = state.last_sync_attempt_at.map(|dt| dt.to_rfc3339());
         let created_at_str = state.created_at.to_rfc3339();
         
-        // Convert DeviceSyncStatus enum to string if present
         let last_sync_status_str = state.last_sync_status.as_ref().map(|s| s.as_str());
         
-        // Prepare values that would create temporary values in the query
         let server_version = state.server_version.unwrap_or(0);
         let sync_enabled = if state.sync_enabled.unwrap_or(false) { 1 } else { 0 };
         
@@ -784,7 +832,7 @@ impl SyncRepository for SqliteSyncRepository {
         )
         .execute(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
         Ok(())
     }
@@ -794,36 +842,36 @@ impl SyncRepository for SqliteSyncRepository {
         conflict: &SyncConflict,
         tx: &mut Transaction<'t, Sqlite>
     ) -> DomainResult<()> {
-        let mut details_map = HashMap::new();
-        
-        // Extract values for the JSON details
-        if let Some(val) = &conflict.local_change.new_value {
-            details_map.insert("local_value", val.clone());
-        }
-        if let Some(val) = &conflict.remote_change.new_value {
-            details_map.insert("remote_value", val.clone());
-        }
-        
-        let details_json = json!(details_map).to_string();
-        
-        // Prepare string values
         let conflict_id_str = conflict.conflict_id.to_string();
         let entity_id_str = conflict.entity_id.to_string();
         let local_op_id_str = conflict.local_change.operation_id.to_string();
-        let remote_op_id_str = conflict.remote_change.operation_id.to_string();
+        let remote_op_id_str = conflict.remote_change.operation_id.to_string(); 
         let resolution_status_str = conflict.resolution_status.as_str();
         let resolution_strategy_str = conflict.resolution_strategy.as_ref().map(|s| s.as_str());
-        let resolved_by_str = conflict.resolved_by_user_id.map(|id| id.to_string());
+        let resolved_by_user_id_str = conflict.resolved_by_user_id.map(|id| id.to_string());
+        let resolved_by_device_id_str = conflict.resolved_by_device_id.map(|id| id.to_string());
         let resolved_at_str = conflict.resolved_at.map(|dt| dt.to_rfc3339());
         let created_at_str = conflict.created_at.to_rfc3339();
-        
-        query!(
+        let created_by_device_id_str = conflict.created_by_device_id.map(|id| id.to_string());
+
+        let details_json = json!({
+            "local_change_summary": format!("OpID: {}, Type: {:?}, Table: {}, Field: {:?}", 
+                conflict.local_change.operation_id, conflict.local_change.operation_type, 
+                conflict.local_change.entity_table, conflict.local_change.field_name),
+            "remote_change_summary": format!("OpID: {}, Type: {:?}, Table: {}, Field: {:?}", 
+                conflict.remote_change.operation_id, conflict.remote_change.operation_type, 
+                conflict.remote_change.entity_table, conflict.remote_change.field_name),
+        }).to_string();
+
+        sqlx::query!(
             r#"
             INSERT INTO sync_conflicts (
-                conflict_id, entity_table, entity_id, field_name,
-                local_change_op_id, remote_change_op_id, resolution_status,
-                resolution_strategy, resolved_by_user_id, resolved_at, created_at, details
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                conflict_id, entity_table, entity_id, field_name, 
+                local_change_op_id, remote_change_op_id, 
+                resolution_status, resolution_strategy, 
+                resolved_by_user_id, resolved_by_device_id, resolved_at, 
+                created_at, created_by_device_id, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             conflict_id_str,
             conflict.entity_table,
@@ -833,23 +881,21 @@ impl SyncRepository for SqliteSyncRepository {
             remote_op_id_str,
             resolution_status_str,
             resolution_strategy_str,
-            resolved_by_str,
+            resolved_by_user_id_str,
+            resolved_by_device_id_str,
             resolved_at_str,
             created_at_str,
+            created_by_device_id_str,
             details_json
         )
         .execute(&mut **tx)
         .await
-        .map_err(DbError::from)?;
-        
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         Ok(())
     }
 
     async fn find_conflicts_for_batch(&self, batch_id: &str) -> DomainResult<Vec<ChangeLogEntry>> {
-        // Helper function to safely get a &str from an Option<String>
-        fn field_unwrap(opt: &Option<String>) -> &str {
-            opt.as_deref().unwrap_or("")
-        }
+        // fn field_unwrap removed as it was unused.
         
         let rows = query!(
             r#"
@@ -866,7 +912,7 @@ impl SyncRepository for SqliteSyncRepository {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
@@ -913,7 +959,7 @@ impl SyncRepository for SqliteSyncRepository {
                 "update" => ChangeOperationType::Update,
                 "delete" => ChangeOperationType::Delete,
                 "hard_delete" => ChangeOperationType::HardDelete,
-                _ => ChangeOperationType::Update // Default
+                _ => return Err(DomainError::Validation(ValidationError::custom(&format!("Invalid operation_type: {}", row.operation_type))))
             };
             
             entries.push(ChangeLogEntry {
@@ -952,10 +998,9 @@ impl SqliteChangeLogRepository {
 #[async_trait]
 impl ChangeLogRepository for SqliteChangeLogRepository {
     async fn create_change_log(&self, entry: &ChangeLogEntry) -> DomainResult<()> {
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
         self.create_change_log_with_tx(entry, &mut tx).await?;
-        tx.commit().await.map_err(DbError::from)?;
-        Ok(())
+        tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))
     }
 
     async fn create_change_log_with_tx<'t>(
@@ -963,15 +1008,6 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
         entry: &ChangeLogEntry,
         tx: &mut Transaction<'t, Sqlite>
     ) -> DomainResult<()> {
-        // Generate priority value based on operation type
-        let priority_value = match entry.operation_type {
-            ChangeOperationType::Create => 7,
-            ChangeOperationType::Update => 5,
-            ChangeOperationType::Delete => 8,
-            ChangeOperationType::HardDelete => 9,
-        };
-        
-        // Convert values to strings
         let operation_id_str = entry.operation_id.to_string();
         let entity_id_str = entry.entity_id.to_string();
         let operation_type_str = entry.operation_type.as_str();
@@ -979,12 +1015,18 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
         let user_id_str = entry.user_id.to_string();
         let device_id_str = entry.device_id.map(|id| id.to_string());
         let processed_at_str = entry.processed_at.map(|dt| dt.to_rfc3339());
-        
-        query!(
+        let priority_value = match entry.operation_type { 
+            ChangeOperationType::Create => 7,
+            ChangeOperationType::Update => 5,
+            ChangeOperationType::Delete => 8,
+            ChangeOperationType::HardDelete => 9,
+        };
+
+        sqlx::query!(
             r#"
             INSERT INTO change_log (
                 operation_id, entity_table, entity_id, operation_type, field_name,
-                old_value, new_value, document_metadata, timestamp, user_id, device_id,
+                old_value, new_value, document_metadata, timestamp, user_id, device_id, 
                 sync_batch_id, processed_at, sync_error, priority
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
@@ -1006,7 +1048,7 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
         )
         .execute(&mut **tx)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
         Ok(())
     }
@@ -1016,109 +1058,36 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
         priority: SyncPriority,
         limit: u32
     ) -> DomainResult<Vec<ChangeLogEntry>> {
-        // Helper function to safely get a &str from an Option<String>
-        fn field_unwrap(opt: &Option<String>) -> &str {
-            opt.as_deref().unwrap_or("")
-        }
-        
         let priority_val = match priority {
-            SyncPriority::High => 8,
-            SyncPriority::Normal => 5,
-            SyncPriority::Low => 3,
-            SyncPriority::Never => 0,
+            SyncPriority::High => 8,    // Matches DetailSyncPriority::High and above
+            SyncPriority::Normal => 5,  // Matches DetailSyncPriority::Normal and above
+            SyncPriority::Low => 3,     // Matches DetailSyncPriority::Low and above
+            SyncPriority::Never => 0,   // Matches DetailSyncPriority::Background (or use a specific value if Never means exclude)
         };
-        
-        // Convert limit to i64 to avoid temporary value in query! macro
         let limit_val = limit as i64;
         
-        let rows = query!(
+        let rows = sqlx::query_as::<_, crate::domains::sync::types::ChangeLogEntryRow>(
             r#"
             SELECT 
-                operation_id as "operation_id!", entity_table as "entity_table!", 
-                entity_id as "entity_id!", operation_type as "operation_type!", 
-                field_name, old_value, new_value, document_metadata, 
-                timestamp as "timestamp!", user_id as "user_id!", device_id,
-                sync_batch_id, processed_at, sync_error
+                operation_id, entity_table, entity_id, operation_type, field_name,
+                old_value, new_value, document_metadata, timestamp, user_id, device_id, 
+                sync_batch_id, processed_at, sync_error, priority
             FROM change_log
             WHERE processed_at IS NULL AND sync_batch_id IS NULL
             AND priority >= ?
             ORDER BY priority DESC, timestamp ASC
             LIMIT ?
-            "#,
-            priority_val,
-            limit_val
+            "#
         )
+        .bind(priority_val)
+        .bind(limit_val)
         .fetch_all(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
-        let mut entries = Vec::with_capacity(rows.len());
-        for row in rows {
-            let operation_id = Uuid::parse_str(&row.operation_id)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "operation_id", &format!("Invalid UUID: {}", &row.operation_id)
-                )))?;
-                
-            let entity_id = Uuid::parse_str(&row.entity_id)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "entity_id", &format!("Invalid UUID: {}", &row.entity_id)
-                )))?;
-                
-            let user_id = Uuid::parse_str(&row.user_id)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "user_id", &format!("Invalid UUID: {}", &row.user_id)
-                )))?;
-                
-            let device_id = match &row.device_id {
-                Some(id) => Some(Uuid::parse_str(id)
-                    .map_err(|_| DomainError::Validation(ValidationError::format(
-                        "device_id", &format!("Invalid UUID: {}", id)
-                    )))?),
-                None => None
-            };
-            
-            let timestamp = DateTime::parse_from_rfc3339(&row.timestamp)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "timestamp", &format!("Invalid RFC3339: {}", &row.timestamp)
-                )))?
-                .with_timezone(&Utc);
-                
-            let processed_at = match &row.processed_at {
-                Some(ts) => Some(DateTime::parse_from_rfc3339(ts)
-                    .map_err(|_| DomainError::Validation(ValidationError::format(
-                        "processed_at", &format!("Invalid RFC3339: {}", ts)
-                    )))?
-                    .with_timezone(&Utc)),
-                None => None
-            };
-            
-            let operation_type = match row.operation_type.as_str() {
-                "create" => ChangeOperationType::Create,
-                "update" => ChangeOperationType::Update,
-                "delete" => ChangeOperationType::Delete,
-                "hard_delete" => ChangeOperationType::HardDelete,
-                _ => ChangeOperationType::Update // Default
-            };
-            
-            entries.push(ChangeLogEntry {
-                operation_id,
-                entity_table: row.entity_table.to_string(),
-                entity_id,
-                operation_type,
-                field_name: row.field_name.clone(),
-                old_value: row.old_value.clone(),
-                new_value: row.new_value.clone(),
-                timestamp,
-                user_id,
-                device_id,
-                document_metadata: row.document_metadata.clone(),
-                sync_batch_id: row.sync_batch_id.clone(),
-                processed_at,
-                sync_error: row.sync_error.clone(),
-            });
-        }
-        
-        Ok(entries)
+        rows.into_iter()
+            .map(|row| ChangeLogEntry::try_from(row))
+            .collect::<Result<Vec<ChangeLogEntry>, DomainError>>()
     }
 
     async fn mark_as_processed<'t>(
@@ -1128,24 +1097,17 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
         timestamp: DateTime<Utc>,
         tx: &mut Transaction<'t, Sqlite>
     ) -> DomainResult<()> {
-        let timestamp_str = timestamp.to_rfc3339();
-        let operation_id_str = operation_id.to_string();
-        
-        query!(
-            r#"
-            UPDATE change_log
-            SET processed_at = ?,
-                sync_batch_id = ?
-            WHERE operation_id = ?
-            "#,
-            timestamp_str,
-            batch_id,
-            operation_id_str
+        let op_id_str = operation_id.to_string();
+        let ts_str = timestamp.to_rfc3339();
+        sqlx::query(
+            "UPDATE change_log SET sync_batch_id = ?, processed_at = ? WHERE operation_id = ?"
         )
+        .bind(batch_id)
+        .bind(ts_str)
+        .bind(op_id_str)
         .execute(&mut **tx)
         .await
-        .map_err(DbError::from)?;
-        
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         Ok(())
     }
 
@@ -1158,94 +1120,28 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
         let entity_id_str = entity_id.to_string();
         let limit_i64 = limit as i64;
         
-        let rows = query!(
+        let rows = sqlx::query_as::<_, crate::domains::sync::types::ChangeLogEntryRow>(
             r#"
             SELECT 
-                operation_id as "operation_id!", entity_table as "entity_table!", 
-                entity_id as "entity_id!", operation_type as "operation_type!", 
-                field_name, old_value, new_value, document_metadata, 
-                timestamp as "timestamp!", user_id as "user_id!", device_id,
-                sync_batch_id, processed_at, sync_error
+                operation_id, entity_table, entity_id, operation_type, field_name,
+                old_value, new_value, document_metadata, timestamp, user_id, device_id, 
+                sync_batch_id, processed_at, sync_error, priority
             FROM change_log
             WHERE entity_table = ? AND entity_id = ?
             ORDER BY timestamp DESC
             LIMIT ?
-            "#,
-            entity_table,
-            entity_id_str,
-            limit_i64
+            "#
         )
+        .bind(entity_table)
+        .bind(entity_id_str)
+        .bind(limit_i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
-        let mut entries = Vec::with_capacity(rows.len());
-        for row in rows {
-            let operation_id = Uuid::parse_str(&row.operation_id)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "operation_id", &format!("Invalid UUID: {}", &row.operation_id)
-                )))?;
-                
-            let row_entity_id = Uuid::parse_str(&row.entity_id)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "entity_id", &format!("Invalid UUID: {}", &row.entity_id)
-                )))?;
-                
-            let user_id = Uuid::parse_str(&row.user_id)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "user_id", &format!("Invalid UUID: {}", &row.user_id)
-                )))?;
-                
-            let device_id = match &row.device_id {
-                Some(id) => Some(Uuid::parse_str(id)
-                    .map_err(|_| DomainError::Validation(ValidationError::format(
-                        "device_id", &format!("Invalid UUID: {}", id)
-                    )))?),
-                None => None
-            };
-            
-            let timestamp = DateTime::parse_from_rfc3339(&row.timestamp)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "timestamp", &format!("Invalid RFC3339: {}", &row.timestamp)
-                )))?
-                .with_timezone(&Utc);
-                
-            let processed_at = match &row.processed_at {
-                Some(ts) => Some(DateTime::parse_from_rfc3339(ts)
-                    .map_err(|_| DomainError::Validation(ValidationError::format(
-                        "processed_at", &format!("Invalid RFC3339: {}", ts)
-                    )))?
-                    .with_timezone(&Utc)),
-                None => None
-            };
-            
-            let operation_type = match row.operation_type.as_str() {
-                "create" => ChangeOperationType::Create,
-                "update" => ChangeOperationType::Update,
-                "delete" => ChangeOperationType::Delete,
-                "hard_delete" => ChangeOperationType::HardDelete,
-                _ => ChangeOperationType::Update // Default
-            };
-            
-            entries.push(ChangeLogEntry {
-                operation_id,
-                entity_table: row.entity_table.to_string(),
-                entity_id: row_entity_id,
-                operation_type,
-                field_name: row.field_name.clone(),
-                old_value: row.old_value.clone(),
-                new_value: row.new_value.clone(),
-                timestamp,
-                user_id,
-                device_id,
-                document_metadata: row.document_metadata.clone(),
-                sync_batch_id: row.sync_batch_id.clone(),
-                processed_at,
-                sync_error: row.sync_error.clone(),
-            });
-        }
-        
-        Ok(entries)
+        rows.into_iter()
+            .map(|row| ChangeLogEntry::try_from(row))
+            .collect::<Result<Vec<ChangeLogEntry>, DomainError>>()
     }
 
     async fn get_last_field_change_timestamp(
@@ -1269,13 +1165,13 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
         match row {
-            Some(row) => {
-                let timestamp = DateTime::parse_from_rfc3339(&row.timestamp)
+            Some(r) => {
+                let timestamp = DateTime::parse_from_rfc3339(&r.timestamp)
                     .map_err(|_| DomainError::Validation(ValidationError::format(
-                        "timestamp", &format!("Invalid RFC3339: {}", row.timestamp)
+                        "timestamp", &format!("Invalid RFC3339: {}", r.timestamp)
                     )))?
                     .with_timezone(&Utc);
                 
@@ -1300,105 +1196,65 @@ impl SqliteTombstoneRepository {
 #[async_trait]
 impl TombstoneRepository for SqliteTombstoneRepository {
     async fn create_tombstone(&self, tombstone: &Tombstone) -> DomainResult<()> {
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
         self.create_tombstone_with_tx(tombstone, &mut tx).await?;
-        tx.commit().await.map_err(DbError::from)?;
-        Ok(())
+        tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))
     }
 
     async fn create_tombstone_with_tx<'t>(&self, tombstone: &Tombstone, tx: &mut Transaction<'t, Sqlite>) -> DomainResult<()> {
-        // Convert values to strings
         let id_str = tombstone.id.to_string();
         let entity_id_str = tombstone.entity_id.to_string();
         let deleted_by_str = tombstone.deleted_by.to_string();
         let deleted_at_str = tombstone.deleted_at.to_rfc3339();
         let operation_id_str = tombstone.operation_id.to_string();
-        
-        query!(
+        let deleted_by_device_id_str = tombstone.deleted_by_device_id.map(|id| id.to_string());
+
+        sqlx::query!(
             r#"
-            INSERT INTO tombstones (
-                id, entity_id, entity_type, deleted_by, deleted_at, operation_id, additional_metadata
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO tombstones (id, entity_id, entity_type, deleted_by, deleted_by_device_id, deleted_at, operation_id, additional_metadata)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id_str,
             entity_id_str,
             tombstone.entity_type,
             deleted_by_str,
+            deleted_by_device_id_str,
             deleted_at_str,
             operation_id_str,
             tombstone.additional_metadata
         )
         .execute(&mut **tx)
         .await
-        .map_err(DbError::from)?;
-        
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         Ok(())
     }
 
     async fn find_unpushed_tombstones(&self, limit: u32) -> DomainResult<Vec<Tombstone>> {
-        // Helper function to safely get a &str from an Option<String>
-        fn field_unwrap(opt: &Option<String>) -> &str {
-            opt.as_deref().unwrap_or("")
-        }
-        
         let limit_i64 = limit as i64;
-        
-        let rows = query!(
+        // Ensure the TombstoneRow in types.rs matches these fields, including pushed_at and sync_batch_id from the migration
+        let rows = sqlx::query_as::<_, crate::domains::sync::types::TombstoneRow>( 
             r#"
             SELECT 
-                id as "id!", entity_id as "entity_id!", entity_type as "entity_type!", 
-                deleted_by as "deleted_by!", deleted_at as "deleted_at!", 
-                operation_id as "operation_id!", additional_metadata
-            FROM tombstones
-            WHERE pushed_at IS NULL AND sync_batch_id IS NULL
+                id, entity_id, entity_type, deleted_by, deleted_by_device_id, 
+                deleted_at, operation_id, additional_metadata
+                -- pushed_at, sync_batch_id -- These fields are needed for TombstoneRow if they exist on it
+            FROM tombstones 
+            WHERE pushed_at IS NULL -- This assumes 'pushed_at' column exists from migration
+            ORDER BY deleted_at ASC
             LIMIT ?
-            "#,
-            limit_i64
+            "#
         )
+        .bind(limit_i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(DbError::from)?;
-        
-        let mut tombstones = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id = Uuid::parse_str(&row.id)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "id", &format!("Invalid UUID: {}", &row.id)
-                )))?;
-                
-            let entity_id = Uuid::parse_str(&row.entity_id)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "entity_id", &format!("Invalid UUID: {}", &row.entity_id)
-                )))?;
-                
-            let deleted_by = Uuid::parse_str(&row.deleted_by)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "deleted_by", &format!("Invalid UUID: {}", &row.deleted_by)
-                )))?;
-                
-            let operation_id = Uuid::parse_str(&row.operation_id)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "operation_id", &format!("Invalid UUID: {}", &row.operation_id)
-                )))?;
-            
-            let deleted_at = DateTime::parse_from_rfc3339(&row.deleted_at)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "deleted_at", &format!("Invalid RFC3339: {}", &row.deleted_at)
-                )))?
-                .with_timezone(&Utc);
-            
-            tombstones.push(Tombstone {
-                id,
-                entity_id,
-                entity_type: row.entity_type.to_string(),
-                deleted_by,
-                deleted_at,
-                operation_id,
-                additional_metadata: row.additional_metadata.clone()
-            });
-        }
-        
-        Ok(tombstones)
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
+
+        // If TombstoneRow is updated to include pushed_at, sync_batch_id, ensure Tombstone::try_from handles them
+        // or adjust the query to select only fields matching the current TombstoneRow.
+        // For now, assuming TombstoneRow matches the selected fields.
+        rows.into_iter()
+            .map(|row| Tombstone::try_from(row))
+            .collect::<Result<Vec<Tombstone>, DomainError>>()
     }
 
     async fn mark_as_pushed<'t>(
@@ -1424,7 +1280,7 @@ impl TombstoneRepository for SqliteTombstoneRepository {
         )
         .execute(&mut **tx)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
         Ok(())
     }
@@ -1442,7 +1298,7 @@ impl TombstoneRepository for SqliteTombstoneRepository {
         )
         .fetch_one(&self.pool)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
         
         Ok(count.count > 0)
     }
@@ -1456,76 +1312,29 @@ impl TombstoneRepository for SqliteTombstoneRepository {
         let user_id_str = user_id.to_string();
         let since_str = since.to_rfc3339();
         
-        // Build query with conditional filter
-        let mut sql = String::from(
-            "SELECT id, entity_id, entity_type, deleted_by, deleted_at, operation_id, additional_metadata
-             FROM tombstones
-             WHERE deleted_by = ? AND deleted_at >= ?"
+        let mut query_builder = QueryBuilder::new(
+            // Ensure selected fields match TombstoneRow, especially after migrations.
+            "SELECT id, entity_id, entity_type, deleted_by, deleted_by_device_id, deleted_at, operation_id, additional_metadata FROM tombstones WHERE deleted_by = "
+            // If TombstoneRow has pushed_at, sync_batch_id, they need to be selected here or TombstoneRow adjusted.
         );
-        
+        query_builder.push_bind(user_id_str);
+        query_builder.push(" AND deleted_at >= ");
+        query_builder.push_bind(since_str);
+
         if let Some(table) = table_filter {
-            sql.push_str(&format!(" AND entity_type = '{}'", table));
+            query_builder.push(" AND entity_type = ");
+            query_builder.push_bind(table);
         }
-        
-        sql.push_str(" ORDER BY deleted_at DESC");
-        
-        // We need to use query_as_with for dynamic SQL
-        let query = sqlx::query(&sql)
-            .bind(user_id_str)
-            .bind(since_str);
-            
-        let rows = query.fetch_all(&self.pool)
+        query_builder.push(" ORDER BY deleted_at ASC");
+
+        let rows = query_builder
+            .build_query_as::<crate::domains::sync::types::TombstoneRow>()
+            .fetch_all(&self.pool)
             .await
-            .map_err(DbError::from)?;
-            
-        let mut tombstones = Vec::with_capacity(rows.len());
-        for row in rows {
-            // You need to extract values from each column by name since we're not using query! macro
-            let id_str: String = row.get("id");
-            let entity_id_str: String = row.get("entity_id");
-            let entity_type: String = row.get("entity_type");
-            let deleted_by_str: String = row.get("deleted_by");
-            let deleted_at_str: String = row.get("deleted_at");
-            let operation_id_str: String = row.get("operation_id");
-            let additional_metadata: Option<String> = row.get("additional_metadata");
-            
-            let id = Uuid::parse_str(&id_str)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "id", &format!("Invalid UUID: {}", &id_str)
-                )))?;
-                
-            let entity_id = Uuid::parse_str(&entity_id_str)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "entity_id", &format!("Invalid UUID: {}", &entity_id_str)
-                )))?;
-                
-            let deleted_by = Uuid::parse_str(&deleted_by_str)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "deleted_by", &format!("Invalid UUID: {}", &deleted_by_str)
-                )))?;
-                
-            let operation_id = Uuid::parse_str(&operation_id_str)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "operation_id", &format!("Invalid UUID: {}", &operation_id_str)
-                )))?;
-            
-            let deleted_at = DateTime::parse_from_rfc3339(&deleted_at_str)
-                .map_err(|_| DomainError::Validation(ValidationError::format(
-                    "deleted_at", &format!("Invalid RFC3339: {}", &deleted_at_str)
-                )))?
-                .with_timezone(&Utc);
-            
-            tombstones.push(Tombstone {
-                id,
-                entity_id,
-                entity_type,
-                deleted_by,
-                deleted_at,
-                operation_id,
-                additional_metadata
-            });
-        }
-        
-        Ok(tombstones)
+            .map_err(|e| DomainError::Database(DbError::from(e)))?;
+
+        rows.into_iter()
+            .map(|row| Tombstone::try_from(row))
+            .collect::<Result<Vec<Tombstone>, DomainError>>()
     }
 }

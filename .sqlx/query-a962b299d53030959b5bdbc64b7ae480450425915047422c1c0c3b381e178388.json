@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO document_types (\n                id, name, description, icon, default_priority, \n                created_at, updated_at, created_by_user_id, updated_by_user_id,\n                created_by_device_id, updated_by_device_id,\n                name_updated_at, name_updated_by, name_updated_by_device_id,\n                allowed_extensions, allowed_extensions_updated_at, allowed_extensions_updated_by, allowed_extensions_updated_by_device_id,\n                max_size, max_size_updated_at, max_size_updated_by, max_size_updated_by_device_id,\n                compression_level, compression_level_updated_at, compression_level_updated_by, compression_level_updated_by_device_id,\n                compression_method, compression_method_updated_at, compression_method_updated_by, compression_method_updated_by_device_id,\n                min_size_for_compression, min_size_for_compression_updated_at, min_size_for_compression_updated_by, min_size_for_compression_updated_by_device_id,\n                description_updated_at, description_updated_by, description_updated_by_device_id,\n                default_priority_updated_at, default_priority_updated_by, default_priority_updated_by_device_id,\n                icon_updated_at, icon_updated_by, icon_updated_by_device_id,\n                related_tables, related_tables_updated_at, related_tables_updated_by, related_tables_updated_by_device_id\n            ) VALUES (\n                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, \n                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, \n                $41, $42, $43, $44, $45, $46, $47\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 47
+    },
+    "nullable": []
+  },
+  "hash": "a962b299d53030959b5bdbc64b7ae480450425915047422c1c0c3b381e178388"
+}

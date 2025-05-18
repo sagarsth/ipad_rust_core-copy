@@ -713,7 +713,7 @@ impl LivehoodService for LivehoodServiceImpl {
         }
         
         // Set the updated by user ID
-        update_data.updated_by_user_id = auth.user_id;
+        update_data.updated_by_user_id = Some(auth.user_id);
         
         // Validate the update data
         update_data.validate().map_err(ServiceError::Domain)?;

@@ -208,15 +208,24 @@ impl SoftDeletable for SqliteWorkshopRepository {
     ) -> DomainResult<()> {
         let now = Utc::now().to_rfc3339();
         let deleted_by = auth.user_id.to_string();
+        let deleted_by_device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
         
         let result = query(
             "UPDATE workshops SET 
              deleted_at = ?, 
-             deleted_by_user_id = ?
+             deleted_by_user_id = ?,
+             deleted_by_device_id = ?,
+             updated_at = ?, -- Also update the main updated_at timestamp
+             updated_by_user_id = ?, -- and who updated it (the deleter)
+             updated_by_device_id = ? -- and which device did it
              WHERE id = ? AND deleted_at IS NULL"
         )
-        .bind(now)
-        .bind(deleted_by)
+        .bind(&now) // deleted_at
+        .bind(&deleted_by) // deleted_by_user_id
+        .bind(&deleted_by_device_id_str) // deleted_by_device_id
+        .bind(&now) // updated_at
+        .bind(&deleted_by) // updated_by_user_id
+        .bind(&deleted_by_device_id_str) // updated_by_device_id
         .bind(id.to_string())
         .execute(&mut **tx)
         .await
@@ -319,7 +328,8 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         let now = Utc::now();
         let now_str = now.to_rfc3339();
         let user_id = auth.user_id;
-        let device_uuid = auth.device_id.clone();
+        let device_uuid_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
+        let device_uuid_for_log = auth.device_id.parse::<Uuid>().ok(); // For direct Uuid use in log
 
         let user_id_str = user_id.to_string();
         let project_id_str = new_workshop.project_id.map(|id| id.to_string());
@@ -333,44 +343,46 @@ impl WorkshopRepository for SqliteWorkshopRepository {
             r#"
             INSERT INTO workshops (
                 id, project_id, 
-                purpose, purpose_updated_at, purpose_updated_by,
-                event_date, event_date_updated_at, event_date_updated_by,
-                location, location_updated_at, location_updated_by,
-                budget, budget_updated_at, budget_updated_by,
-                actuals, actuals_updated_at, actuals_updated_by,
-                participant_count, participant_count_updated_at, participant_count_updated_by,
-                local_partner, local_partner_updated_at, local_partner_updated_by,
-                partner_responsibility, partner_responsibility_updated_at, partner_responsibility_updated_by,
-                -- Skip post-event fields on create
+                purpose, purpose_updated_at, purpose_updated_by, purpose_updated_by_device_id,
+                event_date, event_date_updated_at, event_date_updated_by, event_date_updated_by_device_id,
+                location, location_updated_at, location_updated_by, location_updated_by_device_id,
+                budget, budget_updated_at, budget_updated_by, budget_updated_by_device_id,
+                actuals, actuals_updated_at, actuals_updated_by, actuals_updated_by_device_id,
+                participant_count, participant_count_updated_at, participant_count_updated_by, participant_count_updated_by_device_id,
+                local_partner, local_partner_updated_at, local_partner_updated_by, local_partner_updated_by_device_id,
+                partner_responsibility, partner_responsibility_updated_at, partner_responsibility_updated_by, partner_responsibility_updated_by_device_id,
                 created_at, updated_at, created_by_user_id, updated_by_user_id,
-                deleted_at, deleted_by_user_id
+                created_by_device_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
             ) VALUES (
                 ?, ?, 
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, NULL, NULL
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                ?, ?, ?, ?, ?, ?, NULL, NULL, NULL
             )
             "#,
         )
         .bind(id.to_string())
         .bind(project_id_str) // Bind Option<String>
         .bind(&new_workshop.purpose)
-        .bind(new_workshop.purpose.as_ref().map(|_| &now_str)).bind(new_workshop.purpose.as_ref().map(|_| &user_id_str)) // purpose LWW
+        .bind(new_workshop.purpose.as_ref().map(|_| &now_str)).bind(new_workshop.purpose.as_ref().map(|_| &user_id_str)).bind(new_workshop.purpose.as_ref().map(|_| &device_uuid_str)) // purpose LWW
         .bind(&new_workshop.event_date)
-        .bind(new_workshop.event_date.as_ref().map(|_| &now_str)).bind(new_workshop.event_date.as_ref().map(|_| &user_id_str)) // event_date LWW
+        .bind(new_workshop.event_date.as_ref().map(|_| &now_str)).bind(new_workshop.event_date.as_ref().map(|_| &user_id_str)).bind(new_workshop.event_date.as_ref().map(|_| &device_uuid_str)) // event_date LWW
         .bind(&new_workshop.location)
-        .bind(new_workshop.location.as_ref().map(|_| &now_str)).bind(new_workshop.location.as_ref().map(|_| &user_id_str)) // location LWW
+        .bind(new_workshop.location.as_ref().map(|_| &now_str)).bind(new_workshop.location.as_ref().map(|_| &user_id_str)).bind(new_workshop.location.as_ref().map(|_| &device_uuid_str)) // location LWW
         .bind(&budget_str) // Bind Option<String>
-        .bind(new_workshop.budget.map(|_| &now_str)).bind(new_workshop.budget.map(|_| &user_id_str)) // budget LWW
+        .bind(new_workshop.budget.map(|_| &now_str)).bind(new_workshop.budget.map(|_| &user_id_str)).bind(new_workshop.budget.map(|_| &device_uuid_str)) // budget LWW
         .bind(&actuals_str) // Bind Option<String>
-        .bind(new_workshop.actuals.map(|_| &now_str)).bind(new_workshop.actuals.map(|_| &user_id_str)) // actuals LWW
+        .bind(new_workshop.actuals.map(|_| &now_str)).bind(new_workshop.actuals.map(|_| &user_id_str)).bind(new_workshop.actuals.map(|_| &device_uuid_str)) // actuals LWW
         .bind(new_workshop.participant_count.unwrap_or(0)) // Default to 0 if None
-        .bind(new_workshop.participant_count.map(|_| &now_str)).bind(new_workshop.participant_count.map(|_| &user_id_str)) // participant_count LWW
+        .bind(new_workshop.participant_count.map(|_| &now_str)).bind(new_workshop.participant_count.map(|_| &user_id_str)).bind(new_workshop.participant_count.map(|_| &device_uuid_str)) // participant_count LWW
         .bind(&new_workshop.local_partner)
-        .bind(new_workshop.local_partner.as_ref().map(|_| &now_str)).bind(new_workshop.local_partner.as_ref().map(|_| &user_id_str)) // local_partner LWW
+        .bind(new_workshop.local_partner.as_ref().map(|_| &now_str)).bind(new_workshop.local_partner.as_ref().map(|_| &user_id_str)).bind(new_workshop.local_partner.as_ref().map(|_| &device_uuid_str)) // local_partner LWW
         .bind(&new_workshop.partner_responsibility)
-        .bind(new_workshop.partner_responsibility.as_ref().map(|_| &now_str)).bind(new_workshop.partner_responsibility.as_ref().map(|_| &user_id_str)) // partner_responsibility LWW
+        .bind(new_workshop.partner_responsibility.as_ref().map(|_| &now_str)).bind(new_workshop.partner_responsibility.as_ref().map(|_| &user_id_str)).bind(new_workshop.partner_responsibility.as_ref().map(|_| &device_uuid_str)) // partner_responsibility LWW
+        .bind(&new_workshop.sync_priority.to_string()) // sync_priority
         .bind(&now_str).bind(&now_str) // created_at, updated_at
         .bind(&user_id_str).bind(&user_id_str) // created_by, updated_by
+        .bind(&device_uuid_str).bind(&device_uuid_str) // created_by_device_id, updated_by_device_id
         .execute(&mut **tx)
         .await
         .map_err(DbError::from)?;
@@ -389,7 +401,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
             new_value: Some(serde_json::to_string(&created_workshop).unwrap_or_default()),
             timestamp: now,
             user_id: user_id,
-            device_id: Uuid::parse_str(&device_uuid).ok(),
+            device_id: device_uuid_for_log, // Use the Option<Uuid> directly
             document_metadata: None,
             sync_batch_id: None,
             processed_at: None,
@@ -428,7 +440,8 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<Workshop> {
         let user_id = auth.user_id;
-        let device_uuid = auth.device_id.clone();
+        let device_uuid_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
+        let device_uuid_for_log = auth.device_id.parse::<Uuid>().ok(); // For direct Uuid use in log
         let id_str = id.to_string();
 
         // Fetch current state before update for comparison
@@ -444,45 +457,50 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         macro_rules! add_lww_update {
             ($field:ident, $value:expr) => {
                 if let Some(val) = $value {
-                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
+                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?, {0}_updated_by_device_id = ?", stringify!($field)));
                     let _ = args.add(val);
                     let _ = args.add(&now_str);
                     let _ = args.add(&user_id_str);
+                    let _ = args.add(&device_uuid_str);
                 }
             };
             ($field:ident, $value:expr, string_convert) => {
                 if let Some(val) = $value {
-                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
+                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?, {0}_updated_by_device_id = ?", stringify!($field)));
                     let _ = args.add(val.to_string()); // Convert to string before adding
                     let _ = args.add(&now_str);
                     let _ = args.add(&user_id_str);
+                    let _ = args.add(&device_uuid_str);
                 }
             };
             // Handle Option<String> fields
             ($field:ident, $value:expr, option_string) => {
                 if let Some(opt_val) = $value {
-                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
+                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?, {0}_updated_by_device_id = ?", stringify!($field)));
                     let _ = args.add(opt_val);
                     let _ = args.add(&now_str);
                     let _ = args.add(&user_id_str);
+                    let _ = args.add(&device_uuid_str);
                 }
             };
             // Handle Option<Decimal> fields
             ($field:ident, $value:expr, option_decimal) => {
                 if let Some(opt_val) = $value {
-                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
+                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?, {0}_updated_by_device_id = ?", stringify!($field)));
                     let _ = args.add(opt_val.to_string()); // Convert Decimal to String
                     let _ = args.add(&now_str);
                     let _ = args.add(&user_id_str);
+                    let _ = args.add(&device_uuid_str);
                 }
             };
             // Handle Option<Option<Uuid>> for project_id
             ($field:ident, $value:expr, option_option_uuid) => {
                 if let Some(opt_opt_val) = $value {
-                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
+                    set_clauses.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?, {0}_updated_by_device_id = ?", stringify!($field)));
                     let _ = args.add(opt_opt_val.map(|u| u.to_string()));
                     let _ = args.add(&now_str);
                     let _ = args.add(&user_id_str);
+                    let _ = args.add(&device_uuid_str);
                 }
             };
         }
@@ -516,7 +534,9 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         set_clauses.push("updated_at = ?".to_string());
         let _ = args.add(&now_str);
         set_clauses.push("updated_by_user_id = ?".to_string());
-        let _ = args.add(&user_id_str); // Use the actual user_id string here
+        let _ = args.add(&user_id_str);
+        set_clauses.push("updated_by_device_id = ?".to_string());
+        let _ = args.add(&device_uuid_str);
 
         let query_str = format!(
             "UPDATE workshops SET {} WHERE id = ? AND deleted_at IS NULL",
@@ -554,7 +574,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
                         new_value: serde_json::to_string(&$new_val).ok(),
                         timestamp: now,
                         user_id: user_id,
-                        device_id: Uuid::parse_str(&device_uuid).ok(),
+                        device_id: device_uuid_for_log, // Use the Option<Uuid> directly
                         document_metadata: None,
                         sync_batch_id: None,
                         processed_at: None,
@@ -668,7 +688,8 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         let now = Utc::now();
         let now_str = now.to_rfc3339();
         let user_id = auth.user_id;
-        let device_uuid = auth.device_id.clone();
+        let device_uuid_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
+        let device_uuid_for_log = auth.device_id.parse::<Uuid>().ok(); // For direct Uuid use in log
         let user_id_str = user_id.to_string();
         
         // Convert enum to its string representation for the database
@@ -682,6 +703,8 @@ impl WorkshopRepository for SqliteWorkshopRepository {
         builder.push_bind(now_str.clone());
         builder.push(", updated_by_user_id = ");
         builder.push_bind(user_id_str.clone());
+        builder.push(", updated_by_device_id = ");
+        builder.push_bind(device_uuid_str.clone());
         
         builder.push(" WHERE id IN (");
         let mut id_separated = builder.separated(",");
@@ -716,7 +739,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
                     new_value: serde_json::to_string(&priority_val_str).ok(),
                     timestamp: now,
                     user_id: user_id, 
-                    device_id: Uuid::parse_str(&device_uuid).ok(),
+                    device_id: device_uuid_for_log, // Use the Option<Uuid> directly
                     document_metadata: None,
                     sync_batch_id: None,
                     processed_at: None,
@@ -737,12 +760,14 @@ impl WorkshopRepository for SqliteWorkshopRepository {
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             let user_id = auth.user_id;
-            let device_uuid = auth.device_id.clone();
-            let user_id_str = user_id.to_string();
+            let user_id_str = user_id.to_string(); // Define user_id_str here
+            let device_uuid_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
+            let device_uuid_for_log = auth.device_id.parse::<Uuid>().ok(); // For direct Uuid use in log
             
-            let update_result = query("UPDATE workshops SET participant_count = participant_count + 1, updated_at = ?, updated_by_user_id = ? WHERE id = ? AND deleted_at IS NULL")
+            let update_result = query("UPDATE workshops SET participant_count = participant_count + 1, updated_at = ?, updated_by_user_id = ?, updated_by_device_id = ? WHERE id = ? AND deleted_at IS NULL")
                 .bind(&now_str)
                 .bind(&user_id_str)
+                .bind(&device_uuid_str)
                 .bind(id.to_string())
                 .execute(&mut *tx)
                 .await
@@ -764,7 +789,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
                 new_value: serde_json::to_string(&new_count).ok(),
                 timestamp: now,
                 user_id: user_id,
-                device_id: Uuid::parse_str(&device_uuid).ok(),
+                device_id: device_uuid_for_log, // Use the Option<Uuid> directly
                 document_metadata: None,
                 sync_batch_id: None,
                 processed_at: None,
@@ -791,12 +816,14 @@ impl WorkshopRepository for SqliteWorkshopRepository {
             let now = Utc::now();
             let now_str = now.to_rfc3339();
             let user_id = auth.user_id;
-            let device_uuid = auth.device_id.clone();
-            let user_id_str = user_id.to_string();
+            let user_id_str = user_id.to_string(); // Define user_id_str here
+            let device_uuid_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
+            let device_uuid_for_log = auth.device_id.parse::<Uuid>().ok(); // For direct Uuid use in log
             
-            let update_result = query("UPDATE workshops SET participant_count = MAX(0, participant_count - 1), updated_at = ?, updated_by_user_id = ? WHERE id = ? AND deleted_at IS NULL")
+            let update_result = query("UPDATE workshops SET participant_count = MAX(0, participant_count - 1), updated_at = ?, updated_by_user_id = ?, updated_by_device_id = ? WHERE id = ? AND deleted_at IS NULL")
                  .bind(&now_str)
                 .bind(&user_id_str)
+                .bind(&device_uuid_str)
                 .bind(id.to_string())
                 .execute(&mut *tx)
                 .await
@@ -822,7 +849,7 @@ impl WorkshopRepository for SqliteWorkshopRepository {
                     new_value: serde_json::to_string(&new_count).ok(),
                     timestamp: now,
                     user_id: user_id,
-                    device_id: Uuid::parse_str(&device_uuid).ok(),
+                    device_id: device_uuid_for_log, // Use the Option<Uuid> directly
                     document_metadata: None,
                     sync_batch_id: None,
                     processed_at: None,

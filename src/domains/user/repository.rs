@@ -5,6 +5,7 @@ use crate::domains::user::types::{User, NewUser, UpdateUser, UserRow};
 use crate::auth::AuthContext;
 use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
 use crate::domains::core::repository::{HardDeletable, FindById};
+use crate::types::UserRole;
 use uuid::Uuid;
 use chrono::{Utc, DateTime};
 use sqlx::{SqlitePool, query, query_as, query_scalar, Transaction, Sqlite};
@@ -12,6 +13,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use crate::domains::sync::repository::ChangeLogRepository;
 use serde::{Deserialize, Serialize};
+use crate::validation::Validate;
 
 /// User repository trait
 #[async_trait]
@@ -60,21 +62,27 @@ struct UserFullState {
     email: String,
     email_updated_at: Option<DateTime<Utc>>,
     email_updated_by: Option<Uuid>,
+    email_updated_by_device_id: Option<Uuid>,
     password_hash: String,
     name: String,
     name_updated_at: Option<DateTime<Utc>>,
     name_updated_by: Option<Uuid>,
+    name_updated_by_device_id: Option<Uuid>,
     role: String,
     role_updated_at: Option<DateTime<Utc>>,
     role_updated_by: Option<Uuid>,
+    role_updated_by_device_id: Option<Uuid>,
     active: bool,
     active_updated_at: Option<DateTime<Utc>>,
     active_updated_by: Option<Uuid>,
+    active_updated_by_device_id: Option<Uuid>,
     last_login: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     created_by_user_id: Option<Uuid>,
+    created_by_device_id: Option<Uuid>,
     updated_by_user_id: Option<Uuid>,
+    updated_by_device_id: Option<Uuid>,
 }
 
 impl SqliteUserRepository {
@@ -136,37 +144,47 @@ impl SqliteUserRepository {
                 email = ?,
                 email_updated_at = ?,
                 email_updated_by = ?,
+                email_updated_by_device_id = ?,
                 password_hash = ?,
                 name = ?,
                 name_updated_at = ?,
                 name_updated_by = ?,
+                name_updated_by_device_id = ?,
                 role = ?,
                 role_updated_at = ?,
                 role_updated_by = ?,
+                role_updated_by_device_id = ?,
                 active = ?,
                 active_updated_at = ?,
                 active_updated_by = ?,
+                active_updated_by_device_id = ?,
                 last_login = ?,
                 updated_at = ?,
-                updated_by_user_id = ?
+                updated_by_user_id = ?,
+                updated_by_device_id = ?
             WHERE id = ?"#
         )
         .bind(&state.email)
         .bind(state.email_updated_at.map(|dt| dt.to_rfc3339()))
         .bind(state.email_updated_by.map(|id| id.to_string()))
+        .bind(state.email_updated_by_device_id.map(|id| id.to_string()))
         .bind(&state.password_hash)
         .bind(&state.name)
         .bind(state.name_updated_at.map(|dt| dt.to_rfc3339()))
         .bind(state.name_updated_by.map(|id| id.to_string()))
+        .bind(state.name_updated_by_device_id.map(|id| id.to_string()))
         .bind(&state.role)
         .bind(state.role_updated_at.map(|dt| dt.to_rfc3339()))
         .bind(state.role_updated_by.map(|id| id.to_string()))
+        .bind(state.role_updated_by_device_id.map(|id| id.to_string()))
         .bind(if state.active { 1 } else { 0 })
         .bind(state.active_updated_at.map(|dt| dt.to_rfc3339()))
         .bind(state.active_updated_by.map(|id| id.to_string()))
+        .bind(state.active_updated_by_device_id.map(|id| id.to_string()))
         .bind(state.last_login.map(|dt| dt.to_rfc3339()))
         .bind(state.updated_at.to_rfc3339())
         .bind(state.updated_by_user_id.map(|id| id.to_string()))
+        .bind(state.updated_by_device_id.map(|id| id.to_string()))
         .bind(entity_id.to_string())
         .execute(&mut **tx)
         .await
@@ -334,32 +352,38 @@ impl MergeableEntityRepository<User> for SqliteUserRepository {
                 
                 query(
                     "INSERT INTO users (
-                        id, email, email_updated_at, email_updated_by,
-                        password_hash, name, name_updated_at, name_updated_by,
-                        role, role_updated_at, role_updated_by,
-                        active, active_updated_at, active_updated_by,
-                        last_login, created_at, updated_at, created_by_user_id, updated_by_user_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        id, email, email_updated_at, email_updated_by, email_updated_by_device_id,
+                        password_hash, name, name_updated_at, name_updated_by, name_updated_by_device_id,
+                        role, role_updated_at, role_updated_by, role_updated_by_device_id,
+                        active, active_updated_at, active_updated_by, active_updated_by_device_id,
+                        last_login, created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(entity_id.to_string())
                 .bind(&payload.email)
                 .bind(payload.email_updated_at.map(|dt| dt.to_rfc3339()))
                 .bind(payload.email_updated_by.map(|id| id.to_string()))
+                .bind(payload.email_updated_by_device_id.map(|id| id.to_string()))
                 .bind(&payload.password_hash)
                 .bind(&payload.name)
                 .bind(payload.name_updated_at.map(|dt| dt.to_rfc3339()))
                 .bind(payload.name_updated_by.map(|id| id.to_string()))
+                .bind(payload.name_updated_by_device_id.map(|id| id.to_string()))
                 .bind(&payload.role)
                 .bind(payload.role_updated_at.map(|dt| dt.to_rfc3339()))
                 .bind(payload.role_updated_by.map(|id| id.to_string()))
+                .bind(payload.role_updated_by_device_id.map(|id| id.to_string()))
                 .bind(active_val)
                 .bind(payload.active_updated_at.map(|dt| dt.to_rfc3339()))
                 .bind(payload.active_updated_by.map(|id| id.to_string()))
+                .bind(payload.active_updated_by_device_id.map(|id| id.to_string()))
                 .bind(payload.last_login.map(|dt| dt.to_rfc3339()))
                 .bind(payload.created_at.to_rfc3339())
                 .bind(payload.updated_at.to_rfc3339())
                 .bind(payload.created_by_user_id.map(|id| id.to_string()))
+                .bind(payload.created_by_device_id.map(|id| id.to_string()))
                 .bind(payload.updated_by_user_id.map(|id| id.to_string()))
+                .bind(payload.updated_by_device_id.map(|id| id.to_string()))
                 .execute(&mut **tx)
                 .await
                 .map_err(|e| DomainError::Database(DbError::from(e)))?;
@@ -415,11 +439,12 @@ impl MergeableEntityRepository<User> for SqliteUserRepository {
                             };
                             
                             query(
-                                "UPDATE users SET email = ?, email_updated_at = ?, email_updated_by = ?, updated_at = ? WHERE id = ?"
+                                "UPDATE users SET email = ?, email_updated_at = ?, email_updated_by = ?, email_updated_by_device_id = ?, updated_at = ? WHERE id = ?"
                             )
                             .bind(&email_value)
                             .bind(remote_change.timestamp.to_rfc3339())
                             .bind(remote_change.user_id.to_string())
+                            .bind(remote_change.device_id.map(|id| id.to_string()))
                             .bind(remote_change.timestamp.to_rfc3339())
                             .bind(entity_id.to_string())
                             .execute(&mut **tx)
@@ -439,11 +464,12 @@ impl MergeableEntityRepository<User> for SqliteUserRepository {
                             };
                             
                             query(
-                                "UPDATE users SET name = ?, name_updated_at = ?, name_updated_by = ?, updated_at = ? WHERE id = ?"
+                                "UPDATE users SET name = ?, name_updated_at = ?, name_updated_by = ?, name_updated_by_device_id = ?, updated_at = ? WHERE id = ?"
                             )
                             .bind(&name_value)
                             .bind(remote_change.timestamp.to_rfc3339())
                             .bind(remote_change.user_id.to_string())
+                            .bind(remote_change.device_id.map(|id| id.to_string()))
                             .bind(remote_change.timestamp.to_rfc3339())
                             .bind(entity_id.to_string())
                             .execute(&mut **tx)
@@ -463,11 +489,12 @@ impl MergeableEntityRepository<User> for SqliteUserRepository {
                             };
                             
                             query(
-                                "UPDATE users SET role = ?, role_updated_at = ?, role_updated_by = ?, updated_at = ? WHERE id = ?"
+                                "UPDATE users SET role = ?, role_updated_at = ?, role_updated_by = ?, role_updated_by_device_id = ?, updated_at = ? WHERE id = ?"
                             )
                             .bind(&role_value)
                             .bind(remote_change.timestamp.to_rfc3339())
                             .bind(remote_change.user_id.to_string())
+                            .bind(remote_change.device_id.map(|id| id.to_string()))
                             .bind(remote_change.timestamp.to_rfc3339())
                             .bind(entity_id.to_string())
                             .execute(&mut **tx)
@@ -484,11 +511,12 @@ impl MergeableEntityRepository<User> for SqliteUserRepository {
                             })?;
                             
                             query(
-                                "UPDATE users SET active = ?, active_updated_at = ?, active_updated_by = ?, updated_at = ? WHERE id = ?"
+                                "UPDATE users SET active = ?, active_updated_at = ?, active_updated_by = ?, active_updated_by_device_id = ?, updated_at = ? WHERE id = ?"
                             )
                             .bind(if active_value { 1 } else { 0 })
                             .bind(remote_change.timestamp.to_rfc3339())
                             .bind(remote_change.user_id.to_string())
+                            .bind(remote_change.device_id.map(|id| id.to_string()))
                             .bind(remote_change.timestamp.to_rfc3339())
                             .bind(entity_id.to_string())
                             .execute(&mut **tx)
@@ -509,10 +537,12 @@ impl MergeableEntityRepository<User> for SqliteUserRepository {
                             };
                             
                             query(
-                                "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?"
+                                "UPDATE users SET password_hash = ?, updated_at = ?, updated_by_user_id = ?, updated_by_device_id = ? WHERE id = ?"
                             )
                             .bind(&password_value)
                             .bind(remote_change.timestamp.to_rfc3339())
+                            .bind(remote_change.user_id.to_string())
+                            .bind(remote_change.device_id.map(|id| id.to_string()))
                             .bind(entity_id.to_string())
                             .execute(&mut **tx)
                             .await
@@ -602,171 +632,212 @@ impl UserRepository for SqliteUserRepository {
         Ok(users)
     }
     
-    async fn create(&self, user: NewUser, auth: &AuthContext) -> DomainResult<User> {
+    async fn create(&self, user_data: NewUser, auth: &AuthContext) -> DomainResult<User> {
+        user_data.validate()?;
+
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let password_hash = user_data.password.clone();
+
+        let created_by_user_id_str = user_data.created_by_user_id.map(|id| id.to_string());
+        let auth_user_id_str = auth.user_id.to_string();
+        let device_uuid_opt = Self::parse_device_id(&auth.device_id);
+        let device_id_str_opt = device_uuid_opt.map(|id| id.to_string());
+
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
 
-        if !self.is_email_unique(&user.email, None).await? {
-            return Err(DomainError::Validation(ValidationError::unique("email")));
-        }
-        
-        
-
-        let create_result = async {
-            let id = Uuid::new_v4();
-            let now = Utc::now();
-            let now_str = now.to_rfc3339();
-            
-            let created_by_user_id = user.created_by_user_id.unwrap_or(auth.user_id);
-            let created_by_user_id_str = created_by_user_id.to_string();
-            let auth_user_id_str = auth.user_id.to_string();
-            
-            let active_val = if user.active { 1 } else { 0 };
-            
-            query(
-                "INSERT INTO users (
-                    id, email, email_updated_at, email_updated_by,
-                    password_hash, name, name_updated_at, name_updated_by,
-                    role, role_updated_at, role_updated_by,
-                    active, active_updated_at, active_updated_by,
-                    created_at, updated_at, created_by_user_id, updated_by_user_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-            )
-            .bind(id.to_string())
-            .bind(&user.email)
-            .bind(&now_str)
-            .bind(&auth_user_id_str)
-            .bind(&user.password)
-            .bind(&user.name)
-            .bind(&now_str)
-            .bind(&auth_user_id_str)
-            .bind(&user.role)
-            .bind(&now_str)
-            .bind(&auth_user_id_str)
-            .bind(active_val)
-            .bind(&now_str)
-            .bind(&auth_user_id_str)
-            .bind(&now_str)
-            .bind(&now_str)
-            .bind(&created_by_user_id_str)
-            .bind(&auth_user_id_str)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| DomainError::Database(DbError::from(e)))?;
-            
-            // Create full state for changelog
-            let user_state = UserFullState {
-                id,
-                email: user.email.clone(),
-                email_updated_at: Some(now),
-                email_updated_by: Some(auth.user_id),
-                password_hash: user.password.clone(),
-                name: user.name.clone(),
-                name_updated_at: Some(now),
-                name_updated_by: Some(auth.user_id),
-                role: user.role.clone(),
-                role_updated_at: Some(now),
-                role_updated_by: Some(auth.user_id),
-                active: user.active,
-                active_updated_at: Some(now),
-                active_updated_by: Some(auth.user_id),
-                last_login: None,
-                created_at: now,
-                updated_at: now,
-                created_by_user_id: Some(created_by_user_id),
-                updated_by_user_id: Some(auth.user_id),
-            };
-            
-            let user_json = serde_json::to_string(&user_state)
-                .map_err(|e| DomainError::Internal(format!("Failed to serialize user state: {}", e)))?;
-            
-            let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: Self::ENTITY_TABLE.to_string(),
-                entity_id: id,
-                operation_type: ChangeOperationType::Create,
-                field_name: None,
-                old_value: None,
-                new_value: Some(user_json),
-                document_metadata: None,
-                timestamp: now,
-                user_id: auth.user_id,
-                device_id: Self::parse_device_id(&auth.device_id),
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
-            };
-            
-            self.log_change_entry(entry, &mut tx).await?;
-            
-            // Retrieve created user
-            self.find_by_id_with_tx(id, &mut tx).await?
-                .ok_or_else(|| DomainError::Internal("Failed to retrieve user after creation".to_string()))
-        }.await;
-
-        match create_result {
-            Ok(created_user) => {
-                tx.commit().await.map_err(DbError::from)?;
-                Ok(created_user)
+        query(
+            r#"INSERT INTO users (
+                id, email, password_hash, name, role, active, 
+                created_at, updated_at, created_by_user_id, updated_by_user_id,
+                email_updated_at, email_updated_by, email_updated_by_device_id,
+                name_updated_at, name_updated_by, name_updated_by_device_id,
+                role_updated_at, role_updated_by, role_updated_by_device_id,
+                active_updated_at, active_updated_by, active_updated_by_device_id,
+                created_by_device_id, updated_by_device_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+        )
+        .bind(id.to_string())
+        .bind(&user_data.email)
+        .bind(&password_hash)
+        .bind(&user_data.name)
+        .bind(&user_data.role)
+        .bind(if user_data.active { 1 } else { 0 })
+        .bind(&now_str) // created_at
+        .bind(&now_str) // updated_at
+        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // created_by_user_id
+        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // updated_by_user_id
+        .bind(&now_str) // email_updated_at
+        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // email_updated_by
+        .bind(device_id_str_opt.as_deref()) // email_updated_by_device_id
+        .bind(&now_str) // name_updated_at
+        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // name_updated_by
+        .bind(device_id_str_opt.as_deref()) // name_updated_by_device_id
+        .bind(&now_str) // role_updated_at
+        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // role_updated_by
+        .bind(device_id_str_opt.as_deref()) // role_updated_by_device_id
+        .bind(&now_str) // active_updated_at
+        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // active_updated_by
+        .bind(device_id_str_opt.as_deref()) // active_updated_by_device_id
+        .bind(device_id_str_opt.as_deref()) // created_by_device_id
+        .bind(device_id_str_opt.as_deref()) // updated_by_device_id
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            if let Some(db_err) = e.as_database_error() {
+                if db_err.is_unique_violation() {
+                    return DomainError::Validation(ValidationError::unique("email"));
+                }
             }
-            Err(e) => {
-                let _ = tx.rollback().await;
-                Err(e)
-            }
-        }
+            DomainError::Database(DbError::from(e))
+        })?;
+
+        let created_user = User {
+            id,
+            email: user_data.email.clone(),
+            password_hash: password_hash.clone(),
+            name: user_data.name.clone(),
+            role: UserRole::from_str(&user_data.role).ok_or_else(|| DomainError::Validation(ValidationError::format("role", &format!("Invalid role string: {}", user_data.role))))?,
+            active: user_data.active,
+            last_login: None,
+            created_at: now,
+            updated_at: now,
+            created_by_user_id: user_data.created_by_user_id.or(Some(auth.user_id)),
+            updated_by_user_id: user_data.created_by_user_id.or(Some(auth.user_id)),
+            email_updated_at: Some(now),
+            email_updated_by: user_data.created_by_user_id.or(Some(auth.user_id)),
+            name_updated_at: Some(now),
+            name_updated_by: user_data.created_by_user_id.or(Some(auth.user_id)),
+            role_updated_at: Some(now),
+            role_updated_by: user_data.created_by_user_id.or(Some(auth.user_id)),
+            active_updated_at: Some(now),
+            active_updated_by: user_data.created_by_user_id.or(Some(auth.user_id)),
+            deleted_at: None,
+            deleted_by_user_id: None,
+            created_by_device_id: device_uuid_opt,
+            updated_by_device_id: device_uuid_opt,
+            email_updated_by_device_id: device_uuid_opt,
+            name_updated_by_device_id: device_uuid_opt,
+            role_updated_by_device_id: device_uuid_opt,
+            active_updated_by_device_id: device_uuid_opt,
+            deleted_by_device_id: None,
+        };
+
+        let user_state = UserFullState {
+            id,
+            email: created_user.email.clone(),
+            password_hash,
+            name: created_user.name.clone(),
+            role: created_user.role.as_str().to_owned(),
+            active: created_user.active,
+            last_login: created_user.last_login,
+            created_at: created_user.created_at,
+            updated_at: created_user.updated_at,
+            created_by_user_id: created_user.created_by_user_id,
+            updated_by_user_id: created_user.updated_by_user_id,
+            email_updated_at: created_user.email_updated_at,
+            email_updated_by: created_user.email_updated_by,
+            name_updated_at: created_user.name_updated_at,
+            name_updated_by: created_user.name_updated_by,
+            role_updated_at: created_user.role_updated_at,
+            role_updated_by: created_user.role_updated_by,
+            active_updated_at: created_user.active_updated_at,
+            active_updated_by: created_user.active_updated_by,
+            created_by_device_id: device_uuid_opt,
+            updated_by_device_id: device_uuid_opt,
+            email_updated_by_device_id: device_uuid_opt,
+            name_updated_by_device_id: device_uuid_opt,
+            role_updated_by_device_id: device_uuid_opt,
+            active_updated_by_device_id: device_uuid_opt,
+        };
+        
+        let serialized_state = serde_json::to_string(&user_state)
+            .map_err(|e| DomainError::Internal(format!("Failed to serialize user state: {}", e)))?;
+
+        let log_entry = ChangeLogEntry {
+            operation_id: Uuid::new_v4(),
+            entity_table: Self::ENTITY_TABLE.to_string(),
+            entity_id: id,
+            operation_type: ChangeOperationType::Create,
+            field_name: None,
+            old_value: None,
+            new_value: Some(serialized_state),
+            document_metadata: None,
+            timestamp: now,
+            user_id: auth.user_id,
+            device_id: device_uuid_opt,
+            sync_batch_id: None,
+            processed_at: None,
+            sync_error: None,
+        };
+        self.log_change_entry(log_entry, &mut tx).await?;
+
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(created_user)
     }
     
     async fn update(&self, id: Uuid, update_data: UpdateUser, auth: &AuthContext) -> DomainResult<User> {
-        if let Some(email) = &update_data.email {
-            if !self.is_email_unique(email, Some(id)).await? {
-                return Err(DomainError::Validation(ValidationError::unique("email")));
-            }
-        }
+        update_data.validate()?;
 
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        
+        let current_user = self.find_by_id_with_tx(id, &mut tx).await?
+            .ok_or_else(|| DomainError::EntityNotFound(Self::ENTITY_TABLE.to_string(), id))?;
 
-        let update_result = async {
-            // Get current user to compare changed fields
-            let current_user = self.find_by_id_with_tx(id, &mut tx).await?
-                .ok_or_else(|| DomainError::EntityNotFound(Self::ENTITY_TABLE.to_string(), id))?;
+        if current_user.is_deleted() {
+            return Err(DomainError::EntityNotFound(Self::ENTITY_TABLE.to_string(), id));
+        }
 
-            let now = Utc::now();
-            let now_str = now.to_rfc3339();
-            let auth_user_id_str = auth.user_id.to_string();
-            let mut changes_made = false;
-            
-            // Track individual field updates for better LWW conflict resolution
-            if let Some(email) = &update_data.email {
-                if email != &current_user.email {
-                    query(
-                        "UPDATE users SET email = ?, email_updated_at = ?, email_updated_by = ? WHERE id = ?"
-                    )
-                    .bind(email)
-                    .bind(&now_str)
-                    .bind(&auth_user_id_str)
-                    .bind(id.to_string())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| DomainError::Database(DbError::from(e)))?;
-                    
-                    self.log_field_update(
-                        &mut tx, 
-                        id, 
-                        "email", 
-                        Some(serde_json::to_string(&current_user.email).unwrap_or_default()), 
-                        Some(serde_json::to_string(email).unwrap_or_default()),
-                        auth,
-                        now
-                    ).await?;
-                    
-                    changes_made = true;
-                }
-            }
-            
-            if let Some(password) = &update_data.password {
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let auth_user_id_str = auth.user_id.to_string();
+        let device_uuid_opt = Self::parse_device_id(&auth.device_id);
+
+        let mut changes_made = false;
+
+        // Update email if provided
+        if let Some(email) = &update_data.email {
+            if email != &current_user.email {
                 query(
-                    "UPDATE users SET password_hash = ? WHERE id = ?"
+                    "UPDATE users SET email = ?, email_updated_at = ?, email_updated_by = ?, email_updated_by_device_id = ?, updated_at = ? WHERE id = ?"
                 )
-                .bind(password)
+                .bind(email)
+                .bind(&now_str)
+                .bind(&auth_user_id_str)
+                .bind(device_uuid_opt.map(|id| id.to_string()))
+                .bind(&now_str)
+                .bind(id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| DomainError::Database(DbError::from(e)))?;
+                
+                self.log_field_update(
+                    &mut tx, 
+                    id, 
+                    "email", 
+                    Some(serde_json::to_string(&current_user.email).unwrap_or_default()), 
+                    Some(serde_json::to_string(email).unwrap_or_default()),
+                    auth,
+                    now
+                ).await?;
+                
+                changes_made = true;
+            }
+        }
+        
+        // Update password if provided (assume it's already hashed)
+        if let Some(new_password_hash) = &update_data.password {
+            // Only update if the new hash is different from the current one
+            // (though comparing hashes directly might not be strictly necessary if AuthService handles idempotency)
+            if new_password_hash != &current_user.password_hash {
+                query(
+                    "UPDATE users SET password_hash = ?, updated_at = ?, updated_by_user_id = ?, updated_by_device_id = ? WHERE id = ?"
+                )
+                .bind(new_password_hash) // Use the new pre-hashed password
+                .bind(&now_str)
+                .bind(&auth_user_id_str)
+                .bind(device_uuid_opt.map(|id| id.to_string()))
                 .bind(id.to_string())
                 .execute(&mut *tx)
                 .await
@@ -777,126 +848,122 @@ impl UserRepository for SqliteUserRepository {
                     &mut tx,
                     id,
                     "password_hash",
-                    None,
-                    None,
+                    None, // Old value not logged for passwords
+                    None, // New value (hash) not logged for passwords
                     auth,
                     now
                 ).await?;
                 
                 changes_made = true;
             }
-            
-            if let Some(name) = &update_data.name {
-                if name != &current_user.name {
-                    query(
-                        "UPDATE users SET name = ?, name_updated_at = ?, name_updated_by = ? WHERE id = ?"
-                    )
-                    .bind(name)
-                    .bind(&now_str)
-                    .bind(&auth_user_id_str)
-                    .bind(id.to_string())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| DomainError::Database(DbError::from(e)))?;
-                    
-                    self.log_field_update(
-                        &mut tx,
-                        id,
-                        "name",
-                        Some(serde_json::to_string(&current_user.name).unwrap_or_default()),
-                        Some(serde_json::to_string(name).unwrap_or_default()),
-                        auth,
-                        now
-                    ).await?;
-                    
-                    changes_made = true;
-                }
-            }
-            
-            if let Some(role) = &update_data.role {
-                if role != &current_user.role.as_str() {
-                    query(
-                        "UPDATE users SET role = ?, role_updated_at = ?, role_updated_by = ? WHERE id = ?"
-                    )
-                    .bind(role)
-                    .bind(&now_str)
-                    .bind(&auth_user_id_str)
-                    .bind(id.to_string())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| DomainError::Database(DbError::from(e)))?;
-                    
-                    self.log_field_update(
-                        &mut tx,
-                        id,
-                        "role",
-                        Some(serde_json::to_string(&current_user.role.as_str()).unwrap_or_default()),
-                        Some(serde_json::to_string(role).unwrap_or_default()),
-                        auth,
-                        now
-                    ).await?;
-                    
-                    changes_made = true;
-                }
-            }
-            
-            if let Some(active) = update_data.active {
-                if active != current_user.active {
-                    query(
-                        "UPDATE users SET active = ?, active_updated_at = ?, active_updated_by = ? WHERE id = ?"
-                    )
-                    .bind(if active { 1 } else { 0 })
-                    .bind(&now_str)
-                    .bind(&auth_user_id_str)
-                    .bind(id.to_string())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| DomainError::Database(DbError::from(e)))?;
-                    
-                    self.log_field_update(
-                        &mut tx,
-                        id,
-                        "active",
-                        Some(serde_json::to_string(&current_user.active).unwrap_or_default()),
-                        Some(serde_json::to_string(&active).unwrap_or_default()),
-                        auth,
-                        now
-                    ).await?;
-                    
-                    changes_made = true;
-                }
-            }
-            
-            // Update main record timestamp if any changes were made
-            if changes_made {
+        }
+        
+        if let Some(name) = &update_data.name {
+            if name != &current_user.name {
                 query(
-                    "UPDATE users SET updated_at = ?, updated_by_user_id = ? WHERE id = ?"
+                    "UPDATE users SET name = ?, name_updated_at = ?, name_updated_by = ?, name_updated_by_device_id = ?, updated_at = ? WHERE id = ?"
                 )
+                .bind(name)
                 .bind(&now_str)
                 .bind(&auth_user_id_str)
+                .bind(device_uuid_opt.map(|id| id.to_string()))
+                .bind(&now_str)
                 .bind(id.to_string())
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| DomainError::Database(DbError::from(e)))?;
-            } else {
-                log::debug!("No changes made to user {}", id);
-            }
-            
-            // Return updated user
-            self.find_by_id_with_tx(id, &mut tx).await?
-                .ok_or_else(|| DomainError::EntityNotFound(Self::ENTITY_TABLE.to_string(), id))
-        }.await;
-
-        match update_result {
-            Ok(updated_user) => {
-                tx.commit().await.map_err(DbError::from)?;
-                Ok(updated_user)
-            }
-            Err(e) => {
-                let _ = tx.rollback().await;
-                Err(e)
+                
+                self.log_field_update(
+                    &mut tx,
+                    id,
+                    "name",
+                    Some(serde_json::to_string(&current_user.name).unwrap_or_default()),
+                    Some(serde_json::to_string(name).unwrap_or_default()),
+                    auth,
+                    now
+                ).await?;
+                
+                changes_made = true;
             }
         }
+        
+        if let Some(role) = &update_data.role {
+            if role != &current_user.role.as_str() {
+                query(
+                    "UPDATE users SET role = ?, role_updated_at = ?, role_updated_by = ?, role_updated_by_device_id = ?, updated_at = ? WHERE id = ?"
+                )
+                .bind(role)
+                .bind(&now_str)
+                .bind(&auth_user_id_str)
+                .bind(device_uuid_opt.map(|id| id.to_string()))
+                .bind(&now_str)
+                .bind(id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| DomainError::Database(DbError::from(e)))?;
+                
+                self.log_field_update(
+                    &mut tx,
+                    id,
+                    "role",
+                    Some(serde_json::to_string(&current_user.role.as_str()).unwrap_or_default()),
+                    Some(serde_json::to_string(role).unwrap_or_default()),
+                    auth,
+                    now
+                ).await?;
+                
+                changes_made = true;
+            }
+        }
+        
+        if let Some(active) = update_data.active {
+            if active != current_user.active {
+                query(
+                    "UPDATE users SET active = ?, active_updated_at = ?, active_updated_by = ?, active_updated_by_device_id = ?, updated_at = ? WHERE id = ?"
+                )
+                .bind(if active { 1 } else { 0 })
+                .bind(&now_str)
+                .bind(&auth_user_id_str)
+                .bind(device_uuid_opt.map(|id| id.to_string()))
+                .bind(&now_str)
+                .bind(id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| DomainError::Database(DbError::from(e)))?;
+                
+                self.log_field_update(
+                    &mut tx,
+                    id,
+                    "active",
+                    Some(serde_json::to_string(&current_user.active).unwrap_or_default()),
+                    Some(serde_json::to_string(&active).unwrap_or_default()),
+                    auth,
+                    now
+                ).await?;
+                
+                changes_made = true;
+            }
+        }
+        
+        // Update main record timestamp if any changes were made
+        if changes_made {
+            query(
+                "UPDATE users SET updated_at = ?, updated_by_user_id = ?, updated_by_device_id = ? WHERE id = ?"
+            )
+            .bind(&now_str)
+            .bind(&auth_user_id_str)
+            .bind(device_uuid_opt.map(|id| id.to_string()))
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| DomainError::Database(DbError::from(e)))?;
+        } else {
+            log::debug!("No changes made to user {}", id);
+        }
+        
+        // Return updated user
+        self.find_by_id_with_tx(id, &mut tx).await?
+            .ok_or_else(|| DomainError::EntityNotFound(Self::ENTITY_TABLE.to_string(), id))
     }
     
     async fn update_last_login(&self, id: Uuid) -> DomainResult<()> {

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            INSERT INTO media_documents (\n                id, related_table, related_id, temp_related_id, type_id,\n                original_filename, file_path, compressed_file_path, compressed_size_bytes,\n                field_identifier, title, description, mime_type, size_bytes,\n                has_error, error_message, error_type, compression_status,\n                blob_status, blob_key, sync_priority, last_sync_attempt_at,\n                sync_attempt_count, created_at, updated_at, created_by_user_id,\n                updated_by_user_id, deleted_at, deleted_by_user_id\n            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 29
+    },
+    "nullable": []
+  },
+  "hash": "c21ba526041d3b421c165eec73fe8f164cf70771eef7b9a4d10f009549af5a81"
+}

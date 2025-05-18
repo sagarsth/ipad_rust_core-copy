@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT \n                device_id,\n                last_sync_attempt_at\n            FROM device_sync_state\n            WHERE user_id = ?\n            ORDER BY last_sync_attempt_at DESC\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "device_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "last_sync_attempt_at",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "396b8a37620408c1d84877727b18ff5efc5731c82b84a229f5277935d21c8b49"
+}

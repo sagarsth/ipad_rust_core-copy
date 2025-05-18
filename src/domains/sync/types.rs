@@ -399,6 +399,9 @@ pub struct Tombstone {
     /// User ID who performed the deletion
     pub deleted_by: Uuid,
     
+    /// Device ID that performed the deletion
+    pub deleted_by_device_id: Option<Uuid>,
+
     /// When the deletion occurred
     pub deleted_at: DateTime<Utc>,
     
@@ -415,12 +418,14 @@ impl Tombstone {
         entity_id: Uuid,
         entity_type: &str,
         deleted_by: Uuid,
+        deleted_by_device_id: Option<Uuid>,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
             entity_id,
             entity_type: entity_type.to_string(),
             deleted_by,
+            deleted_by_device_id,
             deleted_at: Utc::now(),
             operation_id: Uuid::new_v4(),
             additional_metadata: None,
@@ -432,6 +437,7 @@ impl Tombstone {
         entity_id: Uuid,
         entity_type: &str,
         deleted_by: Uuid,
+        deleted_by_device_id: Option<Uuid>,
         operation_id: Uuid,
     ) -> Self {
         Self {
@@ -439,6 +445,7 @@ impl Tombstone {
             entity_id,
             entity_type: entity_type.to_string(),
             deleted_by,
+            deleted_by_device_id,
             deleted_at: Utc::now(),
             operation_id,
             additional_metadata: None,
@@ -471,8 +478,10 @@ pub struct SyncConflict {
     pub resolution_status: ConflictResolutionStatus,
     pub resolution_strategy: Option<ConflictResolutionStrategy>,
     pub resolved_by_user_id: Option<Uuid>,
+    pub resolved_by_device_id: Option<Uuid>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub created_by_device_id: Option<Uuid>,
 }
 
 /// Data Transfer Object for initializing a sync session
@@ -777,6 +786,7 @@ pub struct TombstoneRow {
     pub entity_id: String,
     pub entity_type: String,
     pub deleted_by: String,
+    pub deleted_by_device_id: Option<String>,
     pub deleted_at: String,
     pub operation_id: String,
     pub additional_metadata: Option<String>,
@@ -805,8 +815,10 @@ pub struct SyncConflictRow {
     pub resolution_status: String,
     pub resolution_strategy: Option<String>,
     pub resolved_by_user_id: Option<String>,
+    pub resolved_by_device_id: Option<String>,
     pub resolved_at: Option<String>,
     pub created_at: String,
+    pub created_by_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -897,6 +909,7 @@ impl TryFrom<TombstoneRow> for Tombstone {
             entity_id: parse_uuid(&row.entity_id, "tombstone.entity_id")?,
             entity_type: row.entity_type,
             deleted_by: parse_uuid(&row.deleted_by, "tombstone.deleted_by")?,
+            deleted_by_device_id: parse_optional_uuid(row.deleted_by_device_id, "tombstone.deleted_by_device_id")?,
             deleted_at: parse_datetime(&row.deleted_at, "tombstone.deleted_at")?,
             operation_id: parse_uuid(&row.operation_id, "tombstone.operation_id")?,
             additional_metadata: row.additional_metadata,
@@ -938,6 +951,48 @@ impl TryFrom<SyncSessionRow> for SyncSession {
             bytes_transferred: row.bytes_transferred,
             network_type: row.network_type,
             duration_seconds: row.duration_seconds,
+        })
+    }
+}
+
+impl TryFrom<SyncConflictRow> for SyncConflict {
+    type Error = DomainError;
+
+    fn try_from(row: SyncConflictRow) -> Result<Self, Self::Error> {
+        // Simplified: Assumes local_change and remote_change can be placeholder or fetched later.
+        // A full implementation would need to reconstruct or fetch these ChangeLogEntry structs.
+        // This is a placeholder conversion as ChangeLogEntry is complex.
+        let placeholder_change_log_entry = ChangeLogEntry {
+            operation_id: Uuid::nil(), // Placeholder
+            entity_table: "".to_string(),
+            entity_id: Uuid::nil(),
+            operation_type: ChangeOperationType::Create, // Placeholder
+            field_name: None,
+            old_value: None,
+            new_value: None,
+            document_metadata: None,
+            timestamp: Utc::now(), // Placeholder
+            user_id: Uuid::nil(), // Placeholder
+            device_id: None, // Placeholder
+            sync_batch_id: None,
+            processed_at: None,
+            sync_error: None,
+        };
+
+        Ok(SyncConflict {
+            conflict_id: parse_uuid(&row.conflict_id, "conflict_id")?,
+            entity_table: row.entity_table,
+            entity_id: parse_uuid(&row.entity_id, "entity_id")?,
+            field_name: row.field_name,
+            local_change: placeholder_change_log_entry.clone(), // Placeholder
+            remote_change: placeholder_change_log_entry, // Placeholder
+            resolution_status: ConflictResolutionStatus::from_str(&row.resolution_status)?,
+            resolution_strategy: row.resolution_strategy.map(|s| ConflictResolutionStrategy::from_str(&s)).transpose()?,
+            resolved_by_user_id: parse_optional_uuid(row.resolved_by_user_id, "resolved_by_user_id")?,
+            resolved_by_device_id: parse_optional_uuid(row.resolved_by_device_id, "resolved_by_device_id")?,
+            resolved_at: parse_optional_datetime(row.resolved_at, "resolved_at")?,
+            created_at: parse_datetime(&row.created_at, "created_at")?,
+            created_by_device_id: parse_optional_uuid(row.created_by_device_id, "created_by_device_id")?,
         })
     }
 }
@@ -996,20 +1051,160 @@ pub type PushChangesResponse = UploadChangesResponse;
 pub type FetchChangesResponse = DownloadChangesResponse;
 
 // ----- Sync Configuration -----
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct SyncConfig {
+    pub id: Uuid,
     pub user_id: Uuid,
+
     pub sync_interval_minutes: i64,
+    pub sync_interval_minutes_updated_at: Option<DateTime<Utc>>,
+    pub sync_interval_minutes_updated_by_user_id: Option<Uuid>,
+    pub sync_interval_minutes_updated_by_device_id: Option<Uuid>,
+
     pub background_sync_enabled: bool,
+    pub background_sync_enabled_updated_at: Option<DateTime<Utc>>,
+    pub background_sync_enabled_updated_by_user_id: Option<Uuid>,
+    pub background_sync_enabled_updated_by_device_id: Option<Uuid>,
+
     pub wifi_only: bool,
+    pub wifi_only_updated_at: Option<DateTime<Utc>>,
+    pub wifi_only_updated_by_user_id: Option<Uuid>,
+    pub wifi_only_updated_by_device_id: Option<Uuid>,
+
     pub charging_only: bool,
+    pub charging_only_updated_at: Option<DateTime<Utc>>,
+    pub charging_only_updated_by_user_id: Option<Uuid>,
+    pub charging_only_updated_by_device_id: Option<Uuid>,
+
     pub sync_priority_threshold: i64,
+    pub sync_priority_threshold_updated_at: Option<DateTime<Utc>>,
+    pub sync_priority_threshold_updated_by_user_id: Option<Uuid>,
+    pub sync_priority_threshold_updated_by_device_id: Option<Uuid>,
+
     pub document_sync_enabled: bool,
+    pub document_sync_enabled_updated_at: Option<DateTime<Utc>>,
+    pub document_sync_enabled_updated_by_user_id: Option<Uuid>,
+    pub document_sync_enabled_updated_by_device_id: Option<Uuid>,
+
     pub metadata_sync_enabled: bool,
+    pub metadata_sync_enabled_updated_at: Option<DateTime<Utc>>,
+    pub metadata_sync_enabled_updated_by_user_id: Option<Uuid>,
+    pub metadata_sync_enabled_updated_by_device_id: Option<Uuid>,
+
     pub server_token: Option<String>,
+    pub server_token_updated_at: Option<DateTime<Utc>>,
+    pub server_token_updated_by_user_id: Option<Uuid>,
+    pub server_token_updated_by_device_id: Option<Uuid>,
+
     pub last_sync_timestamp: Option<DateTime<Utc>>,
+
     pub created_at: DateTime<Utc>,
+    pub created_by_device_id: Option<Uuid>,
     pub updated_at: DateTime<Utc>,
+    pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct SyncConfigRow {
+    pub id: String,
+    pub user_id: String,
+
+    pub sync_interval_minutes: i64,
+    pub sync_interval_minutes_updated_at: Option<String>,
+    pub sync_interval_minutes_updated_by_user_id: Option<String>,
+    pub sync_interval_minutes_updated_by_device_id: Option<String>,
+
+    pub background_sync_enabled: i64,
+    pub background_sync_enabled_updated_at: Option<String>,
+    pub background_sync_enabled_updated_by_user_id: Option<String>,
+    pub background_sync_enabled_updated_by_device_id: Option<String>,
+
+    pub wifi_only: i64,
+    pub wifi_only_updated_at: Option<String>,
+    pub wifi_only_updated_by_user_id: Option<String>,
+    pub wifi_only_updated_by_device_id: Option<String>,
+
+    pub charging_only: i64,
+    pub charging_only_updated_at: Option<String>,
+    pub charging_only_updated_by_user_id: Option<String>,
+    pub charging_only_updated_by_device_id: Option<String>,
+
+    pub sync_priority_threshold: i64,
+    pub sync_priority_threshold_updated_at: Option<String>,
+    pub sync_priority_threshold_updated_by_user_id: Option<String>,
+    pub sync_priority_threshold_updated_by_device_id: Option<String>,
+
+    pub document_sync_enabled: i64,
+    pub document_sync_enabled_updated_at: Option<String>,
+    pub document_sync_enabled_updated_by_user_id: Option<String>,
+    pub document_sync_enabled_updated_by_device_id: Option<String>,
+
+    pub metadata_sync_enabled: i64,
+    pub metadata_sync_enabled_updated_at: Option<String>,
+    pub metadata_sync_enabled_updated_by_user_id: Option<String>,
+    pub metadata_sync_enabled_updated_by_device_id: Option<String>,
+
+    pub server_token: Option<String>,
+    pub server_token_updated_at: Option<String>,
+    pub server_token_updated_by_user_id: Option<String>,
+    pub server_token_updated_by_device_id: Option<String>,
+
+    pub last_sync_timestamp: Option<String>,
+
+    pub created_at: String,
+    pub created_by_device_id: Option<String>,
+    pub updated_at: String,
+    pub updated_by_user_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
+}
+
+impl TryFrom<SyncConfigRow> for SyncConfig {
+    type Error = DomainError;
+    fn try_from(row: SyncConfigRow) -> Result<Self, Self::Error> {
+        Ok(SyncConfig {
+            id: parse_uuid(&row.id, "sync_config.id")?,
+            user_id: parse_uuid(&row.user_id, "sync_config.user_id")?,
+            sync_interval_minutes: row.sync_interval_minutes,
+            sync_interval_minutes_updated_at: parse_optional_datetime(row.sync_interval_minutes_updated_at, "sync_config.sync_interval_minutes_updated_at")?,
+            sync_interval_minutes_updated_by_user_id: parse_optional_uuid(row.sync_interval_minutes_updated_by_user_id, "sync_config.sync_interval_minutes_updated_by_user_id")?,
+            sync_interval_minutes_updated_by_device_id: parse_optional_uuid(row.sync_interval_minutes_updated_by_device_id, "sync_config.sync_interval_minutes_updated_by_device_id")?,
+            background_sync_enabled: row.background_sync_enabled == 1,
+            background_sync_enabled_updated_at: parse_optional_datetime(row.background_sync_enabled_updated_at, "sync_config.background_sync_enabled_updated_at")?,
+            background_sync_enabled_updated_by_user_id: parse_optional_uuid(row.background_sync_enabled_updated_by_user_id, "sync_config.background_sync_enabled_updated_by_user_id")?,
+            background_sync_enabled_updated_by_device_id: parse_optional_uuid(row.background_sync_enabled_updated_by_device_id, "sync_config.background_sync_enabled_updated_by_device_id")?,
+            wifi_only: row.wifi_only == 1,
+            wifi_only_updated_at: parse_optional_datetime(row.wifi_only_updated_at, "sync_config.wifi_only_updated_at")?,
+            wifi_only_updated_by_user_id: parse_optional_uuid(row.wifi_only_updated_by_user_id, "sync_config.wifi_only_updated_by_user_id")?,
+            wifi_only_updated_by_device_id: parse_optional_uuid(row.wifi_only_updated_by_device_id, "sync_config.wifi_only_updated_by_device_id")?,
+            charging_only: row.charging_only == 1,
+            charging_only_updated_at: parse_optional_datetime(row.charging_only_updated_at, "sync_config.charging_only_updated_at")?,
+            charging_only_updated_by_user_id: parse_optional_uuid(row.charging_only_updated_by_user_id, "sync_config.charging_only_updated_by_user_id")?,
+            charging_only_updated_by_device_id: parse_optional_uuid(row.charging_only_updated_by_device_id, "sync_config.charging_only_updated_by_device_id")?,
+            sync_priority_threshold: row.sync_priority_threshold,
+            sync_priority_threshold_updated_at: parse_optional_datetime(row.sync_priority_threshold_updated_at, "sync_config.sync_priority_threshold_updated_at")?,
+            sync_priority_threshold_updated_by_user_id: parse_optional_uuid(row.sync_priority_threshold_updated_by_user_id, "sync_config.sync_priority_threshold_updated_by_user_id")?,
+            sync_priority_threshold_updated_by_device_id: parse_optional_uuid(row.sync_priority_threshold_updated_by_device_id, "sync_config.sync_priority_threshold_updated_by_device_id")?,
+            document_sync_enabled: row.document_sync_enabled == 1,
+            document_sync_enabled_updated_at: parse_optional_datetime(row.document_sync_enabled_updated_at, "sync_config.document_sync_enabled_updated_at")?,
+            document_sync_enabled_updated_by_user_id: parse_optional_uuid(row.document_sync_enabled_updated_by_user_id, "sync_config.document_sync_enabled_updated_by_user_id")?,
+            document_sync_enabled_updated_by_device_id: parse_optional_uuid(row.document_sync_enabled_updated_by_device_id, "sync_config.document_sync_enabled_updated_by_device_id")?,
+            metadata_sync_enabled: row.metadata_sync_enabled == 1,
+            metadata_sync_enabled_updated_at: parse_optional_datetime(row.metadata_sync_enabled_updated_at, "sync_config.metadata_sync_enabled_updated_at")?,
+            metadata_sync_enabled_updated_by_user_id: parse_optional_uuid(row.metadata_sync_enabled_updated_by_user_id, "sync_config.metadata_sync_enabled_updated_by_user_id")?,
+            metadata_sync_enabled_updated_by_device_id: parse_optional_uuid(row.metadata_sync_enabled_updated_by_device_id, "sync_config.metadata_sync_enabled_updated_by_device_id")?,
+            server_token: row.server_token,
+            server_token_updated_at: parse_optional_datetime(row.server_token_updated_at, "sync_config.server_token_updated_at")?,
+            server_token_updated_by_user_id: parse_optional_uuid(row.server_token_updated_by_user_id, "sync_config.server_token_updated_by_user_id")?,
+            server_token_updated_by_device_id: parse_optional_uuid(row.server_token_updated_by_device_id, "sync_config.server_token_updated_by_device_id")?,
+            last_sync_timestamp: parse_optional_datetime(row.last_sync_timestamp, "sync_config.last_sync_timestamp")?,
+            created_at: parse_datetime(&row.created_at, "sync_config.created_at")?,
+            created_by_device_id: parse_optional_uuid(row.created_by_device_id, "sync_config.created_by_device_id")?,
+            updated_at: parse_datetime(&row.updated_at, "sync_config.updated_at")?,
+            updated_by_user_id: parse_optional_uuid(row.updated_by_user_id, "sync_config.updated_by_user_id")?,
+            updated_by_device_id: parse_optional_uuid(row.updated_by_device_id, "sync_config.updated_by_device_id")?,
+        })
+    }
 }
 
 // ----- Sync Status Overview -----

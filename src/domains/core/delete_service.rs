@@ -54,7 +54,12 @@ impl PendingDeletionManager {
 
     /// Commits pending deletions for an operation ID to the file_deletion_queue.
     /// This is typically called after the main database transaction has successfully committed.
-    pub async fn commit_deletions(&self, operation_id: Uuid, requested_by_user_id: Uuid) -> DomainResult<()> {
+    pub async fn commit_deletions(
+        &self, 
+        operation_id: Uuid, 
+        requested_by_user_id: Uuid,
+        requested_by_device_id: &str, // Added parameter
+    ) -> DomainResult<()> {
         let mut pending_map = self.pending_deletions.write().await;
         if let Some(deletions_to_commit) = pending_map.remove(&operation_id) {
             if deletions_to_commit.is_empty() {
@@ -64,6 +69,7 @@ impl PendingDeletionManager {
             // Start a new transaction for inserting into the file_deletion_queue
             let mut queue_tx = self.pool.begin().await.map_err(DbError::from)?;
             let requested_by_user_id_str = requested_by_user_id.to_string();
+            // let requested_by_device_id_str = requested_by_device_id.to_string(); // device_id is already &str
 
             for deletion in deletions_to_commit {
                 let queue_id_str = Uuid::new_v4().to_string();
@@ -79,9 +85,10 @@ impl PendingDeletionManager {
                         compressed_file_path,
                         requested_at,
                         requested_by,
+                        requested_by_device_id, 
                         grace_period_seconds
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     "#,
                     queue_id_str,
                     doc_id_str,
@@ -89,6 +96,7 @@ impl PendingDeletionManager {
                     deletion.compressed_file_path,
                     now_str,
                     requested_by_user_id_str,
+                    requested_by_device_id, // Bind new parameter
                     86400 // 24 hour grace period
                 )
                 .execute(&mut *queue_tx) // Changed &mut **tx to &mut *queue_tx
@@ -240,7 +248,7 @@ where
     async fn get_failed_delete_details(
         &self,
         batch_result: &BatchDeleteResult,
-        auth: &AuthContext,
+        _auth: &AuthContext,
     ) -> DomainResult<Vec<FailedDeleteDetail<E>>>;
 }
 
@@ -315,7 +323,7 @@ where
                     related_id = ? AND 
                     deleted_at IS NULL
                 "#,
-                parent_table_name,
+                parent_table_name, 
                 parent_id_str // Use the variable here
             )
              .fetch_all(&mut **tx) // Use the transaction
@@ -339,7 +347,12 @@ where
                     // --- HARD DELETE PATH ---
                     
                     // 1. Create tombstone for the document
-                    let mut tombstone = Tombstone::new(doc_id, media_repo.entity_name(), auth.user_id);
+                    let mut tombstone = Tombstone::new(
+                        doc_id, 
+                        HardDeletable::entity_name(media_repo.as_ref()), 
+                        auth.user_id,
+                        parse_device_id(&auth.device_id) // Corrected: Pass Option<Uuid>
+                    );
                     
                     // 2. Add additional metadata for sync/cleanup tracking
                     let metadata = serde_json::json!({
@@ -360,7 +373,7 @@ where
                     // 4. Create change log entry for the document's hard delete
                      let change_log = ChangeLogEntry {
                         operation_id: operation_id_for_changelog, // Use tombstone's ID
-                        entity_table: media_repo.entity_name().to_string(),
+                        entity_table: HardDeletable::entity_name(media_repo.as_ref()).to_string(),
                         entity_id: doc_id,
                         operation_type: ChangeOperationType::HardDelete,
                         field_name: None, 
@@ -469,7 +482,7 @@ where
         }
 
         // 2. Dependency Check
-        let table_name = self.repo.entity_name();
+        let table_name = self.repo.entity_name(); // Corrected: Use instance method
         let all_dependencies = self.dependency_checker.check_dependencies(table_name, id).await?;
         
         let blocking_dependencies: Vec<String> = all_dependencies
@@ -492,14 +505,19 @@ where
 
             let hard_delete_result = async {
                 // Create tombstone
-                let tombstone = Tombstone::new(id, self.repo.entity_name(), auth.user_id);
+                let tombstone = Tombstone::new(
+                    id, 
+                    self.repo.entity_name(), // Corrected: Use instance method
+                    auth.user_id,
+                    parse_device_id(&auth.device_id) // Corrected: Pass Option<Uuid>
+                );
                 let operation_id_for_changelog = tombstone.operation_id; // Capture for changelog
                 self.tombstone_repo.create_tombstone_with_tx(&tombstone, &mut tx).await?;
 
                 // Create change log entry for HardDelete
                 let change_log = ChangeLogEntry {
                     operation_id: operation_id_for_changelog, // Use same ID as tombstone
-                    entity_table: self.repo.entity_name().to_string(),
+                    entity_table: self.repo.entity_name().to_string(), // Corrected: Use instance method
                     entity_id: id,
                     operation_type: ChangeOperationType::HardDelete,
                     field_name: None,
@@ -528,7 +546,7 @@ where
                 Ok(_) => {
                     tx.commit().await.map_err(DbError::from)?;
                     // If DB commit is successful, commit the document deletions to the queue
-                    self.deletion_manager.commit_deletions(pending_delete_operation_id, auth.user_id).await?;
+                    self.deletion_manager.commit_deletions(pending_delete_operation_id, auth.user_id, &auth.device_id).await?; // Corrected: Pass &auth.device_id
                     Ok(DeleteResult::HardDeleted)
                 },
                 Err(e @ DomainError::EntityNotFound(_, _)) => {
@@ -546,35 +564,62 @@ where
             }
 
         } else {
-            // --- Soft Delete or Prevent Path --- 
-            if !blocking_dependencies.is_empty() && !options.fallback_to_soft_delete {
-                return Ok(DeleteResult::DependenciesPrevented { dependencies: blocking_dependencies });
-            }
+            // --- Soft Delete Path (or fallback if hard delete not allowed/failed due to non-forced deps) ---
+            // Ensure we only attempt soft delete if it's allowed by options or is a fallback
+            let should_soft_delete = options.fallback_to_soft_delete || !options.allow_hard_delete;
 
-            let mut tx = self.pool.begin().await.map_err(DbError::from)?; 
+            if !blocking_dependencies.is_empty() && !options.force && should_soft_delete {
+                // Dependencies exist, hard delete not forced, soft delete is allowed/fallback
+                let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+                let soft_delete_res = async {
+                    self.repo.soft_delete_with_tx(id, auth, &mut tx).await?;
+                    // NOTE: Removed ChangeLogEntry creation for soft delete as per user request.
+                    // Soft delete related documents as well
+                    self.cascade_delete_documents::<E>(table_name, id, false, auth, &mut tx, pending_delete_operation_id).await?;
+                    Ok::<_, DomainError>(())
+                }.await;
 
-            let soft_delete_result = self.repo.soft_delete_with_tx(id, auth, &mut tx).await;
-
-            match soft_delete_result {
-                Ok(_) => {
-                     // For soft delete, document files are not queued for physical deletion immediately.
-                     // The cascade_delete_documents for soft delete path handles DB record changes.
-                     // The pending_delete_operation_id is passed but won't be used by add_pending if hard_delete is false.
-                     self.cascade_delete_documents::<E>(table_name, id, false, auth, &mut tx, pending_delete_operation_id).await?;
-
-                    tx.commit().await.map_err(DbError::from)?; 
-                    Ok(DeleteResult::SoftDeleted { dependencies: blocking_dependencies })
-                },
-                Err(e @ DomainError::EntityNotFound(_, _)) => {
-                    let _ = tx.rollback().await;
-                    // No pending physical deletions to discard for soft delete path
-                    Err(e) 
-                },
-                Err(e) => {
-                    let _ = tx.rollback().await; 
-                    // No pending physical deletions to discard for soft delete path
-                    Err(e) 
+                match soft_delete_res {
+                    Ok(_) => {
+                        tx.commit().await.map_err(DbError::from)?;
+                        // For soft deletes due to dependencies, we don't commit file deletions from PendingDeletionManager immediately
+                        // We discard them as the files are still needed for the soft-deleted record.
+                        self.deletion_manager.discard_deletions(pending_delete_operation_id).await;
+                        Ok(DeleteResult::SoftDeleted { dependencies: blocking_dependencies }) // Corrected variant
+                    },
+                    Err(e) => {
+                        tx.rollback().await.map_err(DbError::from)?;
+                        self.deletion_manager.discard_deletions(pending_delete_operation_id).await;
+                        Err(e)
+                    }
                 }
+            } else if blocking_dependencies.is_empty() && !options.allow_hard_delete && should_soft_delete {
+                 // No blocking dependencies, but hard delete not allowed by options (e.g. user not admin)
+                 // Proceed with soft delete if it's the primary intention or fallback.
+                let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+                let soft_delete_res = async {
+                    self.repo.soft_delete_with_tx(id, auth, &mut tx).await?;
+                    // NOTE: Removed ChangeLogEntry creation for soft delete as per user request.
+                    self.cascade_delete_documents::<E>(table_name, id, false, auth, &mut tx, pending_delete_operation_id).await?;
+                    Ok::<_, DomainError>(())
+                }.await;
+                match soft_delete_res {
+                    Ok(_) => {
+                        tx.commit().await.map_err(DbError::from)?;
+                        self.deletion_manager.discard_deletions(pending_delete_operation_id).await; // Discard as files are kept for soft delete
+                        Ok(DeleteResult::SoftDeleted { dependencies: Vec::new() }) // Corrected variant
+                    },
+                    Err(e) => {
+                        tx.rollback().await.map_err(DbError::from)?;
+                        self.deletion_manager.discard_deletions(pending_delete_operation_id).await;
+                        Err(e)
+                    }
+                }
+            } else {
+                // Cannot delete due to dependencies and not forcing, or soft delete not an option
+                // We still discard any pending document deletions as the main operation failed.
+                self.deletion_manager.discard_deletions(pending_delete_operation_id).await;
+                Ok(DeleteResult::DependenciesPrevented { dependencies: blocking_dependencies }) // Corrected: Return Ok with appropriate variant
             }
         }
     }
@@ -646,7 +691,7 @@ where
         }
         
         // Check for dependencies
-        let table_name = self.repo.entity_name();
+        let table_name = self.repo.entity_name(); // Corrected: Use instance method
         let dependencies = self.dependency_checker().check_dependencies(table_name, id).await?;
         
         // If no dependencies, just do a normal hard delete
@@ -683,10 +728,10 @@ where
     async fn get_failed_delete_details(
         &self,
         batch_result: &BatchDeleteResult,
-        auth: &AuthContext,
+        _auth: &AuthContext,
     ) -> DomainResult<Vec<FailedDeleteDetail<E>>> {
         let mut details = Vec::new();
-        let entity_type_name = self.repo.entity_name().to_string();
+        let entity_type_name = self.repo.entity_name().to_string(); // Corrected: Use instance method
 
         for &id in &batch_result.failed {
             // Attempt to fetch the entity data (might fail if already deleted or never existed)
@@ -721,7 +766,7 @@ where
                          (FailureReason::Unknown, Vec::new())
                     }
                 },
-                 _ => (FailureReason::Unknown, Vec::new()), // Catch-all for other DomainErrors
+                 // _ => (FailureReason::Unknown, Vec::new()), // This arm is unreachable and removed
             };
 
             details.push(FailedDeleteDetail {

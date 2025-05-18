@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE sync_configs\n            SET server_token = ?,\n                updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \n            WHERE user_id = ? \n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "89929c3fa35b3bcde81e1ba7778d63b1bf750be7ce105fdbf592162dcda01307"
+}

@@ -222,12 +222,14 @@ impl SoftDeletable for SqliteParticipantRepository {
         let now_str = now.to_rfc3339();
         let deleted_by = auth.user_id;
         let deleted_by_str = deleted_by.to_string();
+        let deleted_by_device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
         
         let result = query(
-            "UPDATE participants SET deleted_at = ?, deleted_by_user_id = ? WHERE id = ? AND deleted_at IS NULL"
+            "UPDATE participants SET deleted_at = ?, deleted_by_user_id = ?, deleted_by_device_id = ? WHERE id = ? AND deleted_at IS NULL"
         )
         .bind(now_str)
         .bind(deleted_by_str)
+        .bind(deleted_by_device_id_str)
         .bind(id.to_string())
         .execute(&mut **tx) 
         .await
@@ -329,6 +331,7 @@ impl ParticipantRepository for SqliteParticipantRepository {
         let user_id = auth.user_id;
         let user_id_str = user_id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
         let created_by_id_str = new_participant.created_by_user_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| user_id_str.clone());
@@ -337,39 +340,42 @@ impl ParticipantRepository for SqliteParticipantRepository {
             r#"
             INSERT INTO participants (
                 id, 
-                name, name_updated_at, name_updated_by,
-                gender, gender_updated_at, gender_updated_by,
-                disability, disability_updated_at, disability_updated_by,
-                disability_type, disability_type_updated_at, disability_type_updated_by,
-                age_group, age_group_updated_at, age_group_updated_by,
-                location, location_updated_at, location_updated_by,
+                name, name_updated_at, name_updated_by, name_updated_by_device_id,
+                gender, gender_updated_at, gender_updated_by, gender_updated_by_device_id,
+                disability, disability_updated_at, disability_updated_by, disability_updated_by_device_id,
+                disability_type, disability_type_updated_at, disability_type_updated_by, disability_type_updated_by_device_id,
+                age_group, age_group_updated_at, age_group_updated_by, age_group_updated_by_device_id,
+                location, location_updated_at, location_updated_by, location_updated_by_device_id,
                 sync_priority, 
                 created_at, updated_at, created_by_user_id, updated_by_user_id,
-                deleted_at, deleted_by_user_id
+                created_by_device_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
             ) VALUES (
                 ?, 
-                ?, ?, ?, 
-                ?, ?, ?, 
-                ?, ?, ?, 
-                ?, ?, ?, 
-                ?, ?, ?, 
-                ?, ?, ?, 
+                ?, ?, ?, ?, 
+                ?, ?, ?, ?, 
+                ?, ?, ?, ?, 
+                ?, ?, ?, ?, 
+                ?, ?, ?, ?, 
+                ?, ?, ?, ?, 
                 ?, 
                 ?, ?, ?, ?, 
-                NULL, NULL
+                ?, ?,
+                NULL, NULL, NULL
             )
             "#,
         )
         .bind(id.to_string())
-        .bind(&new_participant.name).bind(&now_str).bind(&user_id_str) // Name LWW
-        .bind(&new_participant.gender).bind(new_participant.gender.as_ref().map(|_| &now_str)).bind(new_participant.gender.as_ref().map(|_| &user_id_str)) // Gender LWW
-        .bind(new_participant.disability.unwrap_or(false)).bind(new_participant.disability.map(|_| &now_str)).bind(new_participant.disability.map(|_| &user_id_str)) // Disability LWW
-        .bind(&new_participant.disability_type).bind(new_participant.disability_type.as_ref().map(|_| &now_str)).bind(new_participant.disability_type.as_ref().map(|_| &user_id_str)) // Disability Type LWW
-        .bind(&new_participant.age_group).bind(new_participant.age_group.as_ref().map(|_| &now_str)).bind(new_participant.age_group.as_ref().map(|_| &user_id_str)) // Age Group LWW
-        .bind(&new_participant.location).bind(new_participant.location.as_ref().map(|_| &now_str)).bind(new_participant.location.as_ref().map(|_| &user_id_str)) // Location LWW
+        .bind(&new_participant.name).bind(&now_str).bind(&user_id_str).bind(&device_id_str) // Name LWW
+        .bind(&new_participant.gender).bind(new_participant.gender.as_ref().map(|_| &now_str)).bind(new_participant.gender.as_ref().map(|_| &user_id_str)).bind(new_participant.gender.as_ref().map(|_| &device_id_str)) // Gender LWW
+        .bind(new_participant.disability.unwrap_or(false)).bind(new_participant.disability.map(|_| &now_str)).bind(new_participant.disability.map(|_| &user_id_str)).bind(new_participant.disability.map(|_| &device_id_str)) // Disability LWW
+        .bind(&new_participant.disability_type).bind(new_participant.disability_type.as_ref().map(|_| &now_str)).bind(new_participant.disability_type.as_ref().map(|_| &user_id_str)).bind(new_participant.disability_type.as_ref().map(|_| &device_id_str)) // Disability Type LWW
+        .bind(&new_participant.age_group).bind(new_participant.age_group.as_ref().map(|_| &now_str)).bind(new_participant.age_group.as_ref().map(|_| &user_id_str)).bind(new_participant.age_group.as_ref().map(|_| &device_id_str)) // Age Group LWW
+        .bind(&new_participant.location).bind(new_participant.location.as_ref().map(|_| &now_str)).bind(new_participant.location.as_ref().map(|_| &user_id_str)).bind(new_participant.location.as_ref().map(|_| &device_id_str)) // Location LWW
         .bind(new_participant.sync_priority.unwrap_or_default().as_str()) // sync_priority as TEXT
         .bind(&now_str).bind(&now_str) // created_at, updated_at
         .bind(&created_by_id_str).bind(&user_id_str) // created_by, updated_by
+        .bind(&device_id_str).bind(&device_id_str) // created_by_device_id, updated_by_device_id
         .execute(&mut **tx)
         .await
         .map_err(DbError::from)?;
@@ -432,6 +438,7 @@ impl ParticipantRepository for SqliteParticipantRepository {
         let user_id_str = user_id.to_string();
         let id_str = id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
 
         let mut builder = QueryBuilder::new("UPDATE participants SET ");
         let mut separated = builder.separated(", ");
@@ -447,6 +454,8 @@ impl ParticipantRepository for SqliteParticipantRepository {
                     separated.push_bind_unseparated(now_str.clone()); // Bind timestamp
                     separated.push(concat!(" ", $field_sql, "_updated_by = "));
                     separated.push_bind_unseparated(user_id_str.clone()); // Bind user
+                    separated.push(concat!(" ", $field_sql, "_updated_by_device_id = "));
+                    separated.push_bind_unseparated(device_id_str.clone()); // Bind device_id
                     fields_updated = true; // Mark SQL update needed
                 }
             };
@@ -460,6 +469,8 @@ impl ParticipantRepository for SqliteParticipantRepository {
             separated.push_bind_unseparated(now_str.clone());
             separated.push(" disability_updated_by = ");
             separated.push_bind_unseparated(user_id_str.clone());
+            separated.push(" disability_updated_by_device_id = ");
+            separated.push_bind_unseparated(device_id_str.clone());
             fields_updated = true;
         }
 
@@ -487,6 +498,8 @@ impl ParticipantRepository for SqliteParticipantRepository {
         separated.push_bind_unseparated(now_str.clone());
         separated.push("updated_by_user_id = ");
         separated.push_bind_unseparated(user_id_str.clone());
+        separated.push("updated_by_device_id = ");
+        separated.push_bind_unseparated(device_id_str.clone());
 
         // --- Finalize and Execute SQL --- 
         builder.push(" WHERE id = ");
@@ -624,12 +637,14 @@ impl ParticipantRepository for SqliteParticipantRepository {
         let user_id = auth.user_id;
         let user_id_str = user_id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
         let priority_str = priority.as_str();
         
         let mut update_builder = QueryBuilder::new("UPDATE participants SET ");
         update_builder.push("sync_priority = "); update_builder.push_bind(priority_str);
         update_builder.push(", updated_at = "); update_builder.push_bind(now_str.clone());
         update_builder.push(", updated_by_user_id = "); update_builder.push_bind(user_id_str.clone());
+        update_builder.push(", updated_by_device_id = "); update_builder.push_bind(device_id_str.clone());
         update_builder.push(" WHERE id IN (");
         let mut id_separated = update_builder.separated(",");
         for id in ids { id_separated.push_bind(id.to_string()); }

@@ -1,4 +1,4 @@
-use crate::errors::{DomainError, DomainResult};
+use crate::errors::{DomainError, DomainResult, ValidationError};
 use crate::validation::{Validate, ValidationBuilder};
 use uuid::Uuid;
 use chrono::{DateTime, Utc, NaiveDate};
@@ -9,6 +9,7 @@ use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetada
 use std::collections::{HashSet, HashMap};
 use crate::domains::funding::types::ProjectFundingSummary;
 use crate::domains::document::types::MediaDocumentResponse;
+use crate::domains::sync::types::SyncPriority;
 
 /// Donor type enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,33 +57,44 @@ pub struct Donor {
     pub name: String,
     pub name_updated_at: Option<DateTime<Utc>>,
     pub name_updated_by: Option<Uuid>,
+    pub name_updated_by_device_id: Option<Uuid>,
     pub type_: Option<String>, // Using type_ to avoid reserved keyword
     pub type_updated_at: Option<DateTime<Utc>>,
     pub type_updated_by: Option<Uuid>,
+    pub type_updated_by_device_id: Option<Uuid>,
     pub contact_person: Option<String>,
     pub contact_person_updated_at: Option<DateTime<Utc>>,
     pub contact_person_updated_by: Option<Uuid>,
+    pub contact_person_updated_by_device_id: Option<Uuid>,
     pub email: Option<String>,
     pub email_updated_at: Option<DateTime<Utc>>,
     pub email_updated_by: Option<Uuid>,
+    pub email_updated_by_device_id: Option<Uuid>,
     pub phone: Option<String>,
     pub phone_updated_at: Option<DateTime<Utc>>,
     pub phone_updated_by: Option<Uuid>,
+    pub phone_updated_by_device_id: Option<Uuid>,
     pub country: Option<String>,
     pub country_updated_at: Option<DateTime<Utc>>,
     pub country_updated_by: Option<Uuid>,
+    pub country_updated_by_device_id: Option<Uuid>,
     pub first_donation_date: Option<String>, // ISO date format YYYY-MM-DD
     pub first_donation_date_updated_at: Option<DateTime<Utc>>,
     pub first_donation_date_updated_by: Option<Uuid>,
+    pub first_donation_date_updated_by_device_id: Option<Uuid>,
     pub notes: Option<String>,
     pub notes_updated_at: Option<DateTime<Utc>>,
     pub notes_updated_by: Option<Uuid>,
+    pub notes_updated_by_device_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
     pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
 }
 
 impl Donor {
@@ -241,109 +253,110 @@ pub struct DonorRow {
     pub name: String,
     pub name_updated_at: Option<String>,
     pub name_updated_by: Option<String>,
+    pub name_updated_by_device_id: Option<String>,
     pub type_: Option<String>,
     pub type_updated_at: Option<String>,
     pub type_updated_by: Option<String>,
+    pub type_updated_by_device_id: Option<String>,
     pub contact_person: Option<String>,
     pub contact_person_updated_at: Option<String>,
     pub contact_person_updated_by: Option<String>,
+    pub contact_person_updated_by_device_id: Option<String>,
     pub email: Option<String>,
     pub email_updated_at: Option<String>,
     pub email_updated_by: Option<String>,
+    pub email_updated_by_device_id: Option<String>,
     pub phone: Option<String>,
     pub phone_updated_at: Option<String>,
     pub phone_updated_by: Option<String>,
+    pub phone_updated_by_device_id: Option<String>,
     pub country: Option<String>,
     pub country_updated_at: Option<String>,
     pub country_updated_by: Option<String>,
+    pub country_updated_by_device_id: Option<String>,
     pub first_donation_date: Option<String>,
     pub first_donation_date_updated_at: Option<String>,
     pub first_donation_date_updated_by: Option<String>,
+    pub first_donation_date_updated_by_device_id: Option<String>,
     pub notes: Option<String>,
     pub notes_updated_at: Option<String>,
     pub notes_updated_by: Option<String>,
+    pub notes_updated_by_device_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
+    pub created_by_device_id: Option<String>,
     pub updated_by_user_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
 }
 
 impl DonorRow {
     /// Convert database row to domain entity
     pub fn into_entity(self) -> DomainResult<Donor> {
-        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
-            s.as_ref().map(|id| {
-                Uuid::parse_str(id).map_err(|_| DomainError::InvalidUuid(id.clone()))
-            })
+        let parse_optional_uuid = |s: &Option<String>, field_name: &str| -> DomainResult<Option<Uuid>> {
+            match s {
+                Some(id_str) => Uuid::parse_str(id_str)
+                    .map(Some)
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid UUID format: {}", id_str)))),
+                None => Ok(None),
+            }
         };
-        
-        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
-            s.as_ref().map(|dt| {
-                DateTime::parse_from_rfc3339(dt)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", dt)))
-            })
+        let parse_datetime = |s: &str, field_name: &str| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", s))));
+        let parse_optional_datetime = |s: &Option<String>, field_name: &str| -> DomainResult<Option<DateTime<Utc>>> {
+            match s {
+                Some(dt_str) => DateTime::parse_from_rfc3339(dt_str)
+                    .map(|dt| Some(dt.with_timezone(&Utc)))
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", dt_str)))),
+                None => Ok(None),
+            }
         };
-        
+
         Ok(Donor {
-            id: Uuid::parse_str(&self.id)
-                .map_err(|_| DomainError::InvalidUuid(self.id))?,
+            id: Uuid::parse_str(&self.id).map_err(|_| DomainError::Validation(ValidationError::format("id", &format!("Invalid UUID format: {}", self.id))))?,
             name: self.name,
-            name_updated_at: parse_datetime(&self.name_updated_at)
-                .transpose()?,
-            name_updated_by: parse_uuid(&self.name_updated_by)
-                .transpose()?,
+            name_updated_at: parse_optional_datetime(&self.name_updated_at, "name_updated_at")?,
+            name_updated_by: parse_optional_uuid(&self.name_updated_by, "name_updated_by")?,
+            name_updated_by_device_id: parse_optional_uuid(&self.name_updated_by_device_id, "name_updated_by_device_id")?,
             type_: self.type_,
-            type_updated_at: parse_datetime(&self.type_updated_at)
-                .transpose()?,
-            type_updated_by: parse_uuid(&self.type_updated_by)
-                .transpose()?,
+            type_updated_at: parse_optional_datetime(&self.type_updated_at, "type_updated_at")?,
+            type_updated_by: parse_optional_uuid(&self.type_updated_by, "type_updated_by")?,
+            type_updated_by_device_id: parse_optional_uuid(&self.type_updated_by_device_id, "type_updated_by_device_id")?,
             contact_person: self.contact_person,
-            contact_person_updated_at: parse_datetime(&self.contact_person_updated_at)
-                .transpose()?,
-            contact_person_updated_by: parse_uuid(&self.contact_person_updated_by)
-                .transpose()?,
+            contact_person_updated_at: parse_optional_datetime(&self.contact_person_updated_at, "contact_person_updated_at")?,
+            contact_person_updated_by: parse_optional_uuid(&self.contact_person_updated_by, "contact_person_updated_by")?,
+            contact_person_updated_by_device_id: parse_optional_uuid(&self.contact_person_updated_by_device_id, "contact_person_updated_by_device_id")?,
             email: self.email,
-            email_updated_at: parse_datetime(&self.email_updated_at)
-                .transpose()?,
-            email_updated_by: parse_uuid(&self.email_updated_by)
-                .transpose()?,
+            email_updated_at: parse_optional_datetime(&self.email_updated_at, "email_updated_at")?,
+            email_updated_by: parse_optional_uuid(&self.email_updated_by, "email_updated_by")?,
+            email_updated_by_device_id: parse_optional_uuid(&self.email_updated_by_device_id, "email_updated_by_device_id")?,
             phone: self.phone,
-            phone_updated_at: parse_datetime(&self.phone_updated_at)
-                .transpose()?,
-            phone_updated_by: parse_uuid(&self.phone_updated_by)
-                .transpose()?,
+            phone_updated_at: parse_optional_datetime(&self.phone_updated_at, "phone_updated_at")?,
+            phone_updated_by: parse_optional_uuid(&self.phone_updated_by, "phone_updated_by")?,
+            phone_updated_by_device_id: parse_optional_uuid(&self.phone_updated_by_device_id, "phone_updated_by_device_id")?,
             country: self.country,
-            country_updated_at: parse_datetime(&self.country_updated_at)
-                .transpose()?,
-            country_updated_by: parse_uuid(&self.country_updated_by)
-                .transpose()?,
+            country_updated_at: parse_optional_datetime(&self.country_updated_at, "country_updated_at")?,
+            country_updated_by: parse_optional_uuid(&self.country_updated_by, "country_updated_by")?,
+            country_updated_by_device_id: parse_optional_uuid(&self.country_updated_by_device_id, "country_updated_by_device_id")?,
             first_donation_date: self.first_donation_date,
-            first_donation_date_updated_at: parse_datetime(&self.first_donation_date_updated_at)
-                .transpose()?,
-            first_donation_date_updated_by: parse_uuid(&self.first_donation_date_updated_by)
-                .transpose()?,
+            first_donation_date_updated_at: parse_optional_datetime(&self.first_donation_date_updated_at, "first_donation_date_updated_at")?,
+            first_donation_date_updated_by: parse_optional_uuid(&self.first_donation_date_updated_by, "first_donation_date_updated_by")?,
+            first_donation_date_updated_by_device_id: parse_optional_uuid(&self.first_donation_date_updated_by_device_id, "first_donation_date_updated_by_device_id")?,
             notes: self.notes,
-            notes_updated_at: parse_datetime(&self.notes_updated_at)
-                .transpose()?,
-            notes_updated_by: parse_uuid(&self.notes_updated_by)
-                .transpose()?,
-            created_at: DateTime::parse_from_rfc3339(&self.created_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.created_at)))?,
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.updated_at)))?,
-            created_by_user_id: parse_uuid(&self.created_by_user_id)
-                .transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id)
-                .transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at)
-                .transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id)
-                .transpose()?,
+            notes_updated_at: parse_optional_datetime(&self.notes_updated_at, "notes_updated_at")?,
+            notes_updated_by: parse_optional_uuid(&self.notes_updated_by, "notes_updated_by")?,
+            notes_updated_by_device_id: parse_optional_uuid(&self.notes_updated_by_device_id, "notes_updated_by_device_id")?,
+            created_at: parse_datetime(&self.created_at, "created_at")?,
+            updated_at: parse_datetime(&self.updated_at, "updated_at")?,
+            created_by_user_id: parse_optional_uuid(&self.created_by_user_id, "created_by_user_id")?,
+            created_by_device_id: parse_optional_uuid(&self.created_by_device_id, "created_by_device_id")?,
+            updated_by_user_id: parse_optional_uuid(&self.updated_by_user_id, "updated_by_user_id")?,
+            updated_by_device_id: parse_optional_uuid(&self.updated_by_device_id, "updated_by_device_id")?,
+            deleted_at: parse_optional_datetime(&self.deleted_at, "deleted_at")?,
+            deleted_by_user_id: parse_optional_uuid(&self.deleted_by_user_id, "deleted_by_user_id")?,
+            deleted_by_device_id: parse_optional_uuid(&self.deleted_by_device_id, "deleted_by_device_id")?,
         })
     }
 }

@@ -13,23 +13,30 @@ pub struct User {
     pub email: String,
     pub email_updated_at: Option<DateTime<Utc>>,
     pub email_updated_by: Option<Uuid>,
+    pub email_updated_by_device_id: Option<Uuid>,
     pub password_hash: String,
     pub name: String,
     pub name_updated_at: Option<DateTime<Utc>>,
     pub name_updated_by: Option<Uuid>,
+    pub name_updated_by_device_id: Option<Uuid>,
     pub role: UserRole,
     pub role_updated_at: Option<DateTime<Utc>>,
     pub role_updated_by: Option<Uuid>,
+    pub role_updated_by_device_id: Option<Uuid>,
     pub last_login: Option<DateTime<Utc>>,
     pub active: bool,
     pub active_updated_at: Option<DateTime<Utc>>,
     pub active_updated_by: Option<Uuid>,
+    pub active_updated_by_device_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
     pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
 }
 
 impl User {
@@ -180,23 +187,30 @@ pub struct UserRow {
     pub email: String,
     pub email_updated_at: Option<String>,
     pub email_updated_by: Option<String>,
+    pub email_updated_by_device_id: Option<String>,
     pub password_hash: String,
     pub name: String,
     pub name_updated_at: Option<String>,
     pub name_updated_by: Option<String>,
+    pub name_updated_by_device_id: Option<String>,
     pub role: String,
     pub role_updated_at: Option<String>,
     pub role_updated_by: Option<String>,
+    pub role_updated_by_device_id: Option<String>,
     pub last_login: Option<String>,
     pub active: i64,
     pub active_updated_at: Option<String>,
     pub active_updated_by: Option<String>,
+    pub active_updated_by_device_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
+    pub created_by_device_id: Option<String>,
     pub updated_by_user_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
 }
 
 impl UserRow {
@@ -206,6 +220,18 @@ impl UserRow {
             s.as_ref().map(|id| {
                 Uuid::parse_str(id).map_err(|_| DomainError::InvalidUuid(id.clone()))
             })
+        };
+        
+        // Helper to parse optional UUID string, specific for device IDs to give clearer error context
+        let parse_optional_uuid = |s: &Option<String>, field_name: &str| -> DomainResult<Option<Uuid>> {
+            match s {
+                Some(id_str) => Uuid::parse_str(id_str)
+                    .map(Some)
+                    .map_err(|_| DomainError::Validation(crate::errors::ValidationError::format(
+                        field_name, &format!("Invalid UUID format for {}: {}", field_name, id_str)
+                    ))),
+                None => Ok(None),
+            }
         };
         
         let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
@@ -224,18 +250,21 @@ impl UserRow {
                 .transpose()?,
             email_updated_by: parse_uuid(&self.email_updated_by)
                 .transpose()?,
+            email_updated_by_device_id: parse_optional_uuid(&self.email_updated_by_device_id, "email_updated_by_device_id")?,
             password_hash: self.password_hash,
             name: self.name,
             name_updated_at: parse_datetime(&self.name_updated_at)
                 .transpose()?,
             name_updated_by: parse_uuid(&self.name_updated_by)
                 .transpose()?,
+            name_updated_by_device_id: parse_optional_uuid(&self.name_updated_by_device_id, "name_updated_by_device_id")?,
             role: UserRole::from_str(&self.role)
                 .ok_or_else(|| DomainError::Internal(format!("Invalid role: {}", self.role)))?,
             role_updated_at: parse_datetime(&self.role_updated_at)
                 .transpose()?,
             role_updated_by: parse_uuid(&self.role_updated_by)
                 .transpose()?,
+            role_updated_by_device_id: parse_optional_uuid(&self.role_updated_by_device_id, "role_updated_by_device_id")?,
             last_login: parse_datetime(&self.last_login)
                 .transpose()?,
             active: self.active != 0,
@@ -243,6 +272,7 @@ impl UserRow {
                 .transpose()?,
             active_updated_by: parse_uuid(&self.active_updated_by)
                 .transpose()?,
+            active_updated_by_device_id: parse_optional_uuid(&self.active_updated_by_device_id, "active_updated_by_device_id")?,
             created_at: DateTime::parse_from_rfc3339(&self.created_at)
                 .map(|dt| dt.with_timezone(&Utc))
                 .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.created_at)))?,
@@ -251,12 +281,15 @@ impl UserRow {
                 .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.updated_at)))?,
             created_by_user_id: parse_uuid(&self.created_by_user_id)
                 .transpose()?,
+            created_by_device_id: parse_optional_uuid(&self.created_by_device_id, "created_by_device_id")?,
             updated_by_user_id: parse_uuid(&self.updated_by_user_id)
                 .transpose()?,
+            updated_by_device_id: parse_optional_uuid(&self.updated_by_device_id, "updated_by_device_id")?,
             deleted_at: parse_datetime(&self.deleted_at)
                 .transpose()?,
             deleted_by_user_id: parse_uuid(&self.deleted_by_user_id)
                 .transpose()?,
+            deleted_by_device_id: parse_optional_uuid(&self.deleted_by_device_id, "deleted_by_device_id")?,
         })
     }
 }

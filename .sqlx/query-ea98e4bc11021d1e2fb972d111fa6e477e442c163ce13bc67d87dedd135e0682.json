@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE media_documents SET\n                    original_filename = ?, mime_type = ?, size_bytes = ?, updated_at = ?\n                    WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "ea98e4bc11021d1e2fb972d111fa6e477e442c163ce13bc67d87dedd135e0682"
+}

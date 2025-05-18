@@ -1,4 +1,4 @@
-use crate::errors::{DomainError, DomainResult};
+use crate::errors::{DomainError, DomainResult, ValidationError};
 use crate::validation::{Validate, ValidationBuilder};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
@@ -18,27 +18,36 @@ pub struct Project {
     pub name: String,
     pub name_updated_at: Option<DateTime<Utc>>,
     pub name_updated_by: Option<Uuid>,
+    pub name_updated_by_device_id: Option<Uuid>,
     pub objective: Option<String>,
     pub objective_updated_at: Option<DateTime<Utc>>,
     pub objective_updated_by: Option<Uuid>,
+    pub objective_updated_by_device_id: Option<Uuid>,
     pub outcome: Option<String>,
     pub outcome_updated_at: Option<DateTime<Utc>>,
     pub outcome_updated_by: Option<Uuid>,
+    pub outcome_updated_by_device_id: Option<Uuid>,
     pub status_id: Option<i64>,
     pub status_id_updated_at: Option<DateTime<Utc>>,
     pub status_id_updated_by: Option<Uuid>,
+    pub status_id_updated_by_device_id: Option<Uuid>,
     pub timeline: Option<String>,
     pub timeline_updated_at: Option<DateTime<Utc>>,
     pub timeline_updated_by: Option<Uuid>,
+    pub timeline_updated_by_device_id: Option<Uuid>,
     pub responsible_team: Option<String>,
     pub responsible_team_updated_at: Option<DateTime<Utc>>,
     pub responsible_team_updated_by: Option<Uuid>,
+    pub responsible_team_updated_by_device_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
     pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
     pub sync_priority: SyncPriorityFromSyncDomain,
 }
 
@@ -160,79 +169,103 @@ pub struct ProjectRow {
     pub name: String,
     pub name_updated_at: Option<String>,
     pub name_updated_by: Option<String>,
+    pub name_updated_by_device_id: Option<String>,
     pub objective: Option<String>,
     pub objective_updated_at: Option<String>,
     pub objective_updated_by: Option<String>,
+    pub objective_updated_by_device_id: Option<String>,
     pub outcome: Option<String>,
     pub outcome_updated_at: Option<String>,
     pub outcome_updated_by: Option<String>,
+    pub outcome_updated_by_device_id: Option<String>,
     pub status_id: Option<i64>,
     pub status_id_updated_at: Option<String>,
     pub status_id_updated_by: Option<String>,
+    pub status_id_updated_by_device_id: Option<String>,
     pub timeline: Option<String>,
     pub timeline_updated_at: Option<String>,
     pub timeline_updated_by: Option<String>,
+    pub timeline_updated_by_device_id: Option<String>,
     pub responsible_team: Option<String>,
     pub responsible_team_updated_at: Option<String>,
     pub responsible_team_updated_by: Option<String>,
+    pub responsible_team_updated_by_device_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
+    pub created_by_device_id: Option<String>,
     pub updated_by_user_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
     pub sync_priority: String,
 }
 
 impl ProjectRow {
     /// Convert database row to domain entity
     pub fn into_entity(self) -> DomainResult<Project> {
-        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
-            s.as_ref().map(|id| {
-                Uuid::parse_str(id).map_err(|_| DomainError::InvalidUuid(id.clone()))
-            })
+        // Helper to parse Option<String> to Option<Uuid>
+        let parse_optional_uuid = |s: &Option<String>, field_name: &str| -> DomainResult<Option<Uuid>> {
+            match s {
+                Some(id_str) => Uuid::parse_str(id_str)
+                    .map(Some)
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid UUID format: {}", id_str)))),
+                None => Ok(None),
+            }
         };
         
-        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
-            s.as_ref().map(|dt| {
-                DateTime::parse_from_rfc3339(dt)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", dt)))
-            })
+        // Helper to parse Option<String> to Option<DateTime<Utc>>
+        let parse_optional_datetime = |s: &Option<String>, field_name: &str| -> DomainResult<Option<DateTime<Utc>>> {
+            match s {
+                Some(dt_str) => DateTime::parse_from_rfc3339(dt_str)
+                    .map(|dt| Some(dt.with_timezone(&Utc)))
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", dt_str)))),
+                None => Ok(None),
+            }
         };
         
         Ok(Project {
             id: Uuid::parse_str(&self.id)
-                .map_err(|_| DomainError::InvalidUuid(self.id))?,
-            strategic_goal_id: parse_uuid(&self.strategic_goal_id).transpose()?,
+                .map_err(|_| DomainError::Validation(ValidationError::format("id", &format!("Invalid UUID format: {}", self.id))))?,
+            strategic_goal_id: parse_optional_uuid(&self.strategic_goal_id, "strategic_goal_id")?,
             name: self.name,
-            name_updated_at: parse_datetime(&self.name_updated_at).transpose()?,
-            name_updated_by: parse_uuid(&self.name_updated_by).transpose()?,
+            name_updated_at: parse_optional_datetime(&self.name_updated_at, "name_updated_at")?,
+            name_updated_by: parse_optional_uuid(&self.name_updated_by, "name_updated_by")?,
+            name_updated_by_device_id: parse_optional_uuid(&self.name_updated_by_device_id, "name_updated_by_device_id")?,
             objective: self.objective,
-            objective_updated_at: parse_datetime(&self.objective_updated_at).transpose()?,
-            objective_updated_by: parse_uuid(&self.objective_updated_by).transpose()?,
+            objective_updated_at: parse_optional_datetime(&self.objective_updated_at, "objective_updated_at")?,
+            objective_updated_by: parse_optional_uuid(&self.objective_updated_by, "objective_updated_by")?,
+            objective_updated_by_device_id: parse_optional_uuid(&self.objective_updated_by_device_id, "objective_updated_by_device_id")?,
             outcome: self.outcome,
-            outcome_updated_at: parse_datetime(&self.outcome_updated_at).transpose()?,
-            outcome_updated_by: parse_uuid(&self.outcome_updated_by).transpose()?,
+            outcome_updated_at: parse_optional_datetime(&self.outcome_updated_at, "outcome_updated_at")?,
+            outcome_updated_by: parse_optional_uuid(&self.outcome_updated_by, "outcome_updated_by")?,
+            outcome_updated_by_device_id: parse_optional_uuid(&self.outcome_updated_by_device_id, "outcome_updated_by_device_id")?,
             status_id: self.status_id,
-            status_id_updated_at: parse_datetime(&self.status_id_updated_at).transpose()?,
-            status_id_updated_by: parse_uuid(&self.status_id_updated_by).transpose()?,
+            status_id_updated_at: parse_optional_datetime(&self.status_id_updated_at, "status_id_updated_at")?,
+            status_id_updated_by: parse_optional_uuid(&self.status_id_updated_by, "status_id_updated_by")?,
+            status_id_updated_by_device_id: parse_optional_uuid(&self.status_id_updated_by_device_id, "status_id_updated_by_device_id")?,
             timeline: self.timeline,
-            timeline_updated_at: parse_datetime(&self.timeline_updated_at).transpose()?,
-            timeline_updated_by: parse_uuid(&self.timeline_updated_by).transpose()?,
+            timeline_updated_at: parse_optional_datetime(&self.timeline_updated_at, "timeline_updated_at")?,
+            timeline_updated_by: parse_optional_uuid(&self.timeline_updated_by, "timeline_updated_by")?,
+            timeline_updated_by_device_id: parse_optional_uuid(&self.timeline_updated_by_device_id, "timeline_updated_by_device_id")?,
             responsible_team: self.responsible_team,
-            responsible_team_updated_at: parse_datetime(&self.responsible_team_updated_at).transpose()?,
-            responsible_team_updated_by: parse_uuid(&self.responsible_team_updated_by).transpose()?,
+            responsible_team_updated_at: parse_optional_datetime(&self.responsible_team_updated_at, "responsible_team_updated_at")?,
+            responsible_team_updated_by: parse_optional_uuid(&self.responsible_team_updated_by, "responsible_team_updated_by")?,
+            responsible_team_updated_by_device_id: parse_optional_uuid(&self.responsible_team_updated_by_device_id, "responsible_team_updated_by_device_id")?,
             created_at: DateTime::parse_from_rfc3339(&self.created_at)
                 .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.created_at)))?,
+                .map_err(|_| DomainError::Validation(ValidationError::format("created_at", &format!("Invalid RFC3339 format: {}", self.created_at))))?,
             updated_at: DateTime::parse_from_rfc3339(&self.updated_at)
                 .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", self.updated_at)))?,
-            created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at).transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+                .map_err(|_| DomainError::Validation(ValidationError::format("updated_at", &format!("Invalid RFC3339 format: {}", self.updated_at))))?,
+            created_by_user_id: parse_optional_uuid(&self.created_by_user_id, "created_by_user_id")?,
+            created_by_device_id: parse_optional_uuid(&self.created_by_device_id, "created_by_device_id")?,
+            updated_by_user_id: parse_optional_uuid(&self.updated_by_user_id, "updated_by_user_id")?,
+            updated_by_device_id: parse_optional_uuid(&self.updated_by_device_id, "updated_by_device_id")?,
+            deleted_at: parse_optional_datetime(&self.deleted_at, "deleted_at")?,
+            deleted_by_user_id: parse_optional_uuid(&self.deleted_by_user_id, "deleted_by_user_id")?,
+            deleted_by_device_id: parse_optional_uuid(&self.deleted_by_device_id, "deleted_by_device_id")?,
             sync_priority: SyncPriorityFromSyncDomain::from_str(&self.sync_priority).unwrap_or_default(),
         })
     }

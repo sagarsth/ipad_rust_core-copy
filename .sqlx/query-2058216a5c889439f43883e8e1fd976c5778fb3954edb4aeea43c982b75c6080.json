@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            UPDATE tombstones\n            SET pushed_at = ?,\n                sync_batch_id = ?\n            WHERE id = ?\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2058216a5c889439f43883e8e1fd976c5778fb3954edb4aeea43c982b75c6080"
+}

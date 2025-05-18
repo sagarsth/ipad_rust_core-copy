@@ -16,13 +16,13 @@ use chrono::Utc;
 #[async_trait]
 pub trait CloudStorageService: Send + Sync {
     /// Get changes from remote storage since a specific sync token
-    async fn get_changes_since(&self, api_token: &str, sync_token: Option<String>) -> ServiceResult<FetchChangesResponse>;
+    async fn get_changes_since(&self, api_token: &str, device_id: Uuid, sync_token: Option<String>) -> ServiceResult<FetchChangesResponse>;
     
     /// Push local changes to remote storage
     async fn push_changes(&self, api_token: &str, payload: PushPayload) -> ServiceResult<PushChangesResponse>;
     
     /// Upload a document to cloud storage
-    async fn upload_document(&self, document_id: Uuid, local_path: &str, mime_type: &str, size_bytes: u64) -> ServiceResult<String>;
+    async fn upload_document(&self, device_id_of_uploader: Uuid, document_id: Uuid, local_path: &str, mime_type: &str, size_bytes: u64) -> ServiceResult<String>;
     
     /// Download a document from cloud storage
     async fn download_document(&self, document_id: Uuid, blob_key: &str) -> ServiceResult<(String, u64, bool)>;
@@ -69,18 +69,18 @@ impl ApiCloudStorageService {
 
 #[async_trait]
 impl CloudStorageService for ApiCloudStorageService {
-    async fn get_changes_since(&self, api_token: &str, sync_token: Option<String>) -> ServiceResult<FetchChangesResponse> {
-        debug!("Fetching changes since token: {:?}", sync_token);
+    async fn get_changes_since(&self, api_token: &str, device_id: Uuid, sync_token: Option<String>) -> ServiceResult<FetchChangesResponse> {
+        debug!("Fetching changes for device {} since token: {:?}", device_id, sync_token);
         
-        // Build the URL with optional sync token
-        let url = if let Some(token) = &sync_token {
-            format!("{}/api/sync/changes?since={}", self.base_url, token)
-        } else {
-            format!("{}/api/sync/changes", self.base_url)
-        };
+        let device_id_str = device_id.to_string();
+        let mut url_string = format!("{}/api/sync/changes?deviceId={}", self.base_url, device_id_str);
+
+        if let Some(token) = &sync_token {
+            url_string.push_str(&format!("&since={}", token));
+        }
         
         // Make the API request
-        let response = self.client.get(&url)
+        let response = self.client.get(&url_string)
             .header("Authorization", self.auth_header(api_token))
             .send()
             .await
@@ -103,7 +103,10 @@ impl CloudStorageService for ApiCloudStorageService {
     }
     
     async fn push_changes(&self, api_token: &str, payload: PushPayload) -> ServiceResult<PushChangesResponse> {
-        debug!("Pushing {} changes and {} tombstones", payload.changes.len(), payload.tombstones.as_ref().map_or(0, |t| t.len()));
+        debug!("Pushing {} changes and {} tombstones for device {}",
+               payload.changes.len(),
+               payload.tombstones.as_ref().map_or(0, |t| t.len()),
+               payload.device_id); // Log the device_id from payload
         
         let url = format!("{}/api/sync/push", self.base_url);
         
@@ -131,11 +134,12 @@ impl CloudStorageService for ApiCloudStorageService {
         }
     }
     
-    async fn upload_document(&self, document_id: Uuid, local_path: &str, mime_type: &str, size_bytes: u64) -> ServiceResult<String> {
-        debug!("Uploading document {} from {}", document_id, local_path);
+    async fn upload_document(&self, device_id_of_uploader: Uuid, document_id: Uuid, local_path: &str, mime_type: &str, _size_bytes: u64) -> ServiceResult<String> {
+        debug!("Uploading document {} from device {} from path {}", document_id, device_id_of_uploader, local_path);
         
         let doc_id_str = document_id.to_string();
-        let url = format!("{}/api/documents/upload/{}", self.base_url, doc_id_str);
+        let uploader_device_id_str = device_id_of_uploader.to_string();
+        let url = format!("{}/api/documents/upload/{}", self.base_url, doc_id_str); // Assuming API takes doc_id in path
         
         // Read the file
         let file_content = tokio::fs::read(local_path)
@@ -150,7 +154,8 @@ impl CloudStorageService for ApiCloudStorageService {
             
         let form = Form::new()
             .part("file", part)
-            .text("documentId", doc_id_str.clone());
+            .text("documentId", doc_id_str.clone()) // Keep if API expects it, or remove if doc_id in path is enough
+            .text("deviceId", uploader_device_id_str); // Add deviceId
             
         // Make the API request
         let response = self.client.post(&url)
@@ -272,10 +277,10 @@ impl MockCloudStorageService {
 #[cfg(test)]
 #[async_trait]
 impl CloudStorageService for MockCloudStorageService {
-    async fn get_changes_since(&self, _api_token: &str, _sync_token: Option<String>) -> ServiceResult<FetchChangesResponse> {
+    async fn get_changes_since(&self, _api_token: &str, _device_id: Uuid, _sync_token: Option<String>) -> ServiceResult<FetchChangesResponse> {
         // Return empty response for tests
         Ok(FetchChangesResponse {
-            batch_id: String::new(),
+            batch_id: Uuid::new_v4().to_string(), // Provide a mock batch_id
             changes: Vec::new(),
             tombstones: None,
             has_more: false,
@@ -298,9 +303,9 @@ impl CloudStorageService for MockCloudStorageService {
         })
     }
     
-    async fn upload_document(&self, document_id: Uuid, _local_path: &str, _mime_type: &str, _size_bytes: u64) -> ServiceResult<String> {
+    async fn upload_document(&self, _device_id_of_uploader: Uuid, document_id: Uuid, _local_path: &str, _mime_type: &str, _size_bytes: u64) -> ServiceResult<String> {
         // Mock successful upload by returning a fake blob key
-        Ok(format!("test_blob_{}", document_id))
+        Ok(format!("mock_blob_key_for_{}", document_id))
     }
     
     async fn download_document(&self, document_id: Uuid, _blob_key: &str) -> ServiceResult<(String, u64, bool)> {

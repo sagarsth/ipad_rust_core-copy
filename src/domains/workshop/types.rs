@@ -22,51 +22,68 @@ pub struct Workshop {
     pub purpose: Option<String>,
     pub purpose_updated_at: Option<DateTime<Utc>>,
     pub purpose_updated_by: Option<Uuid>,
+    pub purpose_updated_by_device_id: Option<Uuid>,
     pub event_date: Option<String>, // ISO date format YYYY-MM-DD
     pub event_date_updated_at: Option<DateTime<Utc>>,
     pub event_date_updated_by: Option<Uuid>,
+    pub event_date_updated_by_device_id: Option<Uuid>,
     pub location: Option<String>,
     pub location_updated_at: Option<DateTime<Utc>>,
     pub location_updated_by: Option<Uuid>,
+    pub location_updated_by_device_id: Option<Uuid>,
     pub budget: Option<Decimal>,
     pub budget_updated_at: Option<DateTime<Utc>>,
     pub budget_updated_by: Option<Uuid>,
+    pub budget_updated_by_device_id: Option<Uuid>,
     pub actuals: Option<Decimal>,
     pub actuals_updated_at: Option<DateTime<Utc>>,
     pub actuals_updated_by: Option<Uuid>,
+    pub actuals_updated_by_device_id: Option<Uuid>,
     pub participant_count: i64,
     pub participant_count_updated_at: Option<DateTime<Utc>>,
     pub participant_count_updated_by: Option<Uuid>,
+    pub participant_count_updated_by_device_id: Option<Uuid>,
     pub local_partner: Option<String>,
     pub local_partner_updated_at: Option<DateTime<Utc>>,
     pub local_partner_updated_by: Option<Uuid>,
+    pub local_partner_updated_by_device_id: Option<Uuid>,
     pub partner_responsibility: Option<String>,
     pub partner_responsibility_updated_at: Option<DateTime<Utc>>,
     pub partner_responsibility_updated_by: Option<Uuid>,
+    pub partner_responsibility_updated_by_device_id: Option<Uuid>,
     pub partnership_success: Option<String>,
     pub partnership_success_updated_at: Option<DateTime<Utc>>,
     pub partnership_success_updated_by: Option<Uuid>,
+    pub partnership_success_updated_by_device_id: Option<Uuid>,
     pub capacity_challenges: Option<String>,
     pub capacity_challenges_updated_at: Option<DateTime<Utc>>,
     pub capacity_challenges_updated_by: Option<Uuid>,
+    pub capacity_challenges_updated_by_device_id: Option<Uuid>,
     pub strengths: Option<String>,
     pub strengths_updated_at: Option<DateTime<Utc>>,
     pub strengths_updated_by: Option<Uuid>,
+    pub strengths_updated_by_device_id: Option<Uuid>,
     pub outcomes: Option<String>,
     pub outcomes_updated_at: Option<DateTime<Utc>>,
     pub outcomes_updated_by: Option<Uuid>,
+    pub outcomes_updated_by_device_id: Option<Uuid>,
     pub recommendations: Option<String>,
     pub recommendations_updated_at: Option<DateTime<Utc>>,
     pub recommendations_updated_by: Option<Uuid>,
+    pub recommendations_updated_by_device_id: Option<Uuid>,
     pub challenge_resolution: Option<String>,
     pub challenge_resolution_updated_at: Option<DateTime<Utc>>,
     pub challenge_resolution_updated_by: Option<Uuid>,
+    pub challenge_resolution_updated_by_device_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
     pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
     pub sync_priority: SyncPriority,
 }
 
@@ -160,6 +177,7 @@ pub struct NewWorkshop {
     pub local_partner: Option<String>,
     pub partner_responsibility: Option<String>,
     pub created_by_user_id: Option<Uuid>,
+    pub sync_priority: SyncPriority,
 }
 
 impl Validate for NewWorkshop {
@@ -215,7 +233,8 @@ pub struct UpdateWorkshop {
     pub outcomes: Option<String>,
     pub recommendations: Option<String>,
     pub challenge_resolution: Option<String>,
-    pub updated_by_user_id: Uuid,
+    pub updated_by_user_id: Option<Uuid>,
+    pub sync_priority: Option<SyncPriority>,
 }
 
 impl Validate for UpdateWorkshop {
@@ -261,139 +280,169 @@ pub struct WorkshopRow {
     pub purpose: Option<String>,
     pub purpose_updated_at: Option<String>,
     pub purpose_updated_by: Option<String>,
+    pub purpose_updated_by_device_id: Option<String>,
     pub event_date: Option<String>,
     pub event_date_updated_at: Option<String>,
     pub event_date_updated_by: Option<String>,
+    pub event_date_updated_by_device_id: Option<String>,
     pub location: Option<String>,
     pub location_updated_at: Option<String>,
     pub location_updated_by: Option<String>,
+    pub location_updated_by_device_id: Option<String>,
     pub budget: Option<String>,
     pub budget_updated_at: Option<String>,
     pub budget_updated_by: Option<String>,
+    pub budget_updated_by_device_id: Option<String>,
     pub actuals: Option<String>,
     pub actuals_updated_at: Option<String>,
     pub actuals_updated_by: Option<String>,
+    pub actuals_updated_by_device_id: Option<String>,
     pub participant_count: i64,
     pub participant_count_updated_at: Option<String>,
     pub participant_count_updated_by: Option<String>,
+    pub participant_count_updated_by_device_id: Option<String>,
     pub local_partner: Option<String>,
     pub local_partner_updated_at: Option<String>,
     pub local_partner_updated_by: Option<String>,
+    pub local_partner_updated_by_device_id: Option<String>,
     pub partner_responsibility: Option<String>,
     pub partner_responsibility_updated_at: Option<String>,
     pub partner_responsibility_updated_by: Option<String>,
+    pub partner_responsibility_updated_by_device_id: Option<String>,
     pub partnership_success: Option<String>,
     pub partnership_success_updated_at: Option<String>,
     pub partnership_success_updated_by: Option<String>,
+    pub partnership_success_updated_by_device_id: Option<String>,
     pub capacity_challenges: Option<String>,
     pub capacity_challenges_updated_at: Option<String>,
     pub capacity_challenges_updated_by: Option<String>,
+    pub capacity_challenges_updated_by_device_id: Option<String>,
     pub strengths: Option<String>,
     pub strengths_updated_at: Option<String>,
     pub strengths_updated_by: Option<String>,
+    pub strengths_updated_by_device_id: Option<String>,
     pub outcomes: Option<String>,
     pub outcomes_updated_at: Option<String>,
     pub outcomes_updated_by: Option<String>,
+    pub outcomes_updated_by_device_id: Option<String>,
     pub recommendations: Option<String>,
     pub recommendations_updated_at: Option<String>,
     pub recommendations_updated_by: Option<String>,
+    pub recommendations_updated_by_device_id: Option<String>,
     pub challenge_resolution: Option<String>,
     pub challenge_resolution_updated_at: Option<String>,
     pub challenge_resolution_updated_by: Option<String>,
+    pub challenge_resolution_updated_by_device_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
+    pub created_by_device_id: Option<String>,
     pub updated_by_user_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
     pub sync_priority: String,
 }
 
 impl WorkshopRow {
     /// Convert database row to domain entity
     pub fn into_entity(self) -> DomainResult<Workshop> {
-        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
-            s.as_ref().map(|id_str| {
-                Uuid::parse_str(id_str)
-                    .map_err(|e| DomainError::Internal(format!("Invalid UUID format '{}' in DB: {}", id_str, e)))
-            })
+        let parse_optional_uuid = |s: &Option<String>, field_name: &str| -> DomainResult<Option<Uuid>> {
+            match s {
+                Some(id_str) => Uuid::parse_str(id_str)
+                    .map(Some)
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid UUID format: {}", id_str)))),
+                None => Ok(None),
+            }
         };
-        
-        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
-            s.as_ref().map(|dt_str| {
-                DateTime::parse_from_rfc3339(dt_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| DomainError::Internal(format!("Invalid RFC3339 format '{}' in DB: {}", dt_str, e)))
-            })
+        let parse_datetime = |s: &str, field_name: &str| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", s))));
+        let parse_optional_datetime = |s: &Option<String>, field_name: &str| -> DomainResult<Option<DateTime<Utc>>> {
+            match s {
+                Some(dt_str) => DateTime::parse_from_rfc3339(dt_str)
+                    .map(|dt| Some(dt.with_timezone(&Utc)))
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", dt_str)))),
+                None => Ok(None),
+            }
         };
-        
-        let parse_decimal = |s: &Option<String>| -> Option<DomainResult<Decimal>> {
-            s.as_ref().map(|dec_str| {
-                Decimal::from_str(dec_str)
-                    .map_err(|e| DomainError::Internal(format!("Invalid Decimal format '{}' in DB: {}", dec_str, e)))
-            })
+        let parse_optional_decimal = |s: &Option<String>, field_name: &str| -> DomainResult<Option<Decimal>> {
+            match s {
+                Some(val_str) => Decimal::from_str(val_str)
+                    .map(Some)
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid Decimal format: {}", val_str)))),
+                None => Ok(None),
+            }
         };
         
         Ok(Workshop {
-            id: Uuid::parse_str(&self.id)
-                 .map_err(|e| DomainError::Internal(format!("Invalid UUID format for Workshop.id '{}': {}", self.id, e)))?,
-            project_id: parse_uuid(&self.project_id).transpose()?,
+            id: Uuid::parse_str(&self.id).map_err(|_| DomainError::Validation(ValidationError::format("id", &format!("Invalid UUID format: {}", self.id))))?,
+            project_id: parse_optional_uuid(&self.project_id, "project_id")?,
             purpose: self.purpose,
-            purpose_updated_at: parse_datetime(&self.purpose_updated_at).transpose()?,
-            purpose_updated_by: parse_uuid(&self.purpose_updated_by).transpose()?,
+            purpose_updated_at: parse_optional_datetime(&self.purpose_updated_at, "purpose_updated_at")?,
+            purpose_updated_by: parse_optional_uuid(&self.purpose_updated_by, "purpose_updated_by")?,
+            purpose_updated_by_device_id: parse_optional_uuid(&self.purpose_updated_by_device_id, "purpose_updated_by_device_id")?,
             event_date: self.event_date,
-            event_date_updated_at: parse_datetime(&self.event_date_updated_at).transpose()?,
-            event_date_updated_by: parse_uuid(&self.event_date_updated_by).transpose()?,
+            event_date_updated_at: parse_optional_datetime(&self.event_date_updated_at, "event_date_updated_at")?,
+            event_date_updated_by: parse_optional_uuid(&self.event_date_updated_by, "event_date_updated_by")?,
+            event_date_updated_by_device_id: parse_optional_uuid(&self.event_date_updated_by_device_id, "event_date_updated_by_device_id")?,
             location: self.location,
-            location_updated_at: parse_datetime(&self.location_updated_at).transpose()?,
-            location_updated_by: parse_uuid(&self.location_updated_by).transpose()?,
-            budget: parse_decimal(&self.budget).transpose()?,
-            budget_updated_at: parse_datetime(&self.budget_updated_at).transpose()?,
-            budget_updated_by: parse_uuid(&self.budget_updated_by).transpose()?,
-            actuals: parse_decimal(&self.actuals).transpose()?,
-            actuals_updated_at: parse_datetime(&self.actuals_updated_at).transpose()?,
-            actuals_updated_by: parse_uuid(&self.actuals_updated_by).transpose()?,
+            location_updated_at: parse_optional_datetime(&self.location_updated_at, "location_updated_at")?,
+            location_updated_by: parse_optional_uuid(&self.location_updated_by, "location_updated_by")?,
+            location_updated_by_device_id: parse_optional_uuid(&self.location_updated_by_device_id, "location_updated_by_device_id")?,
+            budget: parse_optional_decimal(&self.budget, "budget")?,
+            budget_updated_at: parse_optional_datetime(&self.budget_updated_at, "budget_updated_at")?,
+            budget_updated_by: parse_optional_uuid(&self.budget_updated_by, "budget_updated_by")?,
+            budget_updated_by_device_id: parse_optional_uuid(&self.budget_updated_by_device_id, "budget_updated_by_device_id")?,
+            actuals: parse_optional_decimal(&self.actuals, "actuals")?,
+            actuals_updated_at: parse_optional_datetime(&self.actuals_updated_at, "actuals_updated_at")?,
+            actuals_updated_by: parse_optional_uuid(&self.actuals_updated_by, "actuals_updated_by")?,
+            actuals_updated_by_device_id: parse_optional_uuid(&self.actuals_updated_by_device_id, "actuals_updated_by_device_id")?,
             participant_count: self.participant_count,
-            participant_count_updated_at: parse_datetime(&self.participant_count_updated_at).transpose()?,
-            participant_count_updated_by: parse_uuid(&self.participant_count_updated_by).transpose()?,
+            participant_count_updated_at: parse_optional_datetime(&self.participant_count_updated_at, "participant_count_updated_at")?,
+            participant_count_updated_by: parse_optional_uuid(&self.participant_count_updated_by, "participant_count_updated_by")?,
+            participant_count_updated_by_device_id: parse_optional_uuid(&self.participant_count_updated_by_device_id, "participant_count_updated_by_device_id")?,
             local_partner: self.local_partner,
-            local_partner_updated_at: parse_datetime(&self.local_partner_updated_at).transpose()?,
-            local_partner_updated_by: parse_uuid(&self.local_partner_updated_by).transpose()?,
+            local_partner_updated_at: parse_optional_datetime(&self.local_partner_updated_at, "local_partner_updated_at")?,
+            local_partner_updated_by: parse_optional_uuid(&self.local_partner_updated_by, "local_partner_updated_by")?,
+            local_partner_updated_by_device_id: parse_optional_uuid(&self.local_partner_updated_by_device_id, "local_partner_updated_by_device_id")?,
             partner_responsibility: self.partner_responsibility,
-            partner_responsibility_updated_at: parse_datetime(&self.partner_responsibility_updated_at).transpose()?,
-            partner_responsibility_updated_by: parse_uuid(&self.partner_responsibility_updated_by).transpose()?,
+            partner_responsibility_updated_at: parse_optional_datetime(&self.partner_responsibility_updated_at, "partner_responsibility_updated_at")?,
+            partner_responsibility_updated_by: parse_optional_uuid(&self.partner_responsibility_updated_by, "partner_responsibility_updated_by")?,
+            partner_responsibility_updated_by_device_id: parse_optional_uuid(&self.partner_responsibility_updated_by_device_id, "partner_responsibility_updated_by_device_id")?,
             partnership_success: self.partnership_success,
-            partnership_success_updated_at: parse_datetime(&self.partnership_success_updated_at).transpose()?,
-            partnership_success_updated_by: parse_uuid(&self.partnership_success_updated_by).transpose()?,
+            partnership_success_updated_at: parse_optional_datetime(&self.partnership_success_updated_at, "partnership_success_updated_at")?,
+            partnership_success_updated_by: parse_optional_uuid(&self.partnership_success_updated_by, "partnership_success_updated_by")?,
+            partnership_success_updated_by_device_id: parse_optional_uuid(&self.partnership_success_updated_by_device_id, "partnership_success_updated_by_device_id")?,
             capacity_challenges: self.capacity_challenges,
-            capacity_challenges_updated_at: parse_datetime(&self.capacity_challenges_updated_at).transpose()?,
-            capacity_challenges_updated_by: parse_uuid(&self.capacity_challenges_updated_by).transpose()?,
+            capacity_challenges_updated_at: parse_optional_datetime(&self.capacity_challenges_updated_at, "capacity_challenges_updated_at")?,
+            capacity_challenges_updated_by: parse_optional_uuid(&self.capacity_challenges_updated_by, "capacity_challenges_updated_by")?,
+            capacity_challenges_updated_by_device_id: parse_optional_uuid(&self.capacity_challenges_updated_by_device_id, "capacity_challenges_updated_by_device_id")?,
             strengths: self.strengths,
-            strengths_updated_at: parse_datetime(&self.strengths_updated_at).transpose()?,
-            strengths_updated_by: parse_uuid(&self.strengths_updated_by).transpose()?,
+            strengths_updated_at: parse_optional_datetime(&self.strengths_updated_at, "strengths_updated_at")?,
+            strengths_updated_by: parse_optional_uuid(&self.strengths_updated_by, "strengths_updated_by")?,
+            strengths_updated_by_device_id: parse_optional_uuid(&self.strengths_updated_by_device_id, "strengths_updated_by_device_id")?,
             outcomes: self.outcomes,
-            outcomes_updated_at: parse_datetime(&self.outcomes_updated_at).transpose()?,
-            outcomes_updated_by: parse_uuid(&self.outcomes_updated_by).transpose()?,
+            outcomes_updated_at: parse_optional_datetime(&self.outcomes_updated_at, "outcomes_updated_at")?,
+            outcomes_updated_by: parse_optional_uuid(&self.outcomes_updated_by, "outcomes_updated_by")?,
+            outcomes_updated_by_device_id: parse_optional_uuid(&self.outcomes_updated_by_device_id, "outcomes_updated_by_device_id")?,
             recommendations: self.recommendations,
-            recommendations_updated_at: parse_datetime(&self.recommendations_updated_at).transpose()?,
-            recommendations_updated_by: parse_uuid(&self.recommendations_updated_by).transpose()?,
+            recommendations_updated_at: parse_optional_datetime(&self.recommendations_updated_at, "recommendations_updated_at")?,
+            recommendations_updated_by: parse_optional_uuid(&self.recommendations_updated_by, "recommendations_updated_by")?,
+            recommendations_updated_by_device_id: parse_optional_uuid(&self.recommendations_updated_by_device_id, "recommendations_updated_by_device_id")?,
             challenge_resolution: self.challenge_resolution,
-            challenge_resolution_updated_at: parse_datetime(&self.challenge_resolution_updated_at).transpose()?,
-            challenge_resolution_updated_by: parse_uuid(&self.challenge_resolution_updated_by).transpose()?,
-            created_at: DateTime::parse_from_rfc3339(&self.created_at)
-                .map_err(|e| DomainError::Internal(format!("Invalid RFC3339 format for Workshop.created_at '{}': {}", self.created_at, e)))?
-                .with_timezone(&Utc),
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at)
-                .map_err(|e| DomainError::Internal(format!("Invalid RFC3339 format for Workshop.updated_at '{}': {}", self.updated_at, e)))?
-                .with_timezone(&Utc),
-            created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at).transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
-            sync_priority: SyncPriority::from_str(&self.sync_priority).unwrap_or_else(|e| {
-                log::warn!("Invalid sync_priority string \'{}\' in WorkshopRow for ID {}: {:?}. Defaulting to Normal.", self.sync_priority, self.id, e);
-                SyncPriority::Normal
-            }),
+            challenge_resolution_updated_at: parse_optional_datetime(&self.challenge_resolution_updated_at, "challenge_resolution_updated_at")?,
+            challenge_resolution_updated_by: parse_optional_uuid(&self.challenge_resolution_updated_by, "challenge_resolution_updated_by")?,
+            challenge_resolution_updated_by_device_id: parse_optional_uuid(&self.challenge_resolution_updated_by_device_id, "challenge_resolution_updated_by_device_id")?,
+            created_at: parse_datetime(&self.created_at, "created_at")?,
+            updated_at: parse_datetime(&self.updated_at, "updated_at")?,
+            created_by_user_id: parse_optional_uuid(&self.created_by_user_id, "created_by_user_id")?,
+            created_by_device_id: parse_optional_uuid(&self.created_by_device_id, "created_by_device_id")?,
+            updated_by_user_id: parse_optional_uuid(&self.updated_by_user_id, "updated_by_user_id")?,
+            updated_by_device_id: parse_optional_uuid(&self.updated_by_device_id, "updated_by_device_id")?,
+            deleted_at: parse_optional_datetime(&self.deleted_at, "deleted_at")?,
+            deleted_by_user_id: parse_optional_uuid(&self.deleted_by_user_id, "deleted_by_user_id")?,
+            deleted_by_device_id: parse_optional_uuid(&self.deleted_by_device_id, "deleted_by_device_id")?,
+            sync_priority: SyncPriority::from_str(&self.sync_priority).unwrap_or_default(),
         })
     }
 }
@@ -542,16 +591,21 @@ pub struct WorkshopParticipant {
     pub pre_evaluation: Option<String>,
     pub pre_evaluation_updated_at: Option<DateTime<Utc>>,
     pub pre_evaluation_updated_by: Option<Uuid>,
+    pub pre_evaluation_updated_by_device_id: Option<Uuid>,
     pub post_evaluation: Option<String>,
     pub post_evaluation_updated_at: Option<DateTime<Utc>>,
     pub post_evaluation_updated_by: Option<Uuid>,
+    pub post_evaluation_updated_by_device_id: Option<Uuid>,
     // Core fields
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
     pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
 }
 
 impl WorkshopParticipant {
@@ -629,50 +683,63 @@ pub struct WorkshopParticipantRow {
     pub pre_evaluation: Option<String>,
     pub pre_evaluation_updated_at: Option<String>,
     pub pre_evaluation_updated_by: Option<String>,
+    pub pre_evaluation_updated_by_device_id: Option<String>,
     pub post_evaluation: Option<String>,
     pub post_evaluation_updated_at: Option<String>,
     pub post_evaluation_updated_by: Option<String>,
+    pub post_evaluation_updated_by_device_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: Option<String>,
+    pub created_by_device_id: Option<String>,
     pub updated_by_user_id: Option<String>,
+    pub updated_by_device_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
 }
 
 impl WorkshopParticipantRow {
     pub fn into_entity(self) -> DomainResult<WorkshopParticipant> {
-        let parse_uuid = |s: &Option<String>| -> Option<DomainResult<Uuid>> {
-            s.as_ref().map(|id_str| {
-                Uuid::parse_str(id_str)
-                    .map_err(|e| DomainError::Internal(format!("Invalid UUID format '{}' in DB: {}", id_str, e)))
-            })
+        let parse_optional_uuid = |s: &Option<String>, field_name: &str| -> DomainResult<Option<Uuid>> {
+            match s {
+                Some(id_str) => Uuid::parse_str(id_str)
+                    .map(Some)
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid UUID format: {}", id_str)))),
+                None => Ok(None),
+            }
         };
-        
-        let parse_datetime = |s: &Option<String>| -> Option<DomainResult<DateTime<Utc>>> {
-            s.as_ref().map(|dt_str| {
-                DateTime::parse_from_rfc3339(dt_str)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .map_err(|e| DomainError::Internal(format!("Invalid RFC3339 format '{}' in DB: {}", dt_str, e)))
-            })
+        let parse_datetime = |s: &str, field_name: &str| DateTime::parse_from_rfc3339(s).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", s))));
+        let parse_optional_datetime = |s: &Option<String>, field_name: &str| -> DomainResult<Option<DateTime<Utc>>> {
+            match s {
+                Some(dt_str) => DateTime::parse_from_rfc3339(dt_str)
+                    .map(|dt| Some(dt.with_timezone(&Utc)))
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", dt_str)))),
+                None => Ok(None),
+            }
         };
 
         Ok(WorkshopParticipant {
-            id: Uuid::parse_str(&self.id).map_err(|e| DomainError::Internal(format!("Invalid UUID for WorkshopParticipant.id '{}': {}", self.id, e)))?,
-            workshop_id: Uuid::parse_str(&self.workshop_id).map_err(|e| DomainError::Internal(format!("Invalid UUID for WorkshopParticipant.workshop_id '{}': {}", self.workshop_id, e)))?,
-            participant_id: Uuid::parse_str(&self.participant_id).map_err(|e| DomainError::Internal(format!("Invalid UUID for WorkshopParticipant.participant_id '{}': {}", self.participant_id, e)))?,
+            id: Uuid::parse_str(&self.id).map_err(|_| DomainError::Validation(ValidationError::format("id", &format!("Invalid UUID format: {}", self.id))))?,
+            workshop_id: Uuid::parse_str(&self.workshop_id).map_err(|_| DomainError::Validation(ValidationError::format("workshop_id", &format!("Invalid UUID format: {}", self.workshop_id))))?,
+            participant_id: Uuid::parse_str(&self.participant_id).map_err(|_| DomainError::Validation(ValidationError::format("participant_id", &format!("Invalid UUID format: {}", self.participant_id))))?,
             pre_evaluation: self.pre_evaluation,
-            pre_evaluation_updated_at: parse_datetime(&self.pre_evaluation_updated_at).transpose()?,
-            pre_evaluation_updated_by: parse_uuid(&self.pre_evaluation_updated_by).transpose()?,
+            pre_evaluation_updated_at: parse_optional_datetime(&self.pre_evaluation_updated_at, "pre_evaluation_updated_at")?,
+            pre_evaluation_updated_by: parse_optional_uuid(&self.pre_evaluation_updated_by, "pre_evaluation_updated_by")?,
+            pre_evaluation_updated_by_device_id: parse_optional_uuid(&self.pre_evaluation_updated_by_device_id, "pre_evaluation_updated_by_device_id")?,
             post_evaluation: self.post_evaluation,
-            post_evaluation_updated_at: parse_datetime(&self.post_evaluation_updated_at).transpose()?,
-            post_evaluation_updated_by: parse_uuid(&self.post_evaluation_updated_by).transpose()?,
-            created_at: DateTime::parse_from_rfc3339(&self.created_at).map_err(|e| DomainError::Internal(format!("Invalid RFC3339 for WorkshopParticipant.created_at '{}': {}", self.created_at, e)))?.with_timezone(&Utc),
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at).map_err(|e| DomainError::Internal(format!("Invalid RFC3339 for WorkshopParticipant.updated_at '{}': {}", self.updated_at, e)))?.with_timezone(&Utc),
-            created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
-            updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
-            deleted_at: parse_datetime(&self.deleted_at).transpose()?,
-            deleted_by_user_id: parse_uuid(&self.deleted_by_user_id).transpose()?,
+            post_evaluation_updated_at: parse_optional_datetime(&self.post_evaluation_updated_at, "post_evaluation_updated_at")?,
+            post_evaluation_updated_by: parse_optional_uuid(&self.post_evaluation_updated_by, "post_evaluation_updated_by")?,
+            post_evaluation_updated_by_device_id: parse_optional_uuid(&self.post_evaluation_updated_by_device_id, "post_evaluation_updated_by_device_id")?,
+            created_at: parse_datetime(&self.created_at, "created_at")?,
+            updated_at: parse_datetime(&self.updated_at, "updated_at")?,
+            created_by_user_id: parse_optional_uuid(&self.created_by_user_id, "created_by_user_id")?,
+            created_by_device_id: parse_optional_uuid(&self.created_by_device_id, "created_by_device_id")?,
+            updated_by_user_id: parse_optional_uuid(&self.updated_by_user_id, "updated_by_user_id")?,
+            updated_by_device_id: parse_optional_uuid(&self.updated_by_device_id, "updated_by_device_id")?,
+            deleted_at: parse_optional_datetime(&self.deleted_at, "deleted_at")?,
+            deleted_by_user_id: parse_optional_uuid(&self.deleted_by_user_id, "deleted_by_user_id")?,
+            deleted_by_device_id: parse_optional_uuid(&self.deleted_by_device_id, "deleted_by_device_id")?,
         })
     }
 }

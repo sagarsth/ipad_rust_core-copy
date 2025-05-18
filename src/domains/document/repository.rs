@@ -1,29 +1,29 @@
-use crate::auth::AuthContext;
-use crate::domains::core::repository::{FindById, SoftDeletable, HardDeletable};
+use crate::auth::context::AuthContext;
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome, SyncPriority as SyncPriorityFromSyncTypes};
+use crate::domains::sync::repository::{ChangeLogRepository, MergeableEntityRepository};
+use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::delete_service::DeleteServiceRepository;
-use crate::domains::document::types::{
-    DocumentType, DocumentTypeRow, NewDocumentType, UpdateDocumentType,
-    MediaDocument, MediaDocumentRow, NewMediaDocument, CompressionStatus, BlobSyncStatus,
-    // UpdateMediaDocument, // REMOVED
-    DocumentVersion, DocumentVersionRow,
-    DocumentAccessLog, DocumentAccessLogRow, NewDocumentAccessLog
-};
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
-use crate::domains::sync::types::SyncPriority;
+use crate::types::{PaginationParams, PaginatedResult};
+use crate::validation::Validate;
 use async_trait::async_trait;
-use chrono::Utc;
-use sqlx::{query, query_as, query_scalar, Pool, Row, Sqlite, Transaction};
-use uuid::Uuid;
-use std::collections::HashMap; // For update_paths_and_status
-use std::str::FromStr; // Import FromStr if not already imported at the top of the file
-use crate::types::{PaginatedResult, PaginationParams};
-// --- Add imports for ChangeLog ---
-use crate::domains::sync::repository::ChangeLogRepository;
-use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
-use std::sync::Arc;
+use chrono::{DateTime, Utc};
+use futures::future::try_join_all;
+use log::{error, info, warn};
 use serde_json;
+use sqlx::query::Query;
+use sqlx::{query, query_as, query_scalar, Execute, Pool, QueryBuilder, Sqlite, Transaction, Executor};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::str::FromStr;
+use uuid::Uuid;
 
-/// Temporary table identifier for linking documents before the main entity exists
+use super::types::{
+    BlobSyncStatus, CompressionStatus, DocumentAccessLog, DocumentAccessLogRow,
+    DocumentType, DocumentTypeRow, DocumentVersion, DocumentVersionRow, MediaDocument,
+    MediaDocumentFullState, MediaDocumentRow, NewDocumentAccessLog, NewDocumentType, NewMediaDocument, UpdateDocumentType
+};
+
 pub const TEMP_RELATED_TABLE: &str = "TEMP";
 
 // --- Document Type Repository ---
@@ -44,7 +44,6 @@ pub trait DocumentTypeRepository: DeleteServiceRepository<DocumentType> + Send +
     ) -> DomainResult<DocumentType>;
 
     async fn find_all(&self, params: PaginationParams) -> DomainResult<PaginatedResult<DocumentType>>;
-
     async fn find_by_name(&self, name: &str) -> DomainResult<Option<DocumentType>>;
 }
 
@@ -57,13 +56,9 @@ impl SqliteDocumentTypeRepository {
     pub fn new(pool: Pool<Sqlite>, change_log_repo: Arc<dyn ChangeLogRepository + Send + Sync>) -> Self {
         Self { pool, change_log_repo }
     }
-    fn entity_name() -> &'static str {
-        "document_types" // Table name
-    }
-    fn map_row(row: DocumentTypeRow) -> DomainResult<DocumentType> {
-        row.into_entity() // Use the conversion method
-    }
-    // Helper for internal use within transactions
+    fn entity_name() -> &'static str { "document_types" }
+    fn map_row(row: DocumentTypeRow) -> DomainResult<DocumentType> { row.into_entity() }
+    
     async fn find_by_id_with_tx<'t>(
         &self,
         id: Uuid,
@@ -73,11 +68,11 @@ impl SqliteDocumentTypeRepository {
             .bind(id.to_string())
             .fetch_optional(&mut **tx)
             .await
-            .map_err(DbError::from)?
+            .map_err(|e| DomainError::Database(DbError::from(e)))?
             .ok_or_else(|| DomainError::EntityNotFound(Self::entity_name().to_string(), id))
             .and_then(Self::map_row)
     }
-    // Helper to log changes consistently
+    
     async fn log_change_entry<'t>(
         &self,
         entry: ChangeLogEntry,
@@ -94,7 +89,7 @@ impl FindById<DocumentType> for SqliteDocumentTypeRepository {
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
-            .map_err(DbError::from)?
+            .map_err(|e| DomainError::Database(DbError::from(e)))?
             .ok_or_else(|| DomainError::EntityNotFound(self.entity_name().to_string(), id))
             .and_then(Self::map_row)
     }
@@ -109,33 +104,32 @@ impl SoftDeletable for SqliteDocumentTypeRepository {
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
         let now = Utc::now().to_rfc3339();
-        let now_dt = Utc::now(); // For logging
-        let user_uuid = auth.user_id;
-        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let _device_uuid: Option<Uuid> = if auth.device_id.is_empty() { None } else { auth.device_id.as_str().parse::<Uuid>().ok() };
 
         let result = query(
-            "UPDATE document_types SET deleted_at = ?, deleted_by_user_id = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
+            "UPDATE document_types SET deleted_at = ?, deleted_by_user_id = ?, updated_at = ?, deleted_by_device_id = ? WHERE id = ? AND deleted_at IS NULL"
         )
         .bind(&now)
         .bind(auth.user_id.to_string())
         .bind(&now)
+        .bind(_device_uuid.map(|u| u.to_string()))
         .bind(id.to_string())
         .execute(&mut **tx)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
 
         if result.rows_affected() == 0 {
-            // Could be already deleted or not found
             Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id))
-        } else {
-            Ok(())
-        }
+        } else { Ok(()) }
     }
     async fn soft_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
         let result = self.soft_delete_with_tx(id, auth, &mut tx).await;
         match result {
-            Ok(_) => { tx.commit().await.map_err(DbError::from)?; Ok(()) },
+            Ok(_) => { 
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?; 
+                Ok(()) 
+            },
             Err(e) => { let _ = tx.rollback().await; Err(e) },
         }
     }
@@ -143,37 +137,33 @@ impl SoftDeletable for SqliteDocumentTypeRepository {
 
 #[async_trait]
 impl HardDeletable for SqliteDocumentTypeRepository {
-    fn entity_name(&self) -> &'static str {
-        "document_types"
-    }
+    fn entity_name(&self) -> &'static str { "document_types" }
     async fn hard_delete_with_tx(
         &self,
         id: Uuid,
-        _auth: &AuthContext, // Auth context might be used for logging/checks later
+        _auth: &AuthContext, 
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
-        let now_dt = Utc::now(); // For logging
-        let user_uuid = _auth.user_id;
-        let device_uuid: Option<Uuid> = _auth.device_id.parse::<Uuid>().ok();
+        let _device_uuid: Option<Uuid> = if _auth.device_id.is_empty() { None } else { _auth.device_id.as_str().parse::<Uuid>().ok() };
 
         let result = query("DELETE FROM document_types WHERE id = ?")
             .bind(id.to_string())
             .execute(&mut **tx)
             .await
-            .map_err(DbError::from)?;
+            .map_err(|e| DomainError::Database(DbError::from(e)))?;
 
         if result.rows_affected() == 0 {
-            Err(DomainError::EntityNotFound(self.entity_name().to_string(), id))
-        } else {
-            Ok(())
-        }
+            Err(DomainError::EntityNotFound(<Self as HardDeletable>::entity_name(self).to_string(), id))
+        } else { Ok(()) }
     }
     async fn hard_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
-        // Consider adding file system cleanup logic here or in the service calling this
+        let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
         let result = self.hard_delete_with_tx(id, auth, &mut tx).await;
         match result {
-            Ok(_) => { tx.commit().await.map_err(DbError::from)?; Ok(()) },
+            Ok(_) => { 
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?; 
+                Ok(()) 
+            },
             Err(e) => { let _ = tx.rollback().await; Err(e) },
         }
     }
@@ -186,80 +176,146 @@ impl DocumentTypeRepository for SqliteDocumentTypeRepository {
         new_type: &NewDocumentType,
         auth: &AuthContext,
     ) -> DomainResult<DocumentType> {
+        new_type.validate()?; // Validate DTO
+
         let id = Uuid::new_v4();
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+
+        let user_id_str_val = auth.user_id.to_string();
+        let device_id_uuid_val: Option<Uuid> = if auth.device_id.is_empty() { None } else { auth.device_id.as_str().parse().ok() };
+        let device_id_for_bind = device_id_uuid_val.map(|u| u.to_string());
+
+
+        // Bind variables for direct fields from DTO
+        let id_bind = id.to_string();
+        let name_bind = &new_type.name; // String
+        let allowed_extensions_bind = &new_type.allowed_extensions; // String
+        let max_size_bind = new_type.max_size; // i64
+        let compression_level_bind = new_type.compression_level; // i32
+        let default_priority_bind = new_type.default_priority.as_str(); // &str
+
+        // Optional fields from DTO
+        let desc_bind = new_type.description.as_ref(); // Option<&String>
+        let icon_bind = new_type.icon.as_ref(); // Option<&String>
+        let compression_method_bind = new_type.compression_method.as_ref(); // Option<&String>
+        let min_size_for_compression_bind = new_type.min_size_for_compression; // Option<i64>
+        let related_tables_bind = new_type.related_tables.as_ref(); // Option<&String>
+
+        // Audit fields for the record itself
+        let created_at_bind = &now_str;
+        let updated_at_bind = &now_str;
+        let created_by_user_id_bind = &user_id_str_val;
+        let updated_by_user_id_bind = &user_id_str_val; // On create, updated_by is same as created_by
+        let created_by_device_id_bind = device_id_for_bind.as_deref();
+        let updated_by_device_id_bind = device_id_for_bind.as_deref(); // On create, same as created_by
+
+        // LWW meta fields - for NOT NULL fields or those guaranteed to be Some() from DTO on create
+        let name_updated_at_bind = &now_str;
+        let name_updated_by_bind = &user_id_str_val;
+        let name_updated_by_device_id_bind = device_id_for_bind.as_deref();
+
+        let allowed_extensions_updated_at_bind = &now_str;
+        let allowed_extensions_updated_by_bind = &user_id_str_val;
+        let allowed_extensions_updated_by_device_id_bind = device_id_for_bind.as_deref();
+        
+        let max_size_updated_at_bind = &now_str;
+        let max_size_updated_by_bind = &user_id_str_val;
+        let max_size_updated_by_device_id_bind = device_id_for_bind.as_deref();
+
+        let compression_level_updated_at_bind = &now_str;
+        let compression_level_updated_by_bind = &user_id_str_val;
+        let compression_level_updated_by_device_id_bind = device_id_for_bind.as_deref();
+        
+        let default_priority_updated_at_bind = &now_str;
+        let default_priority_updated_by_bind = &user_id_str_val;
+        let default_priority_updated_by_device_id_bind = device_id_for_bind.as_deref();
+
+        // LWW meta fields - for Option<T> fields
+        let desc_updated_at_bind = desc_bind.map(|_| created_at_bind);
+        let desc_updated_by_bind = desc_bind.map(|_| created_by_user_id_bind);
+        let desc_updated_by_device_id_bind = if desc_bind.is_some() { device_id_for_bind.as_deref() } else { None };
+
+        let icon_updated_at_bind = icon_bind.map(|_| created_at_bind);
+        let icon_updated_by_bind = icon_bind.map(|_| created_by_user_id_bind);
+        let icon_updated_by_device_id_bind = if icon_bind.is_some() { device_id_for_bind.as_deref() } else { None };
+
+        let compression_method_updated_at_bind = compression_method_bind.map(|_| created_at_bind);
+        let compression_method_updated_by_bind = compression_method_bind.map(|_| created_by_user_id_bind);
+        let compression_method_updated_by_device_id_bind = if compression_method_bind.is_some() { device_id_for_bind.as_deref() } else { None };
+
+        let min_size_for_compression_updated_at_bind = min_size_for_compression_bind.map(|_| created_at_bind);
+        let min_size_for_compression_updated_by_bind = min_size_for_compression_bind.map(|_| created_by_user_id_bind);
+        let min_size_for_compression_updated_by_device_id_bind = if min_size_for_compression_bind.is_some() { device_id_for_bind.as_deref() } else { None };
+        
+        let related_tables_updated_at_bind = related_tables_bind.map(|_| created_at_bind);
+        let related_tables_updated_by_bind = related_tables_bind.map(|_| created_by_user_id_bind);
+        let related_tables_updated_by_device_id_bind = if related_tables_bind.is_some() { device_id_for_bind.as_deref() } else { None };
+
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
 
-        let result = async {
-            let now = Utc::now().to_rfc3339();
-            let now_dt = Utc::now(); // Use DateTime<Utc> for logging
-            let user_id = auth.user_id.to_string();
-            let user_uuid = auth.user_id;
-            let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
-
-            query(
-                r#"INSERT INTO document_types (
-                    id, name, description, icon, color, default_priority, // Now TEXT
-                    created_at, updated_at, created_by_user_id, updated_by_user_id,
-                    name_updated_at, name_updated_by, description_updated_at, description_updated_by,
-                    icon_updated_at, icon_updated_by, color_updated_at, color_updated_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"# 
+        sqlx::query!(
+            r#"
+            INSERT INTO document_types (
+                id, name, description, icon, default_priority, 
+                created_at, updated_at, created_by_user_id, updated_by_user_id,
+                created_by_device_id, updated_by_device_id,
+                name_updated_at, name_updated_by, name_updated_by_device_id,
+                allowed_extensions, allowed_extensions_updated_at, allowed_extensions_updated_by, allowed_extensions_updated_by_device_id,
+                max_size, max_size_updated_at, max_size_updated_by, max_size_updated_by_device_id,
+                compression_level, compression_level_updated_at, compression_level_updated_by, compression_level_updated_by_device_id,
+                compression_method, compression_method_updated_at, compression_method_updated_by, compression_method_updated_by_device_id,
+                min_size_for_compression, min_size_for_compression_updated_at, min_size_for_compression_updated_by, min_size_for_compression_updated_by_device_id,
+                description_updated_at, description_updated_by, description_updated_by_device_id,
+                default_priority_updated_at, default_priority_updated_by, default_priority_updated_by_device_id,
+                icon_updated_at, icon_updated_by, icon_updated_by_device_id,
+                related_tables, related_tables_updated_at, related_tables_updated_by, related_tables_updated_by_device_id
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, 
+                $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, 
+                $41, $42, $43, $44, $45, $46, $47
             )
-            .bind(id.to_string())
-            .bind(&new_type.name)
-            .bind(&new_type.description)
-            .bind(&new_type.icon)
-            .bind(&new_type.color)
-            .bind(new_type.default_priority.as_str()) // Bind default_priority as TEXT
-            .bind(&now).bind(&now)
-            .bind(&user_id).bind(&user_id)
-            // LWW fields initialization
-            .bind(&now).bind(&user_id) // name
-            .bind(new_type.description.as_ref().map(|_| &now))
-            .bind(new_type.description.as_ref().map(|_| &user_id)) // description
-            .bind(new_type.icon.as_ref().map(|_| &now))
-            .bind(new_type.icon.as_ref().map(|_| &user_id)) // icon
-            .bind(new_type.color.as_ref().map(|_| &now))
-            .bind(new_type.color.as_ref().map(|_| &user_id)) // color
-            .execute(&mut *tx)
-            .await
-            .map_err(DbError::from)?;
+            "#,
+            id_bind, name_bind, desc_bind, icon_bind, default_priority_bind,
+            created_at_bind, updated_at_bind, created_by_user_id_bind, updated_by_user_id_bind,
+            created_by_device_id_bind, updated_by_device_id_bind,
+            name_updated_at_bind, name_updated_by_bind, name_updated_by_device_id_bind,
+            allowed_extensions_bind, allowed_extensions_updated_at_bind, allowed_extensions_updated_by_bind, allowed_extensions_updated_by_device_id_bind,
+            max_size_bind, max_size_updated_at_bind, max_size_updated_by_bind, max_size_updated_by_device_id_bind,
+            compression_level_bind, compression_level_updated_at_bind, compression_level_updated_by_bind, compression_level_updated_by_device_id_bind,
+            compression_method_bind, compression_method_updated_at_bind, compression_method_updated_by_bind, compression_method_updated_by_device_id_bind,
+            min_size_for_compression_bind, min_size_for_compression_updated_at_bind, min_size_for_compression_updated_by_bind, min_size_for_compression_updated_by_device_id_bind,
+            desc_updated_at_bind, desc_updated_by_bind, desc_updated_by_device_id_bind,
+            default_priority_updated_at_bind, default_priority_updated_by_bind, default_priority_updated_by_device_id_bind,
+            icon_updated_at_bind, icon_updated_by_bind, icon_updated_by_device_id_bind,
+            related_tables_bind, related_tables_updated_at_bind, related_tables_updated_by_bind, related_tables_updated_by_device_id_bind
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(DbError::from)?;
 
-            // Log Create Operation within the transaction
-            let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: Self::entity_name().to_string(),
-                entity_id: id,
-                operation_type: ChangeOperationType::Create,
-                field_name: None,
-                old_value: None,
-                new_value: None, // Optionally serialize new_type
-                timestamp: now_dt,
-                user_id: user_uuid,
-                device_id: device_uuid,
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
-            };
-            self.log_change_entry(entry, &mut tx).await?;
+        // Corrected ChangeLogEntry construction
+        let change_log_entry = ChangeLogEntry {
+            operation_id: Uuid::new_v4(), 
+            entity_table: Self::entity_name().to_string(),
+            entity_id: id,
+            operation_type: ChangeOperationType::Create, 
+            field_name: None,
+            old_value: None,
+            new_value: Some(serde_json::to_string(&new_type).map_err(|e| DomainError::Internal(e.to_string()))?), // Use DomainError::Internal and to_string for new_value
+            document_metadata: None, 
+            timestamp: now, 
+            user_id: auth.user_id,
+            device_id: device_id_uuid_val, 
+            sync_batch_id: None,
+            processed_at: None,
+            sync_error: None,
+        };
+        self.log_change_entry(change_log_entry, &mut tx).await?;
+        
+        tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
 
-            // Fetch within the transaction before commit might be slightly faster
-            // but requires careful handling if commit fails.
-            // Fetching after commit is safer.
-            Ok(id) // Return ID to fetch after commit
-        }.await;
-
-        match result {
-            Ok(created_id) => {
-                tx.commit().await.map_err(DbError::from)?;
-                // Fetch the newly created record outside the transaction
-                self.find_by_id(created_id).await
-            },
-            Err(e) => {
-                let _ = tx.rollback().await; // Ensure rollback on error
-                Err(e)
-            }
-        }
+        self.find_by_id(id).await
     }
 
     async fn update(
@@ -268,89 +324,77 @@ impl DocumentTypeRepository for SqliteDocumentTypeRepository {
         update_data: &UpdateDocumentType,
         auth: &AuthContext,
     ) -> DomainResult<DocumentType> {
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
         let result = async {
-            // Fetch existing to ensure it exists and for potential LWW checks (though not implemented here)
             let old_entity = self.find_by_id_with_tx(id, &mut tx).await?;
-            let now = Utc::now().to_rfc3339();
-            let now_dt = Utc::now(); // For logging
-            let user_id = auth.user_id.to_string();
-            let user_uuid = auth.user_id;
-            let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+            
+            let now_val = Utc::now();
+            let now_str_val = now_val.to_rfc3339();
+            let user_id_str_val = auth.user_id.to_string();
+            let user_uuid_val = auth.user_id;
+            let device_uuid_val: Option<Uuid> = if auth.device_id.is_empty() { None } else { auth.device_id.as_str().parse::<Uuid>().ok() };
+            let device_id_str_val = device_uuid_val.map(|id| id.to_string());
 
-            // Use dynamic query building for updates
-            let mut sets: Vec<String> = Vec::new();
-            let mut binds: Vec<String> = Vec::new(); // Using String for simplicity, sqlx handles types
+            let mut sets_changed_for_log: Vec<String> = Vec::new(); // To track which fields were actually changed for logging
+            let mut query_builder = QueryBuilder::new("UPDATE document_types SET ");
+            let mut first_set = true;
 
-             macro_rules! add_lww_update {
-                 ($field:ident, $value:expr) => {
-                     sets.push(format!("{0} = ?, {0}_updated_at = ?, {0}_updated_by = ?", stringify!($field)));
-                     binds.push($value.to_string()); // Value
-                     binds.push(now.clone());       // Updated At
-                     binds.push(user_id.clone());     // Updated By
-                 };
-                 ($field:ident, $value:expr, $type:ty) => { // For Option<String>
-                     if let Some(val) = $value {
-                        add_lww_update!($field, val);
-                     }
-                 };
-             }
-
-             if let Some(name) = &update_data.name {
-                 add_lww_update!(name, name);
-             }
-             // Use explicit check for Option<String> to handle None vs Some("") if needed
-             add_lww_update!(description, &update_data.description, Option<String>);
-             add_lww_update!(icon, &update_data.icon, Option<String>);
-             add_lww_update!(color, &update_data.color, Option<String>);
-
-             // Non-LWW field update (if needed)
-              if let Some(prio) = &update_data.default_priority {
-                 sets.push("default_priority = ?".to_string());
-                 binds.push(prio.as_str().to_string()); // Bind as TEXT
-             }
-
-
-            if sets.is_empty() {
-                // No fields to update, just return existing
-                return self.find_by_id_with_tx(id, &mut tx).await;
+            // Simplified Last-Write-Wins helper. Mirrors the approach used in the Project repository.
+            macro_rules! add_lww {
+                ($field_ident:ident, $sql_field:literal, $dto_opt:expr) => {
+                    if let Some(val) = $dto_opt {
+                        if !first_set { query_builder.push(", "); } else { first_set = false; }
+                        query_builder.push(format!("{} = ", $sql_field));
+                        query_builder.push_bind(val.clone());
+                        query_builder.push(format!(", {}_updated_at = ", $sql_field));
+                        query_builder.push_bind(now_str_val.clone());
+                        query_builder.push(format!(", {}_updated_by = ", $sql_field));
+                        query_builder.push_bind(user_id_str_val.clone());
+                        query_builder.push(format!(", {}_updated_by_device_id = ", $sql_field));
+                        query_builder.push_bind(device_id_str_val.clone());
+                        sets_changed_for_log.push($sql_field.to_string());
+                    }
+                };
             }
 
-            // Always update updated_at and updated_by_user_id
-            sets.push("updated_at = ?".to_string());
-            binds.push(now.clone());
-            sets.push("updated_by_user_id = ?".to_string());
-            binds.push(user_id.clone());
+            // Use the simplified macro for each updatable field
+            add_lww!(name, "name", update_data.name.as_ref());
+            add_lww!(description, "description", update_data.description.as_ref());
+            add_lww!(icon, "icon", update_data.icon.as_ref());
+            add_lww!(default_priority, "default_priority", update_data.default_priority.as_ref());
+            add_lww!(allowed_extensions, "allowed_extensions", update_data.allowed_extensions.as_ref());
+            add_lww!(max_size, "max_size", update_data.max_size.as_ref());
+            add_lww!(compression_level, "compression_level", update_data.compression_level.as_ref());
+            add_lww!(compression_method, "compression_method", update_data.compression_method.as_ref());
+            add_lww!(min_size_for_compression, "min_size_for_compression", update_data.min_size_for_compression.as_ref());
+            add_lww!(related_tables, "related_tables", update_data.related_tables.as_ref());
 
-            let query_str = format!("UPDATE document_types SET {} WHERE id = ?", sets.join(", "));
+            if first_set { return Ok(old_entity); }
 
-            // Build and execute the query
-            let mut q = query(&query_str);
-            for bind_val in binds {
-                q = q.bind(bind_val);
-            }
-            q = q.bind(id.to_string());
+            query_builder.push(", updated_at = "); query_builder.push_bind(now_str_val.clone());
+            query_builder.push(", updated_by_user_id = "); query_builder.push_bind(user_id_str_val.clone());
+            query_builder.push(", updated_by_device_id = "); query_builder.push_bind(device_id_str_val.clone());
+            
+            query_builder.push(" WHERE id = "); query_builder.push_bind(id.to_string());
+            let q = query_builder.build();
+            q.execute(&mut *tx).await.map_err(|e| DomainError::Database(DbError::from(e)))?;
 
-            q.execute(&mut *tx).await.map_err(DbError::from)?;
-
-            // Fetch and return the updated record
             let new_entity = self.find_by_id_with_tx(id, &mut tx).await?;
 
-            // Log field-level updates
-            macro_rules! log_if_changed {
-                ($field:ident) => {
-                    if old_entity.$field != new_entity.$field {
+            macro_rules! log_if_changed_field {
+                ($field_sql:expr, $old_val_expr:expr, $new_val_expr:expr) => {
+                    if sets_changed_for_log.contains(&$field_sql.to_string()) { // Only log if it was in the SET clause
                         let entry = ChangeLogEntry {
                             operation_id: Uuid::new_v4(),
                             entity_table: Self::entity_name().to_string(),
                             entity_id: id,
                             operation_type: ChangeOperationType::Update,
-                            field_name: Some(stringify!($field).to_string()),
-                            old_value: Some(serde_json::to_string(&old_entity.$field).unwrap_or_default()),
-                            new_value: Some(serde_json::to_string(&new_entity.$field).unwrap_or_default()),
-                            timestamp: now_dt,
-                            user_id: user_uuid,
-                            device_id: device_uuid,
+                            field_name: Some($field_sql.to_string()),
+                            old_value: Some(serde_json::to_string(&$old_val_expr).unwrap_or_default()),
+                            new_value: Some(serde_json::to_string(&$new_val_expr).unwrap_or_default()),
+                            timestamp: now_val,
+                            user_id: user_uuid_val,
+                            device_id: device_uuid_val,
                             document_metadata: None,
                             sync_batch_id: None,
                             processed_at: None,
@@ -360,19 +404,25 @@ impl DocumentTypeRepository for SqliteDocumentTypeRepository {
                     }
                 };
             }
-
-            log_if_changed!(name);
-            log_if_changed!(description);
-            log_if_changed!(icon);
-            log_if_changed!(color);
-            log_if_changed!(default_priority);
-
+            log_if_changed_field!("name", old_entity.name, new_entity.name);
+            log_if_changed_field!("description", old_entity.description, new_entity.description);
+            log_if_changed_field!("icon", old_entity.icon, new_entity.icon);
+            log_if_changed_field!("default_priority", old_entity.default_priority, new_entity.default_priority);
+            log_if_changed_field!("allowed_extensions", old_entity.allowed_extensions, new_entity.allowed_extensions);
+            log_if_changed_field!("max_size", old_entity.max_size, new_entity.max_size);
+            log_if_changed_field!("compression_level", old_entity.compression_level, new_entity.compression_level);
+            log_if_changed_field!("compression_method", old_entity.compression_method, new_entity.compression_method);
+            log_if_changed_field!("min_size_for_compression", old_entity.min_size_for_compression, new_entity.min_size_for_compression);
+            log_if_changed_field!("related_tables", old_entity.related_tables, new_entity.related_tables);
+            
             Ok(new_entity)
-
         }.await;
 
         match result {
-            Ok(doc_type) => { tx.commit().await.map_err(DbError::from)?; Ok(doc_type) },
+            Ok(doc_type) => { 
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?; 
+                Ok(doc_type) 
+            },
             Err(e) => { let _ = tx.rollback().await; Err(e) },
         }
     }
@@ -380,33 +430,33 @@ impl DocumentTypeRepository for SqliteDocumentTypeRepository {
     async fn find_all(&self, params: PaginationParams) -> DomainResult<PaginatedResult<DocumentType>> {
         let offset = (params.page - 1) * params.per_page;
         let total: i64 = query_scalar("SELECT COUNT(*) FROM document_types WHERE deleted_at IS NULL")
-            .fetch_one(&self.pool).await.map_err(DbError::from)?;
-
-        let rows = query_as::<_, DocumentTypeRow>(
-                "SELECT * FROM document_types WHERE deleted_at IS NULL ORDER BY name ASC LIMIT ? OFFSET ?"
-            )
+            .fetch_one(&self.pool).await.map_err(|e| DomainError::Database(DbError::from(e)))?;
+        let rows = query_as::<_, DocumentTypeRow>("SELECT * FROM document_types WHERE deleted_at IS NULL ORDER BY name ASC LIMIT ? OFFSET ?")
             .bind(params.per_page as i64).bind(offset as i64)
-            .fetch_all(&self.pool).await.map_err(DbError::from)?;
-
+            .fetch_all(&self.pool).await.map_err(|e| DomainError::Database(DbError::from(e)))?;
         let items = rows.into_iter().map(Self::map_row).collect::<DomainResult<Vec<_>>>()?;
         Ok(PaginatedResult::new(items, total as u64, params))
     }
 
-     async fn find_by_name(&self, name: &str) -> DomainResult<Option<DocumentType>> {
-         query_as::<_, DocumentTypeRow>("SELECT * FROM document_types WHERE name = ? AND deleted_at IS NULL")
+    async fn find_by_name(&self, name: &str) -> DomainResult<Option<DocumentType>> {
+        query_as::<_, DocumentTypeRow>("SELECT * FROM document_types WHERE name = ? AND deleted_at IS NULL")
             .bind(name)
             .fetch_optional(&self.pool)
             .await
-            .map_err(DbError::from)?
-            .map(Self::map_row) // Use map_row for conversion
-            .transpose() // Convert Option<Result<T, E>> to Result<Option<T>, E>
-     }
+            .map_err(|e| DomainError::Database(DbError::from(e)))?
+            .map(Self::map_row)
+            .transpose()
+    }
 }
 
 // --- Media Document Repository ---
 
 #[async_trait]
-pub trait MediaDocumentRepository: DeleteServiceRepository<MediaDocument> + Send + Sync {
+pub trait MediaDocumentRepository:
+    DeleteServiceRepository<MediaDocument> +
+    MergeableEntityRepository<MediaDocument> +
+    Send + Sync 
+{
     async fn create(
         &self,
         new_doc: &NewMediaDocument,
@@ -448,7 +498,7 @@ pub trait MediaDocumentRepository: DeleteServiceRepository<MediaDocument> + Send
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
-        priority: SyncPriority,
+        priority: SyncPriorityFromSyncTypes, // CORRECTED
         auth: &AuthContext, // To track who initiated the change
     ) -> DomainResult<u64>;
 
@@ -506,6 +556,105 @@ impl SqliteMediaDocumentRepository {
     ) -> DomainResult<()> {
         self.change_log_repo.create_change_log_with_tx(&entry, tx).await
     }
+
+    async fn find_by_id_option_with_tx<'t>(&self, id: Uuid, tx: &mut Transaction<'t, Sqlite>) -> DomainResult<Option<MediaDocument>> {
+        let row_opt = query_as::<_, MediaDocumentRow>(
+            "SELECT * FROM media_documents WHERE id = ?"
+        )
+        .bind(id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+
+        match row_opt {
+            Some(row) => Ok(Some(Self::map_row(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn insert_from_full_state<'t>(&self, tx: &mut Transaction<'t, Sqlite>, state: &MediaDocumentFullState) -> DomainResult<()> {
+        // Values from MediaDocumentFullState (LWW-style)
+        let id_str = state.id.to_string();
+        let original_filename_str = state.original_filename.as_deref().unwrap_or("unknown.bin");
+        let mime_type_str = state.mime_type.as_deref().unwrap_or("application/octet-stream");
+        let file_path_str = state.file_path.as_deref().unwrap_or("pending/path"); // This path should ideally be set meaningfully
+        let size_bytes_val = state.size_bytes.unwrap_or(0);
+        let blob_status_str = state.blob_status.as_deref().unwrap_or(BlobSyncStatus::Pending.as_str());
+        let related_table_str = state.related_table.as_deref().unwrap_or("unknown_table");
+        let related_id_str = state.related_id.map(|id| id.to_string());
+        let description_str = state.description.as_deref();
+        let created_at_str = state.created_at.to_rfc3339();
+        let created_by_user_id_str = state.created_by_user_id.to_string(); // In FullState, this is Uuid, not Option<Uuid>
+        let updated_at_str = state.updated_at.to_rfc3339();
+        let updated_by_user_id_str = state.updated_by_user_id.to_string(); // In FullState, this is Uuid, not Option<Uuid>
+        let deleted_at_str = state.deleted_at.map(|dt| dt.to_rfc3339());
+        let deleted_by_user_id_str = state.deleted_by_user_id.map(|id| id.to_string());
+
+        // Defaults for fields not in MediaDocumentFullState or needing schema defaults
+        let temp_related_id_str: Option<String> = None;
+        
+        // Resolve document type name to its UUID. If not found, skip insertion with error.
+        let type_id_result: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM document_types WHERE name = ? AND deleted_at IS NULL"
+        )
+        .bind(&state.document_type)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+
+        let type_id_str = match type_id_result {
+            Some(id) => id,
+            None => {
+                return Err(DomainError::Validation(ValidationError::custom(&format!(
+                    "Unknown document type name: {:?}", state.document_type
+                ))));
+            }
+        };
+
+        let compressed_file_path_str: Option<String> = None;
+        let compressed_size_bytes_val: Option<i64> = None;
+        let field_identifier_str: Option<String> = None;
+        let title_str: Option<String> = None;
+        let has_error_val: i32 = 0; // Default 0 (false)
+        let error_message_str: Option<String> = None;
+        let error_type_str: Option<String> = None;
+        let compression_status_str = CompressionStatus::Pending.as_str(); // Default 'pending'
+        let blob_key_str: Option<String> = None;
+        // Assuming SyncPriorityFromSyncDomain is available via `use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;`
+        let sync_priority_str = SyncPriorityFromSyncTypes::Normal.as_str(); // Default 'normal'
+        let last_sync_attempt_at_str: Option<String> = None;
+        let sync_attempt_count_val: i32 = 0; // Default 0
+
+        // Ensure all NOT NULL columns in media_documents are covered
+        sqlx::query!(
+            r#"
+            INSERT INTO media_documents (
+                id, related_table, related_id, temp_related_id, type_id,
+                original_filename, file_path, compressed_file_path, compressed_size_bytes,
+                field_identifier, title, description, mime_type, size_bytes,
+                has_error, error_message, error_type, compression_status,
+                blob_status, blob_key, sync_priority, last_sync_attempt_at,
+                sync_attempt_count, created_at, updated_at, created_by_user_id,
+                updated_by_user_id, deleted_at, deleted_by_user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+            id_str, related_table_str, related_id_str, temp_related_id_str, type_id_str,
+            original_filename_str, file_path_str, compressed_file_path_str, compressed_size_bytes_val,
+            field_identifier_str, title_str, description_str, mime_type_str, size_bytes_val,
+            has_error_val, error_message_str, error_type_str, compression_status_str,
+            blob_status_str, blob_key_str, sync_priority_str, last_sync_attempt_at_str,
+            sync_attempt_count_val, created_at_str, updated_at_str, created_by_user_id_str, 
+            updated_by_user_id_str, 
+            deleted_at_str, deleted_by_user_id_str
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+            eprintln!("Insert from full state failed. State: {:?}, Error: {:?}", state, e);
+            DbError::from(e)
+        })?;
+        Ok(())
+    }
 }
 
 // --- Basic trait implementations remain the same ---
@@ -534,9 +683,7 @@ impl SoftDeletable for SqliteMediaDocumentRepository {
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
         let now = Utc::now().to_rfc3339();
-        let now_dt = Utc::now(); // For logging
-        let user_uuid = auth.user_id;
-        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_uuid: Option<Uuid> = if auth.device_id.is_empty() { None } else { auth.device_id.as_str().parse::<Uuid>().ok() };
 
         let result = query(
             "UPDATE media_documents SET deleted_at = ?, deleted_by_user_id = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
@@ -556,10 +703,13 @@ impl SoftDeletable for SqliteMediaDocumentRepository {
         }
     }
     async fn soft_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(DbError::from(e)))?; // Changed map_err(DbError::from)
         let result = self.soft_delete_with_tx(id, auth, &mut tx).await;
         match result {
-            Ok(_) => { tx.commit().await.map_err(DbError::from)?; Ok(()) },
+            Ok(_) => { 
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?; 
+                Ok(()) 
+            },
             Err(e) => { let _ = tx.rollback().await; Err(e) },
         }
     }
@@ -568,7 +718,7 @@ impl SoftDeletable for SqliteMediaDocumentRepository {
 #[async_trait]
 impl HardDeletable for SqliteMediaDocumentRepository {
      fn entity_name(&self) -> &'static str {
-        Self::entity_name()
+        "media_documents"
     }
     async fn hard_delete_with_tx(
         &self,
@@ -576,7 +726,6 @@ impl HardDeletable for SqliteMediaDocumentRepository {
         _auth: &AuthContext,
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
-         // Assumes ON DELETE CASCADE is set up for related logs/versions in DB schema
          let result = query("DELETE FROM media_documents WHERE id = ?")
             .bind(id.to_string())
             .execute(&mut **tx)
@@ -584,17 +733,20 @@ impl HardDeletable for SqliteMediaDocumentRepository {
             .map_err(DbError::from)?;
 
         if result.rows_affected() == 0 {
-            Err(DomainError::EntityNotFound(self.entity_name().to_string(), id))
+            Err(DomainError::EntityNotFound(<Self as HardDeletable>::entity_name(self).to_string(), id))
         } else {
             Ok(())
         }
     }
     async fn hard_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(DbError::from(e)))?; // Changed map_err(DbError::from)
         // Consider adding file system cleanup logic here or in the service calling this
         let result = self.hard_delete_with_tx(id, auth, &mut tx).await;
         match result {
-            Ok(_) => { tx.commit().await.map_err(DbError::from)?; Ok(()) },
+            Ok(_) => { 
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?; 
+                Ok(()) 
+            },
             Err(e) => { let _ = tx.rollback().await; Err(e) },
         }
     }
@@ -667,7 +819,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             .bind(CompressionStatus::Pending.as_str()) // Default status
             .bind(BlobSyncStatus::Pending.as_str()) // Default status
             .bind(
-                SyncPriority::from_str(&new_doc.sync_priority)
+                SyncPriorityFromSyncTypes::from_str(&new_doc.sync_priority) // CORRECTED
                     .map_err(|_| DomainError::Validation(ValidationError::custom(&format!("Invalid sync priority string: {}", new_doc.sync_priority))))?
                     .as_str() // Bind the string representation
             )
@@ -717,8 +869,11 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         }.await;
 
         match result {
-            Ok(doc) => { tx.commit().await.map_err(DbError::from)?; Ok(doc) }
-            Err(e) => { let _ = tx.rollback().await; Err(e) }
+            Ok(doc) => { 
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?; 
+                Ok(doc) 
+            },
+            Err(e) => { let _ = tx.rollback().await; Err(e) },
         }
     }
 
@@ -808,7 +963,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
                 log_if_changed!(compressed_file_path, "compressed_file_path");
                 log_if_changed!(compressed_size_bytes, "compressed_size_bytes");
             }
-            tx.commit().await.map_err(DbError::from)?;
+            tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
             Ok(())
         }
     }
@@ -820,66 +975,60 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         blob_key: Option<&str>,
     ) -> DomainResult<()> {
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
-        let old_entity = self.find_by_id_with_tx(id, &mut tx).await.ok();
         let now = Utc::now();
-        let system_user_id = Uuid::nil(); // System operation
-        let device_uuid: Option<Uuid> = None;
+        let now_str = now.to_rfc3339(); // Define now_str
+        let status_str = status.as_str(); // Create a binding for status string
+        let id_string = id.to_string(); // Create a binding for id string
 
-        let result = query(
-            "UPDATE media_documents SET blob_status = ?, blob_key = ?, updated_at = ? WHERE id = ?"
+        let result = sqlx::query!(
+            "UPDATE media_documents SET blob_status = ?, blob_key = ?, updated_at = ? WHERE id = ?",
+            status_str, // Use bound variable
+            blob_key,
+            now_str,
+            id_string // Use bound variable
         )
-        .bind(status.as_str())
-        .bind(blob_key)
-        .bind(now.to_rfc3339())
-        .bind(id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(DbError::from)?;
 
         if result.rows_affected() == 0 {
-            let _ = tx.rollback().await;
-            Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id))
-        } else {
-            // Log changes if old entity was found
-            if let Some(old) = old_entity {
-                let new_entity = self.find_by_id_with_tx(id, &mut tx).await?;
+            let _ = tx.rollback().await; // Rollback on failure to find
+            return Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id));
+        }
 
-                macro_rules! log_if_changed {
-                    ($field_name:ident, $field_sql:literal) => {
-                        if old.$field_name != new_entity.$field_name {
-                            let entry = ChangeLogEntry {
-                                operation_id: Uuid::new_v4(),
-                                entity_table: Self::entity_name().to_string(),
-                                entity_id: id,
-                                operation_type: ChangeOperationType::Update,
-                                field_name: Some($field_sql.to_string()),
-                                old_value: serde_json::to_string(&old.$field_name).ok(),
-                                new_value: serde_json::to_string(&new_entity.$field_name).ok(),
-                                timestamp: now,
-                                user_id: system_user_id,
-                                device_id: device_uuid.clone(),
-                                document_metadata: None,
-                                sync_batch_id: None,
-                                processed_at: None,
-                                sync_error: None,
-                            };
-                            self.log_change_entry(entry, &mut tx).await?;
-                        }
-                    };
-                }
-                log_if_changed!(blob_status, "blob_status");
-                log_if_changed!(blob_key, "blob_key");
-            }
-            tx.commit().await.map_err(DbError::from)?;
-            Ok(())
+        // Log change if needed (e.g., if blob_status is considered a syncable field)
+        // For now, assuming this is an internal status update, not requiring a full change log entry.
+        // If it *does* require a change log for LWW, this would be more complex.
+        // Example light-weight log:
+        let entry = ChangeLogEntry {
+            operation_id: Uuid::new_v4(),
+            entity_table: Self::entity_name().to_string(),
+            entity_id: id,
+            operation_type: ChangeOperationType::Update, // Internal status updates are still 'Update'
+            field_name: Some("blob_status_update".to_string()), // Specific action/field
+            old_value: None, // Could fetch and serialize old status if needed for full LWW
+            new_value: Some(format!("status: {}, key: {:?}", status.as_str(), blob_key)), // Details of the change
+            timestamp: now, // Use the 'now' from earlier in the function
+            user_id: Uuid::nil(), // System operation
+            device_id: None, // System operation
+            document_metadata: None,
+            sync_batch_id: None,
+            processed_at: None,
+            sync_error: None,
+        };
+        self.log_change_entry(entry, &mut tx).await?;
+
+        match tx.commit().await {
+            Ok(_) => Ok(()),
+            Err(e) => Err(DomainError::Database(DbError::from(e))),
         }
     }
 
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
-        priority: SyncPriority,
-        auth: &AuthContext, // Keep auth context for tracking who updated
+        priority: SyncPriorityFromSyncTypes, // CORRECTED
+        auth: &AuthContext, // To track who initiated the change
     ) -> DomainResult<u64> {
         if ids.is_empty() {
             return Ok(0);
@@ -893,18 +1042,20 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             "SELECT id, sync_priority FROM media_documents WHERE id IN ({})",
             vec!["?"; ids.len()].join(", ")
         );
-        let mut select_builder = query_as::<_, (String, String)>(&select_query); // Expect TEXT
+        let mut select_builder = query_as::<_, (String, Option<String>)>(&select_query); // Expect Option<TEXT>
         for id_str in &id_strings {
             select_builder = select_builder.bind(id_str);
         }
-        let old_priorities: std::collections::HashMap<Uuid, SyncPriority> = select_builder
-            .fetch_all(&mut *tx) // Use the transaction
+        let old_priorities: std::collections::HashMap<Uuid, SyncPriorityFromSyncTypes> = select_builder
+            .fetch_all(&mut *tx) // Changed from &mut **tx to &mut *tx
             .await.map_err(DbError::from)?
             .into_iter()
-            .filter_map(|(id_str, prio_text_opt)| { // Changed to prio_text_opt: Option<String> or String
-                // Assuming sync_priority is NOT NULL in DB and TEXT
-                match Uuid::parse_str(&id_str) {
-                     Ok(id) => Some((id, SyncPriority::from_str(&prio_text_opt).unwrap_or(SyncPriority::Normal))),
+            .filter_map(|(id_str_val, prio_text_option)| { // Renamed id_str to id_str_val to avoid conflict
+                match Uuid::parse_str(&id_str_val) {
+                     Ok(id_uuid) => { // Renamed id to id_uuid
+                        let priority_str_slice = prio_text_option.as_deref().unwrap_or_else(|| SyncPriorityFromSyncTypes::Normal.as_str());
+                        Some((id_uuid, SyncPriorityFromSyncTypes::from_str(priority_str_slice).unwrap_or(SyncPriorityFromSyncTypes::Normal)))
+                     },
                      Err(_) => None,
                 }
             }).collect();
@@ -913,7 +1064,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         let now_dt = Utc::now(); // For logging
         let user_id_str = auth.user_id.to_string();
         let user_uuid = auth.user_id;
-        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_uuid: Option<Uuid> = if auth.device_id.is_empty() { None } else { auth.device_id.as_str().parse::<Uuid>().ok() };
         let priority_str = priority.as_str(); // Store as string
 
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
@@ -961,7 +1112,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             }
         }
 
-        tx.commit().await.map_err(DbError::from)?;
+        tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
         Ok(rows_affected)
     }
 
@@ -973,7 +1124,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
     ) -> DomainResult<MediaDocument> {
         query_as::<_, MediaDocumentRow>("SELECT * FROM media_documents WHERE id = ? AND deleted_at IS NULL")
             .bind(id.to_string())
-            .fetch_optional(&mut **tx) // Use &mut **tx
+            .fetch_optional(&mut **tx)
             .await
             .map_err(DbError::from)?
             .ok_or_else(|| DomainError::EntityNotFound(Self::entity_name().to_string(), id))
@@ -1220,14 +1371,13 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
      async fn update_paths_and_status(
          &self,
          document_id: Uuid,
-         file_path: Option<&str>, // New original path? Unlikely use case?
+         file_path: Option<&str>,
          compressed_file_path: Option<&str>,
          compressed_size_bytes: Option<i64>,
          compression_status: Option<CompressionStatus>,
      ) -> DomainResult<()> {
           let mut tx = self.pool.begin().await.map_err(DbError::from)?;
 
-          // --- Fetch Old State ---
           let old_entity = match self.find_by_id_with_tx(document_id, &mut tx).await {
              Ok(entity) => entity,
              Err(e) => {
@@ -1236,76 +1386,80 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
              }
          };
 
-         let mut sets: Vec<String> = Vec::new();
-         let mut binds: Vec<String> = Vec::new(); // Using String for simplicity
-         let mut binds_i64: HashMap<String, i64> = HashMap::new(); // For integer binds
+        let mut qb = QueryBuilder::new("UPDATE media_documents SET ");
+        let mut separated = qb.separated(", ");
+        let mut updates_made = false;
 
-         let now = Utc::now(); // For logging and timestamp
-         // Assuming system operation - no specific user/device ID
-         let system_user_id = Uuid::nil();
-         let device_uuid: Option<Uuid> = None;
+        // Temporary owned string for compression_status if it's not 'static str
+        let compression_status_val_str: Option<String> = 
+            compression_status.map(|s| s.as_str().to_string());
 
-         // Use macro to simplify adding updates
-         macro_rules! add_update {
-            ($field:ident, $value:expr, $bind_vec:ident) => {
-               if let Some(val) = $value {
-                   sets.push(format!("{} = ?", stringify!($field)));
-                   $bind_vec.push(val.to_string());
-               }
-            };
-             ($field:ident, $value:expr, $bind_map:ident, $type:ty) => {
-                if let Some(val) = $value {
-                    sets.push(format!("{} = ?", stringify!($field)));
-                    $bind_map.insert(stringify!($field).to_string(), val as $type);
-                }
-            };
-         }
-
-        // Add fields to update
-        add_update!(file_path, file_path, binds);
-        add_update!(compressed_file_path, compressed_file_path, binds);
-        add_update!(compressed_size_bytes, compressed_size_bytes, binds_i64, i64);
-        if let Some(status) = compression_status {
-            sets.push("compression_status = ?".to_string());
-            binds.push(status.as_str().to_string());
+        if let Some(val) = file_path {
+            separated.push("file_path = ");
+            separated.push_bind_unseparated(val);
+            updates_made = true;
+        }
+        if let Some(val) = compressed_file_path {
+            separated.push("compressed_file_path = ");
+            separated.push_bind_unseparated(val);
+            updates_made = true;
+        }
+        if let Some(val) = compressed_size_bytes {
+            separated.push("compressed_size_bytes = ");
+            separated.push_bind_unseparated(val);
+            updates_made = true;
+        }
+        if let Some(ref val_str) = compression_status_val_str { // Borrow the Option<String>
+            separated.push("compression_status = ");
+            separated.push_bind_unseparated(val_str); // Bind &String
+            updates_made = true;
         }
 
-
-        if sets.is_empty() {
-            return Ok(()); // Nothing to update
+        if !updates_made {
+            // If no specific fields were updated, still update `updated_at` if we proceed,
+            // or return early if no update at all is desired.
+            // For now, let's assume if called, an update to `updated_at` is intended.
+            // If no fields were provided, we might want to return Ok(()) to avoid an empty SET.
+            // The current logic will proceed to update `updated_at`.
+             // If STRICTLY no update if no optional fields are Some, then:
+            // return Ok(()); 
+            // However, the old logic proceeded to update `updated_at` anyway.
+            // We'll keep that behavior: if called, at least `updated_at` will be set.
+            // If `updates_made` is false and we want to ensure `updated_at` is the only thing set:
+            if !updates_made { // If this is the first item
+                 //qb.push("updated_at = "); // No comma needed if it's the only set
+            } else { // if other items were set, add comma
+                 //qb.push(", updated_at = ");
+            }
+            // This logic with separated handles it better.
         }
-
+        
         // Always update updated_at
-        sets.push("updated_at = ?".to_string());
-        binds.push(now.to_rfc3339()); // Use captured 'now'
+        let now = Utc::now();
+        let now_str = now.to_rfc3339(); // Corrected: ensure rfc3339
+        
+        separated.push("updated_at = ");
+        separated.push_bind_unseparated(now_str.as_str()); // Bind as &str
+
         // Optionally update updated_by_user_id if tracking sync agent ID
-        // sets.push("updated_by_user_id = ?".to_string());
-        // binds.push(SYSTEM_USER_ID.to_string());
+        // let system_user_id = Uuid::nil(); 
+        // separated.push("updated_by_user_id = ");
+        // separated.push_bind_unseparated(system_user_id.to_string());
 
-        let query_str = format!("UPDATE media_documents SET {} WHERE id = ?", sets.join(", "));
 
-        // Build and execute the query
-        let mut q = query(&query_str);
-        for bind_val in binds { // Bind strings first
-            q = q.bind(bind_val);
-        }
-        // Bind integers (order matters if placeholders are mixed)
-        // Assuming integer placeholders come after string ones based on SET order
-        if let Some(val) = binds_i64.get("compressed_size_bytes") {
-            q = q.bind(val);
-        }
-        // Add binds for other i64 fields if needed
+        qb.push(" WHERE id = ");
+        qb.push_bind(document_id.to_string());
 
-        q = q.bind(document_id.to_string()); // Bind the WHERE clause ID
-
-        let result = q.execute(&mut *tx).await.map_err(DbError::from)?;
+        let final_query = qb.build();
+        let result = final_query.execute(&mut *tx).await.map_err(DbError::from)?;
 
         if result.rows_affected() == 0 {
             let _ = tx.rollback().await;
             Err(DomainError::EntityNotFound(Self::entity_name().to_string(), document_id))
         } else {
-            // --- Log Field Changes ---
             let new_entity = self.find_by_id_with_tx(document_id, &mut tx).await?;
+            let system_user_id = Uuid::nil(); // Assuming system operation for logging these internal updates
+            let device_uuid: Option<Uuid> = None; // Assuming system operation
 
             macro_rules! log_if_changed {
                 ($field_name:ident, $field_sql:literal) => {
@@ -1318,7 +1472,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
                             field_name: Some($field_sql.to_string()),
                             old_value: serde_json::to_string(&old_entity.$field_name).ok(),
                             new_value: serde_json::to_string(&new_entity.$field_name).ok(),
-                            timestamp: now,
+                            timestamp: now, // Use the same 'now' for all logs in this op
                             user_id: system_user_id,
                             device_id: device_uuid.clone(),
                             document_metadata: None,
@@ -1336,12 +1490,84 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             log_if_changed!(compressed_size_bytes, "compressed_size_bytes");
             log_if_changed!(compression_status, "compression_status");
 
-            tx.commit().await.map_err(DbError::from)?;
+            tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
             Ok(())
         }
     }
 }
 
+#[async_trait]
+impl MergeableEntityRepository<MediaDocument> for SqliteMediaDocumentRepository {
+    fn entity_name(&self) -> &'static str { "media_documents" }
+
+    async fn merge_remote_change<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote_change: &ChangeLogEntry,
+    ) -> DomainResult<MergeOutcome> {
+        if remote_change.entity_table != <Self as MergeableEntityRepository<MediaDocument>>::entity_name(self) {
+            return Err(DomainError::Internal(format!(
+                "MediaDocumentRepository received change for wrong table: {}",
+                remote_change.entity_table
+            )));
+        }
+        let document_id = remote_change.entity_id;
+        use crate::domains::sync::types::ChangeOperationType as Op;
+        match remote_change.operation_type {
+            Op::Create => {
+                let state_json = remote_change.new_value.as_ref()
+                    .ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for document create")))?;
+                let payload: MediaDocumentFullState = serde_json::from_str(state_json)
+                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_document_create", &format!("Invalid JSON: {}", e))))?;
+                if self.find_by_id_option_with_tx(document_id, tx).await?.is_some() {
+                    return Ok(MergeOutcome::NoOp("Document already exists".to_string()));
+                }
+                self.insert_from_full_state(tx, &payload).await?;
+                Ok(MergeOutcome::Created(document_id))
+            }
+            Op::Update => {
+                // Simplified LWW: overwrite whole row if exists else NoOp
+                let state_json = remote_change.new_value.as_ref()
+                    .ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for document update")))?;
+                let payload: MediaDocumentFullState = serde_json::from_str(state_json)
+                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_document_update", &format!("Invalid JSON: {}", e))))?;
+                if self.find_by_id_option_with_tx(document_id, tx).await?.is_none() {
+                    // treat as create
+                    self.insert_from_full_state(tx, &payload).await?;
+                    return Ok(MergeOutcome::Created(document_id));
+                }
+                // Overwrite some columns (simplified)
+                let original_filename_bind = payload.original_filename.as_deref();
+                let mime_type_bind = payload.mime_type.as_deref();
+                let size_bytes_bind = payload.size_bytes.unwrap_or(0);
+                let updated_at_bind = payload.updated_at.to_rfc3339();
+                let document_id_bind = document_id.to_string();
+
+                query!(r#"UPDATE media_documents SET
+                    original_filename = ?, mime_type = ?, size_bytes = ?, updated_at = ?
+                    WHERE id = ?"#,
+                    original_filename_bind,
+                    mime_type_bind,
+                    size_bytes_bind,
+                    updated_at_bind,
+                    document_id_bind)
+                    .execute(&mut **tx).await.map_err(DbError::from)?;
+                Ok(MergeOutcome::Updated(document_id))
+            }
+            Op::HardDelete => {
+                if self.find_by_id_option_with_tx(document_id, tx).await?.is_none() {
+                    return Ok(MergeOutcome::NoOp("Already deleted".to_string()));
+                }
+                let temp_auth = AuthContext::internal_system_context();
+                self.hard_delete_with_tx(document_id, &temp_auth, tx).await?;
+                Ok(MergeOutcome::HardDeleted(document_id))
+            }
+            Op::Delete => {
+                Ok(MergeOutcome::NoOp("Soft delete ignored".to_string()))
+            }
+        }
+    }
+}
 
 // --- Document Version Repository --- (Assumed schema matches types)
 
@@ -1440,7 +1666,7 @@ impl DocumentVersionRepository for SqliteDocumentVersionRepository {
 
         match result {
             Ok(created_id) => {
-                tx.commit().await.map_err(DbError::from)?;
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
                 // Fetch the newly created record outside the transaction
                 let row = query_as::<_, DocumentVersionRow>("SELECT * FROM document_versions WHERE id = ?")
                    .bind(created_id.to_string()).fetch_one(&self.pool).await.map_err(DbError::from)?;

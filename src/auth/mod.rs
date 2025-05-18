@@ -1,4 +1,4 @@
-mod context;
+pub mod context;
 pub mod service;
 mod repository;
 pub mod jwt;

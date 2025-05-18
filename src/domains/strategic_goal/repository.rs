@@ -10,6 +10,7 @@ use crate::domains::sync::repository::ChangeLogRepository;
 use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams, SyncPriority};
+use crate::validation::Validate;
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{query, query_as, query_scalar};
@@ -195,27 +196,57 @@ impl SoftDeletable for SqliteStrategicGoalRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
         let deleted_by = auth.user_id.to_string();
-        
+        let device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
+        let device_uuid_for_log = auth.device_id.parse::<Uuid>().ok();
+
         let result = query(
             "UPDATE strategic_goals SET 
-             deleted_at = ?, 
-             deleted_by_user_id = ?
-             WHERE id = ? AND deleted_at IS NULL"
+             deleted_at = ?,
+             deleted_by_user_id = ?,
+             deleted_by_device_id = ?,
+             updated_at = ?, 
+             updated_by_user_id = ?, 
+             updated_by_device_id = ? 
+             WHERE id = ? AND deleted_at IS NULL",
         )
-        .bind(now)
-        .bind(deleted_by)
+        .bind(&now_str) // deleted_at
+        .bind(&deleted_by) // deleted_by_user_id
+        .bind(&device_id_str) // deleted_by_device_id
+        .bind(&now_str) // updated_at
+        .bind(&deleted_by) // updated_by_user_id (deleter is the last updater)
+        .bind(&device_id_str) // updated_by_device_id
         .bind(id.to_string())
-        .execute(&mut **tx) // Use &mut **tx here
+        .execute(&mut **tx)
         .await
         .map_err(DbError::from)?;
 
         if result.rows_affected() == 0 {
-            Err(DomainError::EntityNotFound("StrategicGoal".to_string(), id))
-        } else {
-            Ok(())
+            return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
         }
+
+        // Log the soft delete operation
+        let entry = ChangeLogEntry {
+            operation_id: Uuid::new_v4(),
+            entity_table: self.entity_name().to_string(),
+            entity_id: id,
+            operation_type: ChangeOperationType::Delete,
+            field_name: None,
+            old_value: None, 
+            new_value: None,
+            timestamp: now, 
+            user_id: auth.user_id,
+            device_id: device_uuid_for_log, // Use Option<Uuid> for log
+            document_metadata: None,
+            sync_batch_id: None,
+            processed_at: None,
+            sync_error: None,
+        };
+        self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
+
+        Ok(())
     }
 
     async fn soft_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
@@ -304,76 +335,95 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<StrategicGoal> {
+        new_goal.validate()?;
+
         let id = new_goal.id.unwrap_or_else(Uuid::new_v4);
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        let user_id = auth.user_id; // Use Uuid directly
+        let user_id = new_goal.created_by_user_id.unwrap_or(auth.user_id);
         let user_id_str = user_id.to_string();
-        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok(); 
+        let device_uuid_for_query = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
+        let device_uuid_for_log = auth.device_id.parse::<Uuid>().ok();
 
-        // Insert the new strategic goal
         query(
             r#"
             INSERT INTO strategic_goals (
-                id, objective_code, objective_code_updated_at, objective_code_updated_by,
-                outcome, outcome_updated_at, outcome_updated_by,
-                kpi, kpi_updated_at, kpi_updated_by,
-                target_value, target_value_updated_at, target_value_updated_by,
-                actual_value, actual_value_updated_at, actual_value_updated_by,
-                status_id, status_id_updated_at, status_id_updated_by,
-                responsible_team, responsible_team_updated_at, responsible_team_updated_by,
-                sync_priority,
-                created_at, updated_at, created_by_user_id, updated_by_user_id,
-                deleted_at, deleted_by_user_id
+                id, 
+                objective_code, objective_code_updated_at, objective_code_updated_by, objective_code_updated_by_device_id,
+                outcome, outcome_updated_at, outcome_updated_by, outcome_updated_by_device_id,
+                kpi, kpi_updated_at, kpi_updated_by, kpi_updated_by_device_id,
+                target_value, target_value_updated_at, target_value_updated_by, target_value_updated_by_device_id,
+                actual_value, actual_value_updated_at, actual_value_updated_by, actual_value_updated_by_device_id,
+                status_id, status_id_updated_at, status_id_updated_by, status_id_updated_by_device_id,
+                responsible_team, responsible_team_updated_at, responsible_team_updated_by, responsible_team_updated_by_device_id,
+                sync_priority, 
+                created_at, updated_at, 
+                created_by_user_id, created_by_device_id, 
+                updated_by_user_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
-                ?, -- for sync_priority
-                ?, ?, ?, ?, NULL, NULL
+                ?, 
+                ?, ?, ?, ?, /* objective_code fields */
+                ?, ?, ?, ?, /* outcome fields */
+                ?, ?, ?, ?, /* kpi fields */
+                ?, ?, ?, ?, /* target_value fields */
+                ?, ?, ?, ?, /* actual_value fields */
+                ?, ?, ?, ?, /* status_id fields */
+                ?, ?, ?, ?, /* responsible_team fields */
+                ?, 
+                ?, ?, 
+                ?, ?, 
+                ?, ?, 
+                NULL, NULL, NULL
             )
             "#,
         )
         .bind(id.to_string())
+        // Objective Code
         .bind(&new_goal.objective_code)
-        .bind(&now_str).bind(&user_id_str) // objective_code LWW
+        .bind(&now_str).bind(&user_id_str).bind(&device_uuid_for_query)
+        // Outcome
         .bind(&new_goal.outcome)
-        .bind(new_goal.outcome.as_ref().map(|_| &now_str)).bind(new_goal.outcome.as_ref().map(|_| &user_id_str)) // outcome LWW
+        .bind(new_goal.outcome.as_ref().map(|_| &now_str)).bind(new_goal.outcome.as_ref().map(|_| &user_id_str)).bind(new_goal.outcome.as_ref().map(|_| &device_uuid_for_query))
+        // KPI
         .bind(&new_goal.kpi)
-        .bind(new_goal.kpi.as_ref().map(|_| &now_str)).bind(new_goal.kpi.as_ref().map(|_| &user_id_str)) // kpi LWW
+        .bind(new_goal.kpi.as_ref().map(|_| &now_str)).bind(new_goal.kpi.as_ref().map(|_| &user_id_str)).bind(new_goal.kpi.as_ref().map(|_| &device_uuid_for_query))
+        // Target Value
         .bind(new_goal.target_value)
-        .bind(new_goal.target_value.map(|_| &now_str)).bind(new_goal.target_value.map(|_| &user_id_str)) // target_value LWW
-        .bind(new_goal.actual_value.unwrap_or(0.0)) // Use default if None
-        .bind(new_goal.actual_value.map(|_| &now_str)).bind(new_goal.actual_value.map(|_| &user_id_str)) // actual_value LWW
+        .bind(new_goal.target_value.map(|_| &now_str)).bind(new_goal.target_value.map(|_| &user_id_str)).bind(new_goal.target_value.map(|_| &device_uuid_for_query))
+        // Actual Value
+        .bind(new_goal.actual_value.unwrap_or(0.0))
+        .bind(new_goal.actual_value.map(|_| &now_str)).bind(new_goal.actual_value.map(|_| &user_id_str)).bind(new_goal.actual_value.map(|_| &device_uuid_for_query))
+        // Status ID
         .bind(new_goal.status_id)
-        .bind(new_goal.status_id.map(|_| &now_str)).bind(new_goal.status_id.map(|_| &user_id_str)) // status_id LWW
+        .bind(new_goal.status_id.map(|_| &now_str)).bind(new_goal.status_id.map(|_| &user_id_str)).bind(new_goal.status_id.map(|_| &device_uuid_for_query))
+        // Responsible Team
         .bind(&new_goal.responsible_team)
-        .bind(new_goal.responsible_team.as_ref().map(|_| &now_str)).bind(new_goal.responsible_team.as_ref().map(|_| &user_id_str)) // responsible_team LWW
+        .bind(new_goal.responsible_team.as_ref().map(|_| &now_str)).bind(new_goal.responsible_team.as_ref().map(|_| &user_id_str)).bind(new_goal.responsible_team.as_ref().map(|_| &device_uuid_for_query))
+        // Sync Priority
         .bind(new_goal.sync_priority.as_str())
-        .bind(&now_str).bind(&now_str) // created_at, updated_at
-        .bind(&user_id_str).bind(&user_id_str) // created_by, updated_by
+        // Timestamps & User IDs
+        .bind(&now_str) // created_at
+        .bind(&now_str) // updated_at
+        .bind(&user_id_str) // created_by_user_id
+        .bind(&device_uuid_for_query) // created_by_device_id
+        .bind(&user_id_str) // updated_by_user_id
+        .bind(&device_uuid_for_query) // updated_by_device_id
         .execute(&mut **tx)
         .await
         .map_err(DbError::from)?;
 
-        // Log Create Operation (Corrected types)
         let entry = ChangeLogEntry {
             operation_id: Uuid::new_v4(),
             entity_table: self.entity_name().to_string(),
-            entity_id: id, // Use Uuid
+            entity_id: id,
             operation_type: ChangeOperationType::Create,
-            field_name: None,
-            old_value: None,
-            new_value: None,
-            timestamp: now, // Use DateTime<Utc>
-            user_id: user_id, // Use Uuid
-            device_id: device_uuid, // Use Option<Uuid>
-            document_metadata: None,
-            sync_batch_id: None,
-            processed_at: None,
-            sync_error: None,
+            field_name: None, old_value: None, new_value: None, // For create, new_value could be the serialized entity
+            timestamp: now, user_id, device_id: device_uuid_for_log, // Use Option<Uuid> for log
+            document_metadata: None, sync_batch_id: None, processed_at: None, sync_error: None,
         };
         self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
 
-        // Fetch the created goal to return it
         self.find_by_id_with_tx(id, tx).await
     }
 
@@ -399,256 +449,148 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<StrategicGoal> {
-        // --- ADDED: Fetch Old State --- 
+        update_data.validate()?;
         let old_entity = self.find_by_id_with_tx(id, tx).await?;
-        
+
         let now = Utc::now();
         let now_str = now.to_rfc3339();
-        let user_id = auth.user_id; // Use Uuid directly
+        let user_id = update_data.updated_by_user_id;
         let user_id_str = user_id.to_string();
         let id_str = id.to_string();
-        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok(); 
+        let device_uuid_for_query = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
+        let device_uuid_for_log = auth.device_id.parse::<Uuid>().ok();
 
-        // Use QueryBuilder (existing code)
         let mut builder = QueryBuilder::new("UPDATE strategic_goals SET ");
-        let mut separated = builder.separated(", "); 
-        let mut fields_updated = false; 
+        let mut separated = builder.separated(", ");
+        let mut fields_updated = false;
 
-        // --- UPDATED Macro: Removed comparison logic --- 
-        macro_rules! add_lww {
-            ($field_name:ident, $field_sql:literal, $value:expr) => {
-                if let Some(val) = $value { // Check if the update data contains this field
+        macro_rules! add_lww_field {
+            ($field_ident:ident, $field_sql:literal, $value_expr:expr) => {
+                if let Some(val) = $value_expr {
                     separated.push(concat!($field_sql, " = "));
                     separated.push_bind_unseparated(val.clone());
                     separated.push(concat!(" ", $field_sql, "_updated_at = "));
                     separated.push_bind_unseparated(now_str.clone());
                     separated.push(concat!(" ", $field_sql, "_updated_by = "));
                     separated.push_bind_unseparated(user_id_str.clone());
-                    fields_updated = true; // Mark that *some* field is being updated in the SQL
+                    separated.push(concat!(" ", $field_sql, "_updated_by_device_id = "));
+                    separated.push_bind_unseparated(device_uuid_for_query.clone());
+                    fields_updated = true;
+                }
+            };
+            ($field_ident:ident, $field_sql:literal, $value_expr:expr, opt_opt) => {
+                 if let Some(opt_val) = $value_expr {
+                    separated.push(concat!($field_sql, " = "));
+                    separated.push_bind_unseparated(opt_val.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_at = "));
+                    separated.push_bind_unseparated(now_str.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_by = "));
+                    separated.push_bind_unseparated(user_id_str.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_by_device_id = "));
+                    separated.push_bind_unseparated(device_uuid_for_query.clone());
+                    fields_updated = true;
                 }
             };
         }
-        
-        // Special handling for actual_value (not Option in UpdateDTO)
-        if let Some(val) = update_data.actual_value {
-             // We still need to check if *some* update is requested for this field
-             // The actual *change* check happens later during logging.
-             separated.push("actual_value = ");
-             separated.push_bind_unseparated(val);
-             separated.push(" actual_value_updated_at = ");
-             separated.push_bind_unseparated(now_str.clone());
-             separated.push(" actual_value_updated_by = ");
-             separated.push_bind_unseparated(user_id_str.clone());
-             fields_updated = true; // Mark that SQL update includes this field
-        }
 
-        // Apply updates using the macro (passing Option directly)
-        add_lww!(objective_code, "objective_code", &update_data.objective_code.as_ref());
-        add_lww!(outcome, "outcome", &update_data.outcome.as_ref());
-        add_lww!(kpi, "kpi", &update_data.kpi.as_ref());
-        add_lww!(target_value, "target_value", &update_data.target_value.as_ref());
-        // actual_value handled above
-        add_lww!(status_id, "status_id", &update_data.status_id.as_ref());
-        add_lww!(responsible_team, "responsible_team", &update_data.responsible_team.as_ref());
+        add_lww_field!(objective_code, "objective_code", &update_data.objective_code);
+        add_lww_field!(outcome, "outcome", &update_data.outcome, opt_opt);
+        add_lww_field!(kpi, "kpi", &update_data.kpi, opt_opt);
+        add_lww_field!(target_value, "target_value", &update_data.target_value, opt_opt);
+        add_lww_field!(actual_value, "actual_value", &update_data.actual_value, opt_opt);
+        add_lww_field!(status_id, "status_id", &update_data.status_id, opt_opt);
+        add_lww_field!(responsible_team, "responsible_team", &update_data.responsible_team, opt_opt);
 
-        // Add sync_priority if provided
-        if let Some(priority) = update_data.sync_priority {
-            // Check if update data contains sync_priority
+        if let Some(priority) = &update_data.sync_priority {
             separated.push("sync_priority = ");
             separated.push_bind_unseparated(priority.as_str());
-            fields_updated = true; // Mark that SQL update includes this field
+            fields_updated = true;
         }
 
-        // Only execute if fields were included in the update request
         if !fields_updated {
-            // If update_data was empty or only contained unchanged values (which we don't check here anymore)
-            // This logic might need refinement depending on desired behavior for empty updates.
-            // For now, if no fields were *present* in update_data, return the old state.
-            return Ok(old_entity); 
+            // If no specific LWW fields were updated, still update the main record's timestamp and user, if different from creation
+            if old_entity.updated_by_user_id != Some(user_id) || old_entity.updated_by_device_id.map(|u| u.to_string()) != device_uuid_for_query {
+                 separated.push("updated_at = ");
+                 separated.push_bind_unseparated(now_str.clone());
+                 separated.push("updated_by_user_id = ");
+                 separated.push_bind_unseparated(user_id_str.clone());
+                 separated.push("updated_by_device_id = ");
+                 separated.push_bind_unseparated(device_uuid_for_query.clone());
+            } else {
+                return Ok(old_entity); // No changes at all
+            }
+        } else {
+            // If LWW fields were updated, always update the main record's timestamp and user
+            separated.push("updated_at = ");
+            separated.push_bind_unseparated(now_str.clone());
+            separated.push("updated_by_user_id = ");
+            separated.push_bind_unseparated(user_id_str.clone());
+            separated.push("updated_by_device_id = ");
+            separated.push_bind_unseparated(device_uuid_for_query.clone());
         }
 
-        // Always add updated_at and updated_by_user_id (existing code)
-        separated.push("updated_at = ");
-        separated.push_bind_unseparated(now_str.clone());
-        separated.push("updated_by_user_id = ");
-        separated.push_bind_unseparated(user_id_str.clone());
-
-        // Finalize and execute the SQL UPDATE (existing code)
         builder.push(" WHERE id = ");
         builder.push_bind(id_str);
-        builder.push(" AND deleted_at IS NULL"); 
+        builder.push(" AND deleted_at IS NULL");
+
         let query = builder.build();
         let result = query.execute(&mut **tx).await.map_err(DbError::from)?;
+
         if result.rows_affected() == 0 {
-            return Err(DomainError::EntityNotFound(Self::entity_name(self).to_string(), id));
+             // This might happen if the record was deleted by another process after `find_by_id_with_tx`
+             // or if the WHERE clause (id = ? AND deleted_at IS NULL) didn't match.
+            return self.find_by_id_with_tx(id, tx).await
+                .err()
+                .map_or(Err(DomainError::EntityNotFound(self.entity_name().to_string(), id)), |e| Err(e));
         }
         
-        // --- Fetch New State & Log Field Updates (No changes needed here) --- 
-        let new_entity = self.find_by_id_with_tx(id, tx).await?; 
+        let new_entity = self.find_by_id_with_tx(id, tx).await?;
 
-        // Compare and log each potentially updated field
-        if old_entity.objective_code != new_entity.objective_code {
-            // --- INLINED Logging Logic --- 
-            let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
-                entity_id: id, 
-                operation_type: ChangeOperationType::Update,
-                field_name: Some("objective_code".to_string()),
-                old_value: serde_json::to_string(&old_entity.objective_code).ok(),
-                new_value: serde_json::to_string(&new_entity.objective_code).ok(),
-                timestamp: now, 
-                user_id: user_id, 
-                device_id: device_uuid.clone(), 
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
+        // Log changes for each field
+        macro_rules! log_if_changed {
+            ($field:ident, $field_name_str:expr) => {
+                if old_entity.$field != new_entity.$field {
+                    let entry = ChangeLogEntry {
+                        operation_id: Uuid::new_v4(),
+                        entity_table: self.entity_name().to_string(),
+                        entity_id: id, 
+                        operation_type: ChangeOperationType::Update,
+                        field_name: Some($field_name_str.to_string()),
+                        old_value: serde_json::to_string(&old_entity.$field).ok(),
+                        new_value: serde_json::to_string(&new_entity.$field).ok(),
+                        timestamp: now, user_id: user_id, device_id: device_uuid_for_log.clone(),
+                        document_metadata: None, sync_batch_id: None, processed_at: None, sync_error: None,
+                    };
+                    self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
+                }
             };
-            self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
         }
-        if old_entity.outcome != new_entity.outcome {
-            // --- INLINED Logging Logic --- 
-             let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
-                entity_id: id, 
-                operation_type: ChangeOperationType::Update,
-                field_name: Some("outcome".to_string()),
-                old_value: serde_json::to_string(&old_entity.outcome).ok(),
-                new_value: serde_json::to_string(&new_entity.outcome).ok(),
-                timestamp: now, 
-                user_id: user_id, 
-                device_id: device_uuid.clone(), 
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
-            };
-            self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
-        }
-         if old_entity.kpi != new_entity.kpi {
-            // --- INLINED Logging Logic --- 
-             let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
-                entity_id: id, 
-                operation_type: ChangeOperationType::Update,
-                field_name: Some("kpi".to_string()),
-                old_value: serde_json::to_string(&old_entity.kpi).ok(),
-                new_value: serde_json::to_string(&new_entity.kpi).ok(),
-                timestamp: now, 
-                user_id: user_id, 
-                device_id: device_uuid.clone(), 
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
-            };
-            self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
-        }
-         if old_entity.target_value != new_entity.target_value {
-            // --- INLINED Logging Logic --- 
-             let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
-                entity_id: id, 
-                operation_type: ChangeOperationType::Update,
-                field_name: Some("target_value".to_string()),
-                old_value: serde_json::to_string(&old_entity.target_value).ok(),
-                new_value: serde_json::to_string(&new_entity.target_value).ok(),
-                timestamp: now, 
-                user_id: user_id, 
-                device_id: device_uuid.clone(), 
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
-            };
-            self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
-        }
-         if old_entity.actual_value != new_entity.actual_value { 
-            // --- INLINED Logging Logic --- 
-             let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
-                entity_id: id, 
-                operation_type: ChangeOperationType::Update,
-                field_name: Some("actual_value".to_string()),
-                old_value: serde_json::to_string(&old_entity.actual_value).ok(),
-                new_value: serde_json::to_string(&new_entity.actual_value).ok(),
-                timestamp: now, 
-                user_id: user_id, 
-                device_id: device_uuid.clone(), 
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
-            };
-            self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
-        }
-        if old_entity.status_id != new_entity.status_id {
-            // --- INLINED Logging Logic --- 
-             let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
-                entity_id: id, 
-                operation_type: ChangeOperationType::Update,
-                field_name: Some("status_id".to_string()),
-                old_value: serde_json::to_string(&old_entity.status_id).ok(),
-                new_value: serde_json::to_string(&new_entity.status_id).ok(),
-                timestamp: now, 
-                user_id: user_id, 
-                device_id: device_uuid.clone(), 
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
-            };
-            self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
-        }
-        if old_entity.responsible_team != new_entity.responsible_team {
-            // --- INLINED Logging Logic --- 
-             let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
-                entity_id: id, 
-                operation_type: ChangeOperationType::Update,
-                field_name: Some("responsible_team".to_string()),
-                old_value: serde_json::to_string(&old_entity.responsible_team).ok(),
-                new_value: serde_json::to_string(&new_entity.responsible_team).ok(),
-                timestamp: now, 
-                user_id: user_id, 
-                device_id: device_uuid.clone(), 
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
-            };
-            self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
-        }
+
+        log_if_changed!(objective_code, "objective_code");
+        log_if_changed!(outcome, "outcome");
+        log_if_changed!(kpi, "kpi");
+        log_if_changed!(target_value, "target_value");
+        log_if_changed!(actual_value, "actual_value");
+        log_if_changed!(status_id, "status_id");
+        log_if_changed!(responsible_team, "responsible_team");
+        // log_if_changed!(sync_priority, "sync_priority"); // Handled below
+
         if old_entity.sync_priority != new_entity.sync_priority {
-            // --- INLINED Logging Logic --- 
              let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
                 entity_table: self.entity_name().to_string(),
-                entity_id: id, 
+                entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("sync_priority".to_string()),
                 old_value: serde_json::to_string(old_entity.sync_priority.as_str()).ok(),
                 new_value: serde_json::to_string(new_entity.sync_priority.as_str()).ok(),
-                timestamp: now, 
-                user_id: user_id, 
-                device_id: device_uuid.clone(), 
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
+                timestamp: now, user_id: user_id, device_id: device_uuid_for_log.clone(),
+                document_metadata: None, sync_batch_id: None, processed_at: None, sync_error: None,
             };
             self.change_log_repo.create_change_log_with_tx(&entry, tx).await?;
         }
-        
-        Ok(new_entity) // Return the final state
+
+        Ok(new_entity)
     }
 
     async fn find_all(

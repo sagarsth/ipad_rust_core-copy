@@ -294,17 +294,19 @@ impl SoftDeletable for SqliteLivelihoodRepository {
         }
         
         let now = Utc::now();
+        let device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
         
         // Update the record with deleted_at and deleted_by
         let rows_affected = query(
             r#"
             UPDATE livelihoods 
-            SET deleted_at = ?, deleted_by_user_id = ?, updated_at = ?
+            SET deleted_at = ?, deleted_by_user_id = ?, deleted_by_device_id = ?, updated_at = ?
             WHERE id = ? AND deleted_at IS NULL
             "#
         )
         .bind(now.to_rfc3339())
         .bind(auth.user_id.to_string())
+        .bind(device_id_str)
         .bind(now.to_rfc3339())
         .bind(id.to_string())
         .execute(&mut **tx)
@@ -413,6 +415,7 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         let user_id = auth.user_id;
         let user_id_str = user_id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
         let created_by_user_id_for_query = new_livelihood.created_by_user_id.unwrap_or(user_id);
         let created_by_user_id_str = created_by_user_id_for_query.to_string();
 
@@ -420,24 +423,26 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
             r#"
             INSERT INTO livelihoods (
                 id, participant_id, project_id, 
-                type, type_updated_at, type_updated_by, 
-                description, description_updated_at, description_updated_by,
-                status_id, status_id_updated_at, status_id_updated_by, 
-                initial_grant_date, initial_grant_date_updated_at, initial_grant_date_updated_by, 
-                initial_grant_amount, initial_grant_amount_updated_at, initial_grant_amount_updated_by,
+                type, type_updated_at, type_updated_by, type_updated_by_device_id,
+                description, description_updated_at, description_updated_by, description_updated_by_device_id,
+                status_id, status_id_updated_at, status_id_updated_by, status_id_updated_by_device_id,
+                initial_grant_date, initial_grant_date_updated_at, initial_grant_date_updated_by, initial_grant_date_updated_by_device_id,
+                initial_grant_amount, initial_grant_amount_updated_at, initial_grant_amount_updated_by, initial_grant_amount_updated_by_device_id,
                 sync_priority, 
                 created_at, updated_at, created_by_user_id, updated_by_user_id, 
-                deleted_at, deleted_by_user_id
+                created_by_device_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
             ) VALUES (
                 ?, ?, ?, /* id, participant_id, project_id */
-                ?, ?, ?, /* type, type_updated_at, type_updated_by */
-                ?, ?, ?, /* description, description_updated_at, description_updated_by */
-                ?, ?, ?, /* status_id, status_id_updated_at, status_id_updated_by */
-                ?, ?, ?, /* initial_grant_date, initial_grant_date_updated_at, initial_grant_date_updated_by */
-                ?, ?, ?, /* initial_grant_amount, initial_grant_amount_updated_at, initial_grant_amount_updated_by */
+                ?, ?, ?, ?, /* type, type_updated_at, type_updated_by, type_updated_by_device_id */
+                ?, ?, ?, ?, /* description, description_updated_at, description_updated_by, description_updated_by_device_id */
+                ?, ?, ?, ?, /* status_id, status_id_updated_at, status_id_updated_by, status_id_updated_by_device_id */
+                ?, ?, ?, ?, /* initial_grant_date, initial_grant_date_updated_at, initial_grant_date_updated_by, initial_grant_date_updated_by_device_id */
+                ?, ?, ?, ?, /* initial_grant_amount, initial_grant_amount_updated_at, initial_grant_amount_updated_by, initial_grant_amount_updated_by_device_id */
                 ?,       /* sync_priority */
                 ?, ?, ?, ?, /* created_at, updated_at, created_by_user_id, updated_by_user_id */
-                NULL, NULL  /* deleted_at, deleted_by_user_id */
+                ?, ?, /* created_by_device_id, updated_by_device_id */
+                NULL, NULL, NULL  /* deleted_at, deleted_by_user_id, deleted_by_device_id */
             )
             "#,
         )
@@ -445,20 +450,21 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         .bind(new_livelihood.participant_id.map(|uid| uid.to_string()))
         .bind(new_livelihood.project_id.map(|uid| uid.to_string()))
         .bind(&new_livelihood.type_)
-        .bind(&now_str).bind(&user_id_str) // type_ LWW
+        .bind(&now_str).bind(&user_id_str).bind(&device_id_str) // type_ LWW
         .bind(&new_livelihood.description)
-        .bind(new_livelihood.description.as_ref().map(|_| &now_str)).bind(new_livelihood.description.as_ref().map(|_| &user_id_str)) // description LWW
+        .bind(new_livelihood.description.as_ref().map(|_| &now_str)).bind(new_livelihood.description.as_ref().map(|_| &user_id_str)).bind(new_livelihood.description.as_ref().map(|_| &device_id_str)) // description LWW
         .bind(new_livelihood.status_id)
-        .bind(new_livelihood.status_id.map(|_| &now_str)).bind(new_livelihood.status_id.map(|_| &user_id_str)) // status_id LWW
+        .bind(new_livelihood.status_id.map(|_| &now_str)).bind(new_livelihood.status_id.map(|_| &user_id_str)).bind(new_livelihood.status_id.map(|_| &device_id_str)) // status_id LWW
         .bind(&new_livelihood.initial_grant_date)
-        .bind(new_livelihood.initial_grant_date.as_ref().map(|_| &now_str)).bind(new_livelihood.initial_grant_date.as_ref().map(|_| &user_id_str)) // initial_grant_date LWW
+        .bind(new_livelihood.initial_grant_date.as_ref().map(|_| &now_str)).bind(new_livelihood.initial_grant_date.as_ref().map(|_| &user_id_str)).bind(new_livelihood.initial_grant_date.as_ref().map(|_| &device_id_str)) // initial_grant_date LWW
         .bind(new_livelihood.initial_grant_amount)
-        .bind(new_livelihood.initial_grant_amount.map(|_| &now_str)).bind(new_livelihood.initial_grant_amount.map(|_| &user_id_str)) // initial_grant_amount LWW
+        .bind(new_livelihood.initial_grant_amount.map(|_| &now_str)).bind(new_livelihood.initial_grant_amount.map(|_| &user_id_str)).bind(new_livelihood.initial_grant_amount.map(|_| &device_id_str)) // initial_grant_amount LWW
         .bind(new_livelihood.sync_priority.as_str())
         .bind(&now_str) // created_at
         .bind(&now_str) // updated_at
         .bind(&created_by_user_id_str) // created_by_user_id
         .bind(&user_id_str) // updated_by_user_id
+        .bind(&device_id_str).bind(&device_id_str) // created_by_device_id, updated_by_device_id
         .execute(&mut **tx)
         .await
         .map_err(DbError::from)?;
@@ -510,6 +516,7 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         let user_id_str = user_id.to_string();
         let id_str = id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
 
         let mut builder = QueryBuilder::new("UPDATE livelihoods SET ");
         let mut separated = builder.separated(", ");
@@ -524,17 +531,21 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
                     separated.push_bind_unseparated(now_str.clone());
                     separated.push(concat!(" ", $field_sql, "_updated_by = "));
                     separated.push_bind_unseparated(user_id_str.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_by_device_id = "));
+                    separated.push_bind_unseparated(device_id_str.clone());
                     fields_updated = true;
                 }
             };
             ($field_ident:ident, $field_sql:literal, $value_expr:expr, opt_opt) => {
                 if let Some(opt_val) = $value_expr {
                     separated.push(concat!($field_sql, " = "));
-                    separated.push_bind_unseparated(opt_val);
+                    separated.push_bind_unseparated(opt_val.clone());
                     separated.push(concat!(" ", $field_sql, "_updated_at = "));
                     separated.push_bind_unseparated(now_str.clone());
                     separated.push(concat!(" ", $field_sql, "_updated_by = "));
                     separated.push_bind_unseparated(user_id_str.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_by_device_id = "));
+                    separated.push_bind_unseparated(device_id_str.clone());
                     fields_updated = true;
                 }
             };
@@ -566,6 +577,8 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         separated.push_bind_unseparated(now_str.clone());
         separated.push("updated_by_user_id = ");
         separated.push_bind_unseparated(user_id_str.clone());
+        separated.push("updated_by_device_id = ");
+        separated.push_bind_unseparated(device_id_str.clone());
 
         builder.push(" WHERE id = ");
         builder.push_bind(id_str);
@@ -1140,6 +1153,7 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         let user_id = auth.user_id;
         let user_id_str = user_id.to_string();
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
         let priority_str = priority.as_str();
 
         // Fetch old priorities (Map Uuid -> SyncPriorityFromSyncDomain)
@@ -1169,6 +1183,7 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         update_builder.push("sync_priority = "); update_builder.push_bind(priority_str.clone());
         update_builder.push(", updated_at = "); update_builder.push_bind(now_str.clone());
         update_builder.push(", updated_by_user_id = "); update_builder.push_bind(user_id_str.clone());
+        update_builder.push(", updated_by_device_id = "); update_builder.push_bind(device_id_str.clone());
         update_builder.push(" WHERE id IN (");
         let mut id_separated = update_builder.separated(",");
         for id_str in &id_strings { id_separated.push_bind(id_str); }
@@ -1252,7 +1267,7 @@ impl SqliteSubsequentGrantRepository {
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<SubsequentGrant> {
         let row = query_as::<_, SubsequentGrantRow>(
-            "SELECT * FROM subsequent_grants WHERE id = ? AND deleted_at IS NULL"
+            "SELECT id, livelihood_id, amount, amount_updated_at, amount_updated_by, amount_updated_by_device_id, purpose, purpose_updated_at, purpose_updated_by, purpose_updated_by_device_id, grant_date, grant_date_updated_at, grant_date_updated_by, grant_date_updated_by_device_id, sync_priority, created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id FROM subsequent_grants WHERE id = ? AND deleted_at IS NULL"
         )
         .bind(id.to_string())
         .fetch_optional(&mut **tx)
@@ -1293,45 +1308,48 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         new_grant.validate()?;
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let created_by = new_grant.created_by_user_id.unwrap_or(auth.user_id);
+        let now_str = now.to_rfc3339();
+        let user_id = auth.user_id;
+        let user_id_str = user_id.to_string();
+        let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
+        let device_id_str = device_uuid.map(|u| u.to_string());
+        let created_by = new_grant.created_by_user_id.unwrap_or(user_id);
+        let created_by_str = created_by.to_string();
         
         query(
              r#"
              INSERT INTO subsequent_grants (
                  id, 
                  livelihood_id, 
-                 amount, 
-                 amount_updated_at,
-                 amount_updated_by,
-                 purpose, 
-                 purpose_updated_at,
-                 purpose_updated_by,
-                 grant_date,
-                 grant_date_updated_at,
-                 grant_date_updated_by,
+                 amount, amount_updated_at, amount_updated_by, amount_updated_by_device_id,
+                 purpose, purpose_updated_at, purpose_updated_by, purpose_updated_by_device_id,
+                 grant_date, grant_date_updated_at, grant_date_updated_by, grant_date_updated_by_device_id,
+                 sync_priority,
                  created_at, 
                  updated_at,
                  created_by_user_id,
-                 updated_by_user_id
+                 updated_by_user_id,
+                 created_by_device_id,
+                 updated_by_device_id,
+                 deleted_at, deleted_by_user_id, deleted_by_device_id
              ) 
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
              "#
          )
          .bind(id.to_string())
          .bind(new_grant.livelihood_id.to_string())
          .bind(new_grant.amount)
-         .bind(new_grant.amount.map(|_| now.to_rfc3339()))
-         .bind(new_grant.amount.map(|_| auth.user_id.to_string()))
+         .bind(new_grant.amount.map(|_| &now_str)).bind(new_grant.amount.map(|_| &user_id_str)).bind(new_grant.amount.map(|_| &device_id_str))
          .bind(&new_grant.purpose)
-         .bind(new_grant.purpose.as_ref().map(|_| now.to_rfc3339()))
-         .bind(new_grant.purpose.as_ref().map(|_| auth.user_id.to_string()))
+         .bind(new_grant.purpose.as_ref().map(|_| &now_str)).bind(new_grant.purpose.as_ref().map(|_| &user_id_str)).bind(new_grant.purpose.as_ref().map(|_| &device_id_str))
          .bind(&new_grant.grant_date)
-         .bind(new_grant.grant_date.as_ref().map(|_| now.to_rfc3339()))
-         .bind(new_grant.grant_date.as_ref().map(|_| auth.user_id.to_string()))
-         .bind(now.to_rfc3339())
-         .bind(now.to_rfc3339())
-         .bind(created_by.to_string())
-         .bind(auth.user_id.to_string())
+         .bind(new_grant.grant_date.as_ref().map(|_| &now_str)).bind(new_grant.grant_date.as_ref().map(|_| &user_id_str)).bind(new_grant.grant_date.as_ref().map(|_| &device_id_str))
+         .bind(new_grant.sync_priority.as_str())
+         .bind(&now_str) // created_at
+         .bind(&now_str) // updated_at
+         .bind(&created_by_str) // created_by_user_id
+         .bind(&user_id_str) // updated_by_user_id
+         .bind(&device_id_str).bind(&device_id_str) // created_by_device_id, updated_by_device_id
          .execute(&mut **tx)
          .await
          .map_err(DbError::from)?;
@@ -1356,6 +1374,7 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         let now = Utc::now();
         let now_str = now.to_rfc3339();
         let user_id_str = auth.user_id.to_string();
+        let device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
         
         let mut builder = QueryBuilder::new("UPDATE subsequent_grants SET ");
         let mut separated = builder.separated(", ");
@@ -1365,39 +1384,44 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
             ($field_name:ident, $field_sql:literal, $value:expr) => {
                 if let Some(val) = $value {
                     separated.push(concat!($field_sql, " = "));
-                    separated.push_bind_unseparated(val.to_string());
-                    separated.push(concat!(" ", $field_sql, "_updated_at = "));
-                    separated.push_bind_unseparated(now_str.clone());
-                    separated.push(concat!(" ", $field_sql, "_updated_by = "));
-                    separated.push_bind_unseparated(user_id_str.clone());
-                    fields_updated = true;
-                }
-            };
-            ($field_name:ident, $field_sql:literal, $value:expr, $is_optional:expr) => {
-                if let Some(val) = $value {
-                    separated.push(concat!($field_sql, " = "));
                     separated.push_bind_unseparated(val.clone());
                     separated.push(concat!(" ", $field_sql, "_updated_at = "));
                     separated.push_bind_unseparated(now_str.clone());
                     separated.push(concat!(" ", $field_sql, "_updated_by = "));
                     separated.push_bind_unseparated(user_id_str.clone());
+                    separated.push(concat!(" ", $field_sql, "_updated_by_device_id = "));
+                    separated.push_bind_unseparated(device_id_str.clone());
                     fields_updated = true;
                 }
             };
         }
         
-        add_lww!(amount, "amount", update_data.amount);
-        add_lww!(purpose, "purpose", &update_data.purpose, true);
-        add_lww!(grant_date, "grant_date", &update_data.grant_date, true);
+        add_lww!(amount, "amount", &update_data.amount);
+        add_lww!(purpose, "purpose", &update_data.purpose);
+        add_lww!(grant_date, "grant_date", &update_data.grant_date);
         
+        if let Some(priority) = &update_data.sync_priority {
+            separated.push("sync_priority = ");
+            separated.push_bind_unseparated(priority.as_str());
+            fields_updated = true;
+        }
+
         if !fields_updated {
             return Ok(existing);
         }
         
         separated.push("updated_at = ");
-        separated.push_bind_unseparated(now_str);
-        separated.push(" updated_by_user_id = ");
-        separated.push_bind_unseparated(update_data.updated_by_user_id.to_string());
+        separated.push_bind_unseparated(now_str.clone());
+        
+        // Correctly handle updated_by_user_id binding
+        let final_updated_by_user_id_str = update_data.updated_by_user_id
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| user_id_str.clone()); // Default to current auth user if not specified in update_data
+        separated.push("updated_by_user_id = ");
+        separated.push_bind_unseparated(final_updated_by_user_id_str);
+        
+        separated.push("updated_by_device_id = ");
+        separated.push_bind_unseparated(device_id_str.clone());
         
         builder.push(" WHERE id = ");
         builder.push_bind(id.to_string());
@@ -1421,7 +1445,7 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         id: Uuid
     ) -> DomainResult<SubsequentGrant> {
         let row = query_as::<_, SubsequentGrantRow>(
-            "SELECT * FROM subsequent_grants WHERE id = ? AND deleted_at IS NULL"
+            "SELECT id, livelihood_id, amount, amount_updated_at, amount_updated_by, amount_updated_by_device_id, purpose, purpose_updated_at, purpose_updated_by, purpose_updated_by_device_id, grant_date, grant_date_updated_at, grant_date_updated_by, grant_date_updated_by_device_id, sync_priority, created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id FROM subsequent_grants WHERE id = ? AND deleted_at IS NULL"
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -1437,7 +1461,7 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         livelihood_id: Uuid
     ) -> DomainResult<Vec<SubsequentGrant>> {
         let rows = query_as::<_, SubsequentGrantRow>(
-            "SELECT * FROM subsequent_grants WHERE livelihood_id = ? AND deleted_at IS NULL ORDER BY created_at ASC"
+            "SELECT id, livelihood_id, amount, amount_updated_at, amount_updated_by, amount_updated_by_device_id, purpose, purpose_updated_at, purpose_updated_by, purpose_updated_by_device_id, grant_date, grant_date_updated_at, grant_date_updated_by, grant_date_updated_by_device_id, sync_priority, created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id FROM subsequent_grants WHERE livelihood_id = ? AND deleted_at IS NULL ORDER BY created_at ASC"
         )
         .bind(livelihood_id.to_string())
         .fetch_all(&self.pool)
@@ -1465,18 +1489,22 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         }
         
         let now = Utc::now();
+        let device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
         
         let mut builder = QueryBuilder::new("UPDATE subsequent_grants SET ");
         builder.push("deleted_at = ");
         builder.push_bind(now.to_rfc3339());
         builder.push(", deleted_by_user_id = ");
         builder.push_bind(auth.user_id.to_string());
+        builder.push(", deleted_by_device_id = ");
+        builder.push_bind(device_id_str);
         builder.push(", updated_at = ");
         builder.push_bind(now.to_rfc3339());
+        builder.push(", updated_by_device_id = "); // Also update this on soft delete
+        builder.push_bind(auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string()));
         
         builder.push(" WHERE id = ");
         builder.push_bind(id.to_string());
-        builder.push(" AND deleted_at IS NULL");
         
         let query = builder.build();
         let result = query.execute(&mut *tx).await.map_err(DbError::from)?;
@@ -1535,6 +1563,7 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
 
         let now = Utc::now().to_rfc3339();
         let user_id_str = auth.user_id.to_string();
+        let device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
         let document_id_str = document_id.to_string();
         let grant_id_str = grant_id.to_string();
         
@@ -1542,10 +1571,16 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         builder.push(&column_name);
         builder.push(" = ");
         builder.push_bind(document_id_str);
+        // Since this is an update to a specific field, we also update the LWW metadata for that field.
+        // Assuming the schema has `xxx_ref_updated_at`, `xxx_ref_updated_by`, `xxx_ref_updated_by_device_id`
+        // For simplicity, we'll just update the main record's updated_at, _by, _by_device_id
+        // A more granular approach would be ideal if such LWW columns exist per reference.
         builder.push(", updated_at = ");
         builder.push_bind(now);
         builder.push(", updated_by_user_id = ");
         builder.push_bind(user_id_str);
+        builder.push(", updated_by_device_id = ");
+        builder.push_bind(device_id_str);
         builder.push(" WHERE id = ");
         builder.push_bind(grant_id_str);
         builder.push(" AND deleted_at IS NULL");
@@ -1642,7 +1677,7 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         end_date: &str,
     ) -> DomainResult<Vec<SubsequentGrant>> {
         let rows = query_as::<_, SubsequentGrantRow>(
-            "SELECT * FROM subsequent_grants 
+            "SELECT id, livelihood_id, amount, amount_updated_at, amount_updated_by, amount_updated_by_device_id, purpose, purpose_updated_at, purpose_updated_by, purpose_updated_by_device_id, grant_date, grant_date_updated_at, grant_date_updated_by, grant_date_updated_by_device_id, sync_priority, created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id FROM subsequent_grants 
              WHERE 
                 (grant_date BETWEEN ? AND ?) OR
                 (DATE(created_at) BETWEEN DATE(?) AND DATE(?))

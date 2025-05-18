@@ -1,6 +1,6 @@
 // src/domains/activity/types.rs
 
-use crate::errors::{DomainError, DomainResult};
+use crate::errors::{DomainError, DomainResult, ValidationError};
 use crate::validation::{Validate, ValidationBuilder};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
@@ -13,6 +13,7 @@ use std::str::FromStr;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
 
+
 /// Activity entity - represents a specific activity within a project
 /// Aligned with v1_schema.sql
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -23,29 +24,37 @@ pub struct Activity {
     pub description: Option<String>,
     pub description_updated_at: Option<DateTime<Utc>>,
     pub description_updated_by: Option<Uuid>,
+    pub description_updated_by_device_id: Option<Uuid>,
     // Added KPI fields
     pub kpi: Option<String>,
     pub kpi_updated_at: Option<DateTime<Utc>>,
     pub kpi_updated_by: Option<Uuid>,
+    pub kpi_updated_by_device_id: Option<Uuid>,
     // Added Target Value fields
     pub target_value: Option<f64>,
     pub target_value_updated_at: Option<DateTime<Utc>>,
     pub target_value_updated_by: Option<Uuid>,
+    pub target_value_updated_by_device_id: Option<Uuid>,
     // Added Actual Value fields
     pub actual_value: Option<f64>, // Changed to Option<f64>
     pub actual_value_updated_at: Option<DateTime<Utc>>,
     pub actual_value_updated_by: Option<Uuid>,
+    pub actual_value_updated_by_device_id: Option<Uuid>,
     // Removed start/end date fields
     pub status_id: Option<i64>,
     pub status_id_updated_at: Option<DateTime<Utc>>,
     pub status_id_updated_by: Option<Uuid>,
+    pub status_id_updated_by_device_id: Option<Uuid>,
     pub sync_priority: SyncPriorityFromSyncDomain,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Uuid, // Changed to Uuid
+    pub created_by_device_id: Option<Uuid>,
     pub updated_by_user_id: Uuid, // Changed to Uuid
+    pub updated_by_device_id: Option<Uuid>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
 
     // Document reference fields
     pub photo_evidence_ref: Option<Uuid>,
@@ -222,29 +231,37 @@ pub struct ActivityRow {
     pub description: Option<String>,
     pub description_updated_at: Option<String>,
     pub description_updated_by: Option<String>,
+    pub description_updated_by_device_id: Option<String>,
     // Added KPI fields
     pub kpi: Option<String>,
     pub kpi_updated_at: Option<String>,
     pub kpi_updated_by: Option<String>,
+    pub kpi_updated_by_device_id: Option<String>,
     // Added Target Value fields
     pub target_value: Option<f64>,
     pub target_value_updated_at: Option<String>,
     pub target_value_updated_by: Option<String>,
+    pub target_value_updated_by_device_id: Option<String>,
     // Added Actual Value fields
     pub actual_value: Option<f64>, // Changed to Option<f64>
     pub actual_value_updated_at: Option<String>,
     pub actual_value_updated_by: Option<String>,
+    pub actual_value_updated_by_device_id: Option<String>,
     // Removed start/end date fields
     pub status_id: Option<i64>,
     pub status_id_updated_at: Option<String>,
     pub status_id_updated_by: Option<String>,
+    pub status_id_updated_by_device_id: Option<String>,
     pub sync_priority: String,
     pub created_at: String,
     pub updated_at: String,
     pub created_by_user_id: String, // Keep as String for FromRow
+    pub created_by_device_id: Option<String>,
     pub updated_by_user_id: String, // Keep as String for FromRow
+    pub updated_by_device_id: Option<String>,
     pub deleted_at: Option<String>,
     pub deleted_by_user_id: Option<String>,
+    pub deleted_by_device_id: Option<String>,
 
     // Document reference columns (TEXT NULL in DB)
     pub photo_evidence_ref: Option<String>,
@@ -257,44 +274,66 @@ pub struct ActivityRow {
 impl ActivityRow {
     /// Convert database row to domain entity
     pub fn into_entity(self) -> DomainResult<Activity> {
-        let parse_uuid = |s: String| Uuid::from_str(&s).map_err(|_| DomainError::InvalidUuid(s));
-        let parse_uuid_opt = |s: Option<String>| s.map(parse_uuid).transpose();
-        let parse_datetime = |s: String| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid date format: {}", s)));
-        let parse_datetime_opt = |s: Option<String>| s.map(parse_datetime).transpose();
-        let parse_sync_priority = |s: String| SyncPriorityFromSyncDomain::from_str(&s).map_err(|_| DomainError::Internal(format!("Invalid sync priority format: {}", s)));
+        let parse_uuid = |s: String, field_name: &str| Uuid::from_str(&s).map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid UUID format: {}", s))));
+        let parse_optional_uuid = |s: Option<String>, field_name: &str| -> DomainResult<Option<Uuid>> {
+            match s {
+                Some(id_str) => Uuid::parse_str(&id_str)
+                    .map(Some)
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid UUID format: {}", id_str)))),
+                None => Ok(None),
+            }
+        };
+        let parse_datetime = |s: String, field_name: &str| DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", s))));
+        let parse_optional_datetime = |s: Option<String>, field_name: &str| -> DomainResult<Option<DateTime<Utc>>> {
+             match s {
+                Some(dt_str) => DateTime::parse_from_rfc3339(&dt_str)
+                    .map(|dt| Some(dt.with_timezone(&Utc)))
+                    .map_err(|_| DomainError::Validation(ValidationError::format(field_name, &format!("Invalid RFC3339 format: {}", dt_str)))),
+                None => Ok(None),
+            }
+        };
+        let parse_sync_priority = |s: String| SyncPriorityFromSyncDomain::from_str(&s).map_err(|e| DomainError::Validation(ValidationError::format("sync_priority", &format!("Invalid sync priority: {} - Error: {}",s, e))));
 
         Ok(Activity {
-            id: parse_uuid(self.id)?,
-            project_id: parse_uuid_opt(self.project_id)?,
+            id: parse_uuid(self.id, "id")?,
+            project_id: parse_optional_uuid(self.project_id, "project_id")?,
             description: self.description,
-            description_updated_at: parse_datetime_opt(self.description_updated_at)?,
-            description_updated_by: parse_uuid_opt(self.description_updated_by)?,
+            description_updated_at: parse_optional_datetime(self.description_updated_at, "description_updated_at")?,
+            description_updated_by: parse_optional_uuid(self.description_updated_by, "description_updated_by")?,
+            description_updated_by_device_id: parse_optional_uuid(self.description_updated_by_device_id, "description_updated_by_device_id")?,
             kpi: self.kpi,
-            kpi_updated_at: parse_datetime_opt(self.kpi_updated_at)?,
-            kpi_updated_by: parse_uuid_opt(self.kpi_updated_by)?,
+            kpi_updated_at: parse_optional_datetime(self.kpi_updated_at, "kpi_updated_at")?,
+            kpi_updated_by: parse_optional_uuid(self.kpi_updated_by, "kpi_updated_by")?,
+            kpi_updated_by_device_id: parse_optional_uuid(self.kpi_updated_by_device_id, "kpi_updated_by_device_id")?,
             target_value: self.target_value,
-            target_value_updated_at: parse_datetime_opt(self.target_value_updated_at)?,
-            target_value_updated_by: parse_uuid_opt(self.target_value_updated_by)?,
+            target_value_updated_at: parse_optional_datetime(self.target_value_updated_at, "target_value_updated_at")?,
+            target_value_updated_by: parse_optional_uuid(self.target_value_updated_by, "target_value_updated_by")?,
+            target_value_updated_by_device_id: parse_optional_uuid(self.target_value_updated_by_device_id, "target_value_updated_by_device_id")?,
             actual_value: self.actual_value,
-            actual_value_updated_at: parse_datetime_opt(self.actual_value_updated_at)?,
-            actual_value_updated_by: parse_uuid_opt(self.actual_value_updated_by)?,
+            actual_value_updated_at: parse_optional_datetime(self.actual_value_updated_at, "actual_value_updated_at")?,
+            actual_value_updated_by: parse_optional_uuid(self.actual_value_updated_by, "actual_value_updated_by")?,
+            actual_value_updated_by_device_id: parse_optional_uuid(self.actual_value_updated_by_device_id, "actual_value_updated_by_device_id")?,
             status_id: self.status_id,
-            status_id_updated_at: parse_datetime_opt(self.status_id_updated_at)?,
-            status_id_updated_by: parse_uuid_opt(self.status_id_updated_by)?,
+            status_id_updated_at: parse_optional_datetime(self.status_id_updated_at, "status_id_updated_at")?,
+            status_id_updated_by: parse_optional_uuid(self.status_id_updated_by, "status_id_updated_by")?,
+            status_id_updated_by_device_id: parse_optional_uuid(self.status_id_updated_by_device_id, "status_id_updated_by_device_id")?,
             sync_priority: parse_sync_priority(self.sync_priority.clone())?,
-            created_at: parse_datetime(self.created_at)?,
-            updated_at: parse_datetime(self.updated_at)?,
-            created_by_user_id: parse_uuid(self.created_by_user_id)?, // Parse from String
-            updated_by_user_id: parse_uuid(self.updated_by_user_id)?, // Parse from String
-            deleted_at: parse_datetime_opt(self.deleted_at)?,
-            deleted_by_user_id: parse_uuid_opt(self.deleted_by_user_id)?,
+            created_at: parse_datetime(self.created_at, "created_at")?,
+            updated_at: parse_datetime(self.updated_at, "updated_at")?,
+            created_by_user_id: parse_uuid(self.created_by_user_id, "created_by_user_id")?,
+            created_by_device_id: parse_optional_uuid(self.created_by_device_id, "created_by_device_id")?,
+            updated_by_user_id: parse_uuid(self.updated_by_user_id, "updated_by_user_id")?,
+            updated_by_device_id: parse_optional_uuid(self.updated_by_device_id, "updated_by_device_id")?,
+            deleted_at: parse_optional_datetime(self.deleted_at, "deleted_at")?,
+            deleted_by_user_id: parse_optional_uuid(self.deleted_by_user_id, "deleted_by_user_id")?,
+            deleted_by_device_id: parse_optional_uuid(self.deleted_by_device_id, "deleted_by_device_id")?,
 
             // Parse document reference UUIDs
-            photo_evidence_ref: parse_uuid_opt(self.photo_evidence_ref)?,
-            receipts_ref: parse_uuid_opt(self.receipts_ref)?,
-            signed_report_ref: parse_uuid_opt(self.signed_report_ref)?,
-            monitoring_data_ref: parse_uuid_opt(self.monitoring_data_ref)?,
-            output_verification_ref: parse_uuid_opt(self.output_verification_ref)?,
+            photo_evidence_ref: parse_optional_uuid(self.photo_evidence_ref, "photo_evidence_ref")?,
+            receipts_ref: parse_optional_uuid(self.receipts_ref, "receipts_ref")?,
+            signed_report_ref: parse_optional_uuid(self.signed_report_ref, "signed_report_ref")?,
+            monitoring_data_ref: parse_optional_uuid(self.monitoring_data_ref, "monitoring_data_ref")?,
+            output_verification_ref: parse_optional_uuid(self.output_verification_ref, "output_verification_ref")?,
         })
     }
 }
