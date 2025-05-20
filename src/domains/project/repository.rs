@@ -6,7 +6,7 @@ use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::project::types::{NewProject, Project, ProjectRow, UpdateProject, ProjectStatistics, ProjectStatusBreakdown, ProjectMetadataCounts, ProjectDocumentReference};
 use crate::domains::sync::repository::ChangeLogRepository;
-use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
@@ -18,10 +18,11 @@ use uuid::Uuid;
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json;
+use crate::domains::user::repository::MergeableEntityRepository;
 
 /// Trait defining project repository operations
 #[async_trait]
-pub trait ProjectRepository: DeleteServiceRepository<Project> + Send + Sync {
+pub trait ProjectRepository: DeleteServiceRepository<Project> + MergeableEntityRepository<Project> + Send + Sync {
     async fn create(
         &self,
         new_project: &NewProject,
@@ -146,6 +147,9 @@ impl SqliteProjectRepository {
 
         Self::map_row_to_entity(row)
     }
+
+    /// Static table name reference to avoid trait method ambiguity
+    pub const ENTITY_TABLE: &'static str = "projects";
 }
 
 #[async_trait]
@@ -339,7 +343,7 @@ impl ProjectRepository for SqliteProjectRepository {
         // Log Create Operation
         let entry = ChangeLogEntry {
             operation_id: Uuid::new_v4(),
-            entity_table: self.entity_name().to_string(),
+            entity_table: Self::ENTITY_TABLE.to_string(),
             entity_id: id,
             operation_type: ChangeOperationType::Create,
             field_name: None,
@@ -454,7 +458,7 @@ impl ProjectRepository for SqliteProjectRepository {
         let query = builder.build();
         let result = query.execute(&mut **tx).await.map_err(DbError::from)?;
         if result.rows_affected() == 0 {
-            return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
+            return Err(DomainError::EntityNotFound(Self::ENTITY_TABLE.to_string(), id));
         }
 
         let new_entity = self.find_by_id_with_tx(id, tx).await?;
@@ -463,7 +467,7 @@ impl ProjectRepository for SqliteProjectRepository {
         if old_entity.name != new_entity.name { 
             let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
+                entity_table: Self::ENTITY_TABLE.to_string(),
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("name".to_string()),
@@ -482,7 +486,7 @@ impl ProjectRepository for SqliteProjectRepository {
         if old_entity.objective != new_entity.objective { 
             let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
+                entity_table: Self::ENTITY_TABLE.to_string(),
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("objective".to_string()),
@@ -501,7 +505,7 @@ impl ProjectRepository for SqliteProjectRepository {
         if old_entity.outcome != new_entity.outcome { 
             let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
+                entity_table: Self::ENTITY_TABLE.to_string(),
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("outcome".to_string()),
@@ -520,7 +524,7 @@ impl ProjectRepository for SqliteProjectRepository {
         if old_entity.status_id != new_entity.status_id { 
             let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
+                entity_table: Self::ENTITY_TABLE.to_string(),
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("status_id".to_string()),
@@ -539,7 +543,7 @@ impl ProjectRepository for SqliteProjectRepository {
         if old_entity.timeline != new_entity.timeline { 
             let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
+                entity_table: Self::ENTITY_TABLE.to_string(),
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("timeline".to_string()),
@@ -558,7 +562,7 @@ impl ProjectRepository for SqliteProjectRepository {
         if old_entity.responsible_team != new_entity.responsible_team { 
             let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
+                entity_table: Self::ENTITY_TABLE.to_string(),
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("responsible_team".to_string()),
@@ -577,7 +581,7 @@ impl ProjectRepository for SqliteProjectRepository {
         if old_entity.strategic_goal_id != new_entity.strategic_goal_id { 
             let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
+                entity_table: Self::ENTITY_TABLE.to_string(),
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("strategic_goal_id".to_string()),
@@ -596,7 +600,7 @@ impl ProjectRepository for SqliteProjectRepository {
         if old_entity.sync_priority != new_entity.sync_priority { 
             let entry = ChangeLogEntry {
                 operation_id: Uuid::new_v4(),
-                entity_table: self.entity_name().to_string(),
+                entity_table: Self::ENTITY_TABLE.to_string(),
                 entity_id: id,
                 operation_type: ChangeOperationType::Update,
                 field_name: Some("sync_priority".to_string()),
@@ -743,7 +747,7 @@ impl ProjectRepository for SqliteProjectRepository {
                 if *old_priority != priority {
                     let entry = ChangeLogEntry {
                         operation_id: Uuid::new_v4(),
-                        entity_table: self.entity_name().to_string(),
+                        entity_table: Self::ENTITY_TABLE.to_string(),
                         entity_id: *id,
                         operation_type: ChangeOperationType::Update,
                         field_name: Some("sync_priority".to_string()),
@@ -1188,5 +1192,112 @@ impl ProjectRepository for SqliteProjectRepository {
             projects_by_status,
             projects_by_goal,
         })
+    }
+}
+
+// === Sync Merge Implementation for Project ===
+#[async_trait]
+impl MergeableEntityRepository<Project> for SqliteProjectRepository {
+    fn entity_name(&self) -> &'static str { "projects" }
+    async fn merge_remote_change<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote_change: &ChangeLogEntry,
+    ) -> DomainResult<MergeOutcome> {
+        // Ensure the change is for the correct table
+        if remote_change.entity_table != Self::ENTITY_TABLE {
+            return Err(DomainError::Internal(format!(
+                "ProjectRepository received change for incorrect table: {}",
+                remote_change.entity_table
+            )));
+        }
+
+        let remote_device_id_str = remote_change.device_id.map(|id| id.to_string());
+
+        match remote_change.operation_type {
+            ChangeOperationType::Create | ChangeOperationType::Update => {
+                let state_json = remote_change.new_value.as_ref().ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for project change")))?;
+                let remote_state: Project = serde_json::from_str(state_json)
+                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_project", &format!("Invalid JSON: {}", e))))?;
+                let local_opt = match self.find_by_id_with_tx(remote_state.id, tx).await {
+                    Ok(ent) => Some(ent),
+                    Err(DomainError::EntityNotFound(_, _)) => None,
+                    Err(e) => return Err(e),
+                };
+                if let Some(local) = local_opt.clone() {
+                    if remote_state.updated_at <= local.updated_at {
+                        return Ok(MergeOutcome::NoOp("Local copy newer or equal".into()));
+                    }
+                    self.upsert_remote_state_with_tx(tx, &remote_state, remote_device_id_str.clone()).await?;
+                    Ok(MergeOutcome::Updated(remote_state.id))
+                } else {
+                    self.upsert_remote_state_with_tx(tx, &remote_state, remote_device_id_str.clone()).await?;
+                    Ok(MergeOutcome::Created(remote_state.id))
+                }
+            }
+            ChangeOperationType::Delete => Ok(MergeOutcome::NoOp("Remote soft delete ignored".into())),
+            ChangeOperationType::HardDelete => Ok(MergeOutcome::HardDeleted(remote_change.entity_id)),
+        }
+    }
+}
+
+impl SqliteProjectRepository {
+    /// Upsert remote Project state within a transaction
+    async fn upsert_remote_state_with_tx<'t>(&self, tx: &mut Transaction<'t, Sqlite>, remote: &Project, remote_device_id_str: Option<String>) -> DomainResult<()> {
+        sqlx::query(
+            r#"INSERT OR REPLACE INTO projects (
+                id, strategic_goal_id,
+                name, name_updated_at, name_updated_by, name_updated_by_device_id,
+                objective, objective_updated_at, objective_updated_by, objective_updated_by_device_id,
+                outcome, outcome_updated_at, outcome_updated_by, outcome_updated_by_device_id,
+                status_id, status_id_updated_at, status_id_updated_by, status_id_updated_by_device_id,
+                timeline, timeline_updated_at, timeline_updated_by, timeline_updated_by_device_id,
+                responsible_team, responsible_team_updated_at, responsible_team_updated_by, responsible_team_updated_by_device_id,
+                sync_priority,
+                created_at, updated_at, created_by_user_id, updated_by_user_id,
+                created_by_device_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+        )
+        .bind(remote.id.to_string())
+        .bind(remote.strategic_goal_id.map(|u| u.to_string()))
+        .bind(remote.name.clone())
+        .bind(remote.name_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.name_updated_by.map(|u| u.to_string()))
+        .bind(remote.name_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.objective.clone())
+        .bind(remote.objective_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.objective_updated_by.map(|u| u.to_string()))
+        .bind(remote.objective_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.outcome.clone())
+        .bind(remote.outcome_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.outcome_updated_by.map(|u| u.to_string()))
+        .bind(remote.outcome_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.status_id.clone())
+        .bind(remote.status_id_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.status_id_updated_by.map(|u| u.to_string()))
+        .bind(remote.status_id_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.timeline.clone())
+        .bind(remote.timeline_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.timeline_updated_by.map(|u| u.to_string()))
+        .bind(remote.timeline_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.responsible_team.clone())
+        .bind(remote.responsible_team_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.responsible_team_updated_by.map(|u| u.to_string()))
+        .bind(remote.responsible_team_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.sync_priority.as_str())
+        .bind(remote.created_at.to_rfc3339())
+        .bind(remote.updated_at.to_rfc3339())
+        .bind(remote.created_by_user_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_user_id.map(|u| u.to_string()))
+        .bind(remote.created_by_device_id.map(|u| u.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.updated_by_device_id.map(|u| u.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.deleted_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.deleted_by_user_id.map(|u| u.to_string()))
+        .bind(remote.deleted_by_device_id.map(|u| u.to_string()).or(remote_device_id_str))
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        Ok(())
     }
 }

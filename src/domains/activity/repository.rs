@@ -13,11 +13,12 @@ use uuid::Uuid;
 use std::sync::Arc;
 use serde_json;
 use crate::domains::sync::repository::ChangeLogRepository;
-use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
+use crate::domains::user::repository::MergeableEntityRepository;
 
 /// Trait defining activity repository operations
 #[async_trait]
-pub trait ActivityRepository: DeleteServiceRepository<Activity> + Send + Sync {
+pub trait ActivityRepository: DeleteServiceRepository<Activity> + MergeableEntityRepository<Activity> + Send + Sync {
     async fn create(
         &self,
         new_activity: &NewActivity,
@@ -504,5 +505,103 @@ impl ActivityRepository for SqliteActivityRepository {
             total as u64,
             params,
         ))
+    }
+}
+
+// === Sync Merge Implementation for Activity ===
+#[async_trait]
+impl MergeableEntityRepository<Activity> for SqliteActivityRepository {
+    fn entity_name(&self) -> &'static str { "activities" }
+
+    async fn merge_remote_change<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote_change: &ChangeLogEntry,
+    ) -> DomainResult<MergeOutcome> {
+        match remote_change.operation_type {
+            ChangeOperationType::Create | ChangeOperationType::Update => {
+                let state_json = remote_change.new_value.as_ref().ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for activity change")))?;
+                let remote_state: Activity = serde_json::from_str(state_json)
+                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_activity", &format!("Invalid JSON: {}", e))))?;
+                let local_opt = match self.find_by_id_with_tx(remote_state.id, tx).await {
+                    Ok(ent) => Some(ent),
+                    Err(DomainError::EntityNotFound(_, _)) => None,
+                    Err(e) => return Err(e),
+                };
+                if let Some(local) = local_opt.clone() {
+                    if remote_state.updated_at <= local.updated_at {
+                        return Ok(MergeOutcome::NoOp("Local copy newer or equal".into()));
+                    }
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Updated(remote_state.id))
+                } else {
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Created(remote_state.id))
+                }
+            }
+            ChangeOperationType::Delete => Ok(MergeOutcome::NoOp("Remote soft delete ignored".into())),
+            ChangeOperationType::HardDelete => Ok(MergeOutcome::HardDeleted(remote_change.entity_id)),
+        }
+    }
+}
+
+impl SqliteActivityRepository {
+    async fn upsert_remote_state_with_tx<'t>(&self, tx: &mut Transaction<'t, Sqlite>, remote: &Activity) -> DomainResult<()> {
+        sqlx::query(
+            r#"
+INSERT OR REPLACE INTO activities (
+    id, project_id,
+    description, description_updated_at, description_updated_by, description_updated_by_device_id,
+    kpi, kpi_updated_at, kpi_updated_by, kpi_updated_by_device_id,
+    target_value, target_value_updated_at, target_value_updated_by, target_value_updated_by_device_id,
+    actual_value, actual_value_updated_at, actual_value_updated_by, actual_value_updated_by_device_id,
+    status_id, status_id_updated_at, status_id_updated_by, status_id_updated_by_device_id,
+    sync_priority, created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id,
+    deleted_at, deleted_by_user_id, deleted_by_device_id,
+    photo_evidence_ref, receipts_ref, signed_report_ref, monitoring_data_ref, output_verification_ref
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(remote.id.to_string())
+        .bind(remote.project_id.map(|u| u.to_string()))
+        .bind(&remote.description)
+        .bind(remote.description_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.description_updated_by.map(|u| u.to_string()))
+        .bind(remote.description_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.kpi)
+        .bind(remote.kpi_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.kpi_updated_by.map(|u| u.to_string()))
+        .bind(remote.kpi_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.target_value)
+        .bind(remote.target_value_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.target_value_updated_by.map(|u| u.to_string()))
+        .bind(remote.target_value_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.actual_value)
+        .bind(remote.actual_value_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.actual_value_updated_by.map(|u| u.to_string()))
+        .bind(remote.actual_value_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.status_id)
+        .bind(remote.status_id_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.status_id_updated_by.map(|u| u.to_string()))
+        .bind(remote.status_id_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.sync_priority.as_str())
+        .bind(remote.created_at.to_rfc3339())
+        .bind(remote.updated_at.to_rfc3339())
+        .bind(remote.created_by_user_id.to_string())
+        .bind(remote.created_by_device_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_user_id.to_string())
+        .bind(remote.updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.deleted_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.deleted_by_user_id.map(|u| u.to_string()))
+        .bind(remote.deleted_by_device_id.map(|u| u.to_string()))
+        .bind(remote.photo_evidence_ref.map(|u| u.to_string()))
+        .bind(remote.receipts_ref.map(|u| u.to_string()))
+        .bind(remote.signed_report_ref.map(|u| u.to_string()))
+        .bind(remote.monitoring_data_ref.map(|u| u.to_string()))
+        .bind(remote.output_verification_ref.map(|u| u.to_string()))
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        Ok(())
     }
 }

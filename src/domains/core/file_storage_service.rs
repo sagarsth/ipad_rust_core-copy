@@ -47,6 +47,9 @@ pub trait FileStorageService: Send + Sync {
     
     /// Get the full absolute path for a given relative path (for internal use if needed)
     fn get_absolute_path(&self, relative_path: &str) -> PathBuf;
+
+    /// Get the size of a file on disk without reading it into memory.
+    async fn get_file_size(&self, relative_path: &str) -> FileStorageResult<u64>;
 }
 
 // --- Local File Storage Implementation ---
@@ -199,5 +202,19 @@ impl FileStorageService for LocalFileStorageService {
             }
         }
         abs_path
+    }
+
+    async fn get_file_size(&self, relative_path: &str) -> FileStorageResult<u64> {
+        let absolute_path = self.get_absolute_path(relative_path);
+
+        if !absolute_path.starts_with(&self.base_path) {
+            return Err(FileStorageError::PermissionDenied("Attempt to stat outside base path".to_string()));
+        }
+
+        match tokio::fs::metadata(&absolute_path).await {
+            Ok(meta) => Ok(meta.len()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(FileStorageError::NotFound(relative_path.to_string())),
+            Err(e) => Err(FileStorageError::Io(e)),
+        }
     }
 } 

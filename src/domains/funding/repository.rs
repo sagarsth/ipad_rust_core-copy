@@ -14,11 +14,13 @@ use std::sync::Arc;
 use serde_json;
 use crate::domains::sync::repository::ChangeLogRepository;
 use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+use crate::domains::user::repository::MergeableEntityRepository;
+use crate::domains::sync::types::{MergeOutcome};
 
 /// Trait defining funding repository operations
 #[async_trait]
 pub trait ProjectFundingRepository: 
-    DeleteServiceRepository<ProjectFunding> + Send + Sync 
+    DeleteServiceRepository<ProjectFunding> + MergeableEntityRepository<ProjectFunding> + Send + Sync 
 {
     async fn create(
         &self,
@@ -1078,5 +1080,165 @@ impl ProjectFundingRepository for SqliteProjectFundingRepository {
             .collect::<DomainResult<Vec<ProjectFunding>>>()?;
 
         Ok(PaginatedResult::new(entities, total as u64, params))
+    }
+}
+
+// === Sync Merge Implementation ===
+#[async_trait]
+impl MergeableEntityRepository<ProjectFunding> for SqliteProjectFundingRepository {
+    fn entity_name(&self) -> &'static str {
+        "project_funding"
+    }
+
+    /// Merge a remote change (CREATE / UPDATE) coming from sync into the local database.
+    ///
+    /// Strategy:
+    /// 1. Deserialize the remote `new_value` into a full `ProjectFunding` state.
+    /// 2. If the record does not exist locally, we INSERT it (treat as CREATE).
+    /// 3. If it exists, compare `updated_at`.  If the remote timestamp is **newer**
+    ///    than the local one, we perform a full UPSERT ("REPLACE INTO") of the row
+    ///    using the remote values (LWW at row-level).  Otherwise we `NoOp`.
+    /// 4. Soft-Delete operations are ignored (handled only locally).  Hard-Deletes
+    ///    are executed by higher-level entity mergers via the DeleteService.
+    async fn merge_remote_change<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote_change: &ChangeLogEntry,
+    ) -> DomainResult<MergeOutcome> {
+        // We only act on CREATE or UPDATE operations
+        match remote_change.operation_type {
+            ChangeOperationType::Create | ChangeOperationType::Update => {
+                // --- 1. Parse remote state JSON ---
+                let state_json = remote_change.new_value.as_ref().ok_or_else(|| {
+                    DomainError::Validation(ValidationError::custom("Missing new_value for funding change"))
+                })?;
+
+                let remote_state: ProjectFunding = serde_json::from_str(state_json).map_err(|e| {
+                    DomainError::Validation(ValidationError::format(
+                        "new_value_funding",
+                        &format!("Invalid JSON: {}", e),
+                    ))
+                })?;
+
+                // --- 2. Fetch local state (if any) ---
+                let local_opt = match self.find_by_id_with_tx(remote_state.id, tx).await {
+                    Ok(entity) => Some(entity),
+                    Err(DomainError::EntityNotFound(_, _)) => None,
+                    Err(e) => return Err(e),
+                };
+
+                // Determine if we INSERT or UPDATE
+                if let Some(local) = local_opt {
+                    if remote_state.updated_at <= local.updated_at {
+                        return Ok(MergeOutcome::NoOp("Local copy is newer or equal".to_string()));
+                    }
+                    // Remote is newer – perform full upsert (replace)
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Updated(remote_state.id))
+                } else {
+                    // Not present locally – insert
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Created(remote_state.id))
+                }
+            }
+            ChangeOperationType::Delete => {
+                // Soft deletes are handled locally only
+                Ok(MergeOutcome::NoOp("Remote soft deletes are ignored".to_string()))
+            }
+            ChangeOperationType::HardDelete => {
+                // Higher-level merger handles HardDelete via DeleteService; report back
+                Ok(MergeOutcome::HardDeleted(remote_change.entity_id))
+            }
+        }
+    }
+}
+
+impl SqliteProjectFundingRepository {
+    /// Helper: performs a full UPSERT (replace) of `remote` into `project_funding` using a
+    /// single `INSERT OR REPLACE` statement.  All columns are bound in the exact order
+    /// they appear in the table schema to avoid mismatch errors.
+    async fn upsert_remote_state_with_tx<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote: &ProjectFunding,
+    ) -> DomainResult<()> {
+        use sqlx::query;
+
+        query(
+            r#"
+            INSERT OR REPLACE INTO project_funding (
+                id, project_id, project_id_updated_at, project_id_updated_by, project_id_updated_by_device_id,
+                donor_id, donor_id_updated_at, donor_id_updated_by, donor_id_updated_by_device_id,
+                grant_id, grant_id_updated_at, grant_id_updated_by, grant_id_updated_by_device_id,
+                amount, amount_updated_at, amount_updated_by, amount_updated_by_device_id,
+                currency, currency_updated_at, currency_updated_by, currency_updated_by_device_id,
+                start_date, start_date_updated_at, start_date_updated_by, start_date_updated_by_device_id,
+                end_date, end_date_updated_at, end_date_updated_by, end_date_updated_by_device_id,
+                status, status_updated_at, status_updated_by, status_updated_by_device_id,
+                reporting_requirements, reporting_requirements_updated_at, reporting_requirements_updated_by, reporting_requirements_updated_by_device_id,
+                notes, notes_updated_at, notes_updated_by, notes_updated_by_device_id,
+                created_at, updated_at, created_by_user_id, updated_by_user_id,
+                created_by_device_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
+            ) VALUES (
+                ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?
+            )
+            "#
+        )
+        .bind(remote.id.to_string())
+        .bind(remote.project_id.to_string())
+        .bind(remote.project_id_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.project_id_updated_by.map(|u| u.to_string()))
+        .bind(remote.project_id_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.donor_id.to_string())
+        .bind(remote.donor_id_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.donor_id_updated_by.map(|u| u.to_string()))
+        .bind(remote.donor_id_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.grant_id)
+        .bind(remote.grant_id_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.grant_id_updated_by.map(|u| u.to_string()))
+        .bind(remote.grant_id_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.amount)
+        .bind(remote.amount_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.amount_updated_by.map(|u| u.to_string()))
+        .bind(remote.amount_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.currency)
+        .bind(remote.currency_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.currency_updated_by.map(|u| u.to_string()))
+        .bind(remote.currency_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.start_date)
+        .bind(remote.start_date_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.start_date_updated_by.map(|u| u.to_string()))
+        .bind(remote.start_date_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.end_date)
+        .bind(remote.end_date_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.end_date_updated_by.map(|u| u.to_string()))
+        .bind(remote.end_date_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.status)
+        .bind(remote.status_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.status_updated_by.map(|u| u.to_string()))
+        .bind(remote.status_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.reporting_requirements)
+        .bind(remote.reporting_requirements_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.reporting_requirements_updated_by.map(|u| u.to_string()))
+        .bind(remote.reporting_requirements_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.notes)
+        .bind(remote.notes_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.notes_updated_by.map(|u| u.to_string()))
+        .bind(remote.notes_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.created_at.to_rfc3339())
+        .bind(remote.updated_at.to_rfc3339())
+        .bind(remote.created_by_user_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_user_id.map(|u| u.to_string()))
+        .bind(remote.created_by_device_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.deleted_at.map(|d| d.to_rfc3339()))
+        .bind(remote.deleted_by_user_id.map(|u| u.to_string()))
+        .bind(remote.deleted_by_device_id.map(|u| u.to_string()))
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+
+        Ok(())
     }
 }

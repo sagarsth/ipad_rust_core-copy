@@ -238,7 +238,7 @@ impl ParticipantServiceImpl {
         #[async_trait]
         impl HardDeletable for RepoAdapter {
              fn entity_name(&self) -> &'static str {
-                 self.0.entity_name()
+                 "participants"
              }
              async fn hard_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
                  self.0.hard_delete(id, auth).await

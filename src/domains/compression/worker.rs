@@ -92,12 +92,12 @@ impl CompressionWorker {
                             Ok(Some(queue_entry)) => {
                                 // Check if document is in use
                                 let document_id = queue_entry.document_id;
-                                let is_in_use = match self.is_document_in_use(document_id).await {
+                                let is_in_use = match self.compression_service.is_document_in_use(document_id).await {
                                     Ok(true) => true,
                                     Ok(false) => false,
                                     Err(e) => {
                                         eprintln!("Error checking if document is in use: {:?}", e);
-                                        false // Assume not in use if check fails
+                                        false
                                     }
                                 };
                                 
@@ -172,28 +172,6 @@ impl CompressionWorker {
                 }
             }
         }
-    }
-    
-    /// Check if document is in use (active file usage)
-    async fn is_document_in_use(&self, document_id: Uuid) -> Result<bool, ServiceError> {
-        let doc_id_str = document_id.to_string();
-        let result = sqlx::query!(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 
-                FROM active_file_usage 
-                WHERE 
-                    document_id = ? AND 
-                    last_active_at > datetime('now', '-5 minutes')
-            ) as in_use
-            "#,
-            doc_id_str
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
-        
-        Ok(result.in_use == 1)
     }
 }
 

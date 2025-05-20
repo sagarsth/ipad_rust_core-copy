@@ -21,12 +21,13 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use crate::domains::sync::repository::ChangeLogRepository;
-use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
+use crate::domains::user::repository::MergeableEntityRepository;
 
 /// Trait defining workshop repository operations
 #[async_trait]
 pub trait WorkshopRepository:
-    DeleteServiceRepository<Workshop> + Send + Sync
+    DeleteServiceRepository<Workshop> + MergeableEntityRepository<Workshop> + Send + Sync
 {
     async fn create(
         &self,
@@ -1416,5 +1417,148 @@ impl WorkshopRepository for SqliteWorkshopRepository {
             budget_variance,
             workshops_by_month,
         })
+    }
+}
+
+// === Sync Merge Implementation ===
+#[async_trait]
+impl MergeableEntityRepository<Workshop> for SqliteWorkshopRepository {
+    fn entity_name(&self) -> &'static str { "workshops" }
+
+    async fn merge_remote_change<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote_change: &ChangeLogEntry,
+    ) -> DomainResult<MergeOutcome> {
+        match remote_change.operation_type {
+            ChangeOperationType::Create | ChangeOperationType::Update => {
+                let state_json = remote_change.new_value.as_ref().ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for workshop change")))?;
+                let remote_state: Workshop = serde_json::from_str(state_json)
+                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_workshop", &format!("Invalid JSON: {}", e))))?;
+                let local_opt = match self.find_by_id_with_tx(remote_state.id, tx).await {
+                    Ok(ent) => Some(ent),
+                    Err(DomainError::EntityNotFound(_, _)) => None,
+                    Err(e) => return Err(e),
+                };
+                if let Some(local) = local_opt.clone() {
+                    if remote_state.updated_at <= local.updated_at {
+                        return Ok(MergeOutcome::NoOp("Local copy newer or equal".into()));
+                    }
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Updated(remote_state.id))
+                } else {
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Created(remote_state.id))
+                }
+            }
+            ChangeOperationType::Delete => Ok(MergeOutcome::NoOp("Remote soft delete ignored".into())),
+            ChangeOperationType::HardDelete => Ok(MergeOutcome::HardDeleted(remote_change.entity_id)),
+        }
+    }
+}
+
+impl SqliteWorkshopRepository {
+    async fn upsert_remote_state_with_tx<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote: &Workshop,
+    ) -> DomainResult<()> {
+        sqlx::query(
+            r#"
+            INSERT OR REPLACE INTO workshops (
+                id, project_id,
+                purpose, purpose_updated_at, purpose_updated_by, purpose_updated_by_device_id,
+                event_date, event_date_updated_at, event_date_updated_by, event_date_updated_by_device_id,
+                location, location_updated_at, location_updated_by, location_updated_by_device_id,
+                budget, budget_updated_at, budget_updated_by, budget_updated_by_device_id,
+                actuals, actuals_updated_at, actuals_updated_by, actuals_updated_by_device_id,
+                participant_count, participant_count_updated_at, participant_count_updated_by, participant_count_updated_by_device_id,
+                local_partner, local_partner_updated_at, local_partner_updated_by, local_partner_updated_by_device_id,
+                partner_responsibility, partner_responsibility_updated_at, partner_responsibility_updated_by, partner_responsibility_updated_by_device_id,
+                partnership_success, partnership_success_updated_at, partnership_success_updated_by, partnership_success_updated_by_device_id,
+                capacity_challenges, capacity_challenges_updated_at, capacity_challenges_updated_by, capacity_challenges_updated_by_device_id,
+                strengths, strengths_updated_at, strengths_updated_by, strengths_updated_by_device_id,
+                outcomes, outcomes_updated_at, outcomes_updated_by, outcomes_updated_by_device_id,
+                recommendations, recommendations_updated_at, recommendations_updated_by, recommendations_updated_by_device_id,
+                challenge_resolution, challenge_resolution_updated_at, challenge_resolution_updated_by, challenge_resolution_updated_by_device_id,
+                sync_priority, created_at, updated_at, created_by_user_id, updated_by_user_id, created_by_device_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            "#,
+        )
+        .bind(remote.id.to_string())
+        .bind(remote.project_id.map(|id| id.to_string()))
+        .bind(&remote.purpose)
+        .bind(remote.purpose_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.purpose_updated_by.map(|id| id.to_string()))
+        .bind(remote.purpose_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.event_date)
+        .bind(remote.event_date_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.event_date_updated_by.map(|id| id.to_string()))
+        .bind(remote.event_date_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.location)
+        .bind(remote.location_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.location_updated_by.map(|id| id.to_string()))
+        .bind(remote.location_updated_by_device_id.map(|id| id.to_string()))
+        .bind(remote.budget.map(|d| d.to_string()))
+        .bind(remote.budget_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.budget_updated_by.map(|id| id.to_string()))
+        .bind(remote.budget_updated_by_device_id.map(|id| id.to_string()))
+        .bind(remote.actuals.map(|d| d.to_string()))
+        .bind(remote.actuals_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.actuals_updated_by.map(|id| id.to_string()))
+        .bind(remote.actuals_updated_by_device_id.map(|id| id.to_string()))
+        .bind(remote.participant_count)
+        .bind(remote.participant_count_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.participant_count_updated_by.map(|id| id.to_string()))
+        .bind(remote.participant_count_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.local_partner)
+        .bind(remote.local_partner_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.local_partner_updated_by.map(|id| id.to_string()))
+        .bind(remote.local_partner_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.partner_responsibility)
+        .bind(remote.partner_responsibility_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.partner_responsibility_updated_by.map(|id| id.to_string()))
+        .bind(remote.partner_responsibility_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.partnership_success)
+        .bind(remote.partnership_success_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.partnership_success_updated_by.map(|id| id.to_string()))
+        .bind(remote.partnership_success_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.capacity_challenges)
+        .bind(remote.capacity_challenges_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.capacity_challenges_updated_by.map(|id| id.to_string()))
+        .bind(remote.capacity_challenges_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.strengths)
+        .bind(remote.strengths_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.strengths_updated_by.map(|id| id.to_string()))
+        .bind(remote.strengths_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.outcomes)
+        .bind(remote.outcomes_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.outcomes_updated_by.map(|id| id.to_string()))
+        .bind(remote.outcomes_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.recommendations)
+        .bind(remote.recommendations_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.recommendations_updated_by.map(|id| id.to_string()))
+        .bind(remote.recommendations_updated_by_device_id.map(|id| id.to_string()))
+        .bind(&remote.challenge_resolution)
+        .bind(remote.challenge_resolution_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.challenge_resolution_updated_by.map(|id| id.to_string()))
+        .bind(remote.challenge_resolution_updated_by_device_id.map(|id| id.to_string()))
+        .bind(remote.sync_priority.as_str())
+        .bind(remote.created_at.to_rfc3339())
+        .bind(remote.updated_at.to_rfc3339())
+        .bind(remote.created_by_user_id.map(|id| id.to_string()))
+        .bind(remote.updated_by_user_id.map(|id| id.to_string()))
+        .bind(remote.created_by_device_id.map(|id| id.to_string()))
+        .bind(remote.updated_by_device_id.map(|id| id.to_string()))
+        .bind(remote.deleted_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.deleted_by_user_id.map(|id| id.to_string()))
+        .bind(remote.deleted_by_device_id.map(|id| id.to_string()))
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        Ok(())
     }
 }

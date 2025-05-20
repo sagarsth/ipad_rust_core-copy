@@ -108,6 +108,7 @@ pub struct MediaDocument {
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
     pub sync_priority: String,       // Changed to String (use SyncPriority::as_str())
+    pub source_of_change: SourceOfChange,    // MODIFIED - Was String, now enum
     pub last_sync_attempt_at: Option<DateTime<Utc>>,
     pub sync_attempt_count: i64,
 }
@@ -290,6 +291,38 @@ impl FromStr for CompressionPriority {
             "NORMAL" => Ok(CompressionPriority::Normal),
             "HIGH" => Ok(CompressionPriority::High),
             _ => Err(DomainError::Internal(format!("Invalid CompressionPriority string: {}", s))),
+        }
+    }
+}
+
+/// Enum representing where a change originated from
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceOfChange {
+    Local,
+    System,
+    Sync,
+}
+
+impl SourceOfChange {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SourceOfChange::Local => "local",
+            SourceOfChange::System => "system",
+            SourceOfChange::Sync => "sync",
+        }
+    }
+}
+
+impl FromStr for SourceOfChange {
+    type Err = DomainError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "local" => Ok(SourceOfChange::Local),
+            "system" => Ok(SourceOfChange::System),
+            "sync" => Ok(SourceOfChange::Sync),
+            _ => Err(DomainError::Validation(ValidationError::custom(
+                &format!("Invalid source_of_change string: {}", s),
+            ))),
         }
     }
 }
@@ -852,6 +885,7 @@ pub struct MediaDocumentRow {
     pub compression_status: String, // Stored as string
     pub blob_key: Option<String>,
     pub blob_status: String, // Stored as string
+    pub source_of_change: String, // NEW COLUMN
     pub temp_related_id: Option<String>,
     pub has_error: Option<i64>,         // RE-ADDED
     pub error_type: Option<String>,     // RE-ADDED
@@ -901,6 +935,7 @@ impl MediaDocumentRow {
             compression_status: CompressionStatus::from_str(&self.compression_status).unwrap_or_default().as_str().to_string(),
             blob_key: self.blob_key,
             blob_status: BlobSyncStatus::from_str(&self.blob_status).unwrap_or_default().as_str().to_string(),
+            source_of_change: SourceOfChange::from_str(&self.source_of_change)?,
             temp_related_id: parse_uuid(&self.temp_related_id).transpose()?,
             has_error: self.has_error,             
             error_type: self.error_type,           

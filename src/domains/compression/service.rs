@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 use sqlx::SqlitePool;
+use std::env;
 
 use crate::domains::core::file_storage_service::FileStorageService;
 use crate::domains::document::repository::MediaDocumentRepository;
-use crate::domains::document::types::{CompressionStatus, MediaDocument};
+use crate::domains::document::types::{CompressionStatus, MediaDocument, SourceOfChange};
 use crate::errors::{DbError, DomainError, ServiceError, ServiceResult};
 use super::repository::CompressionRepository;
 use super::types::{
@@ -23,6 +24,15 @@ use super::compressors::{
     get_extension
 };
 use crate::domains::core::repository::FindById;
+
+// Maximum file size (bytes) we are willing to load fully into memory for compression.
+// Default: 2GB, can be overridden by env var `MAX_IN_MEMORY_COMPRESSION_BYTES`.
+fn max_in_memory_bytes() -> i64 {
+    env::var("MAX_IN_MEMORY_COMPRESSION_BYTES")
+        .ok()
+        .and_then(|val| val.parse::<i64>().ok())
+        .unwrap_or(2048 * 1024 * 1024) // 2GB
+}
 
 #[async_trait]
 pub trait CompressionService: Send + Sync {
@@ -129,8 +139,8 @@ impl CompressionServiceImpl {
         self.compressors.last().unwrap().as_ref()
     }
 
-    /// Check if document is in use (active file usage)
-    async fn is_document_in_use(&self, document_id: Uuid) -> Result<bool, ServiceError> {
+    /// Central implementation of document-in-use check
+    pub async fn is_document_in_use(&self, document_id: Uuid) -> Result<bool, ServiceError> {
         let doc_id_str = document_id.to_string();
         let result = sqlx::query!(
             r#"
@@ -228,6 +238,11 @@ impl CompressionService for CompressionServiceImpl {
         let document = FindById::<MediaDocument>::find_by_id(&*self.media_doc_repo, document_id).await
             .map_err(|e| ServiceError::Domain(e))?;
         
+        // Skip compression for documents that originated from sync
+        if document.source_of_change == SourceOfChange::Sync {
+            return Err(ServiceError::Ui("Skipping compression for synced document".to_string()));
+        }
+        
         // 2. Check for error state or known issues
         // Skip documents with existing errors
         if document.has_error.unwrap_or(0) == 1 {
@@ -264,8 +279,47 @@ impl CompressionService for CompressionServiceImpl {
         
         // 6. Get document type details to determine compression settings
         let config = config.unwrap_or_else(|| CompressionConfig::default());
-        
-        // 7. Read the original file
+
+        // BEFORE loading the entire file, check its size to avoid RAM spikes
+        let original_size_on_disk = match self.file_storage_service.get_file_size(&document.file_path).await {
+            Ok(sz) => sz as i64,
+            Err(e) => {
+                // If we cannot stat file, fall back to reading (will likely error anyway)
+                eprintln!("Failed to stat file size, will attempt read: {:?}", e);
+                0
+            }
+        };
+
+        if original_size_on_disk > max_in_memory_bytes() {
+            // Mark as skipped, update queue and stats, then return early.
+            self.media_doc_repo.update_compression_status(
+                document_id,
+                CompressionStatus::Skipped,
+                None,
+                None
+            ).await.map_err(|e| ServiceError::Domain(e))?;
+
+            if let Some(queue_entry) = self.compression_repo.get_queue_entry_by_document_id(document_id).await
+                .map_err(|e| ServiceError::Domain(e))? {
+                self.compression_repo.update_queue_entry_status(
+                    queue_entry.id,
+                    "skipped",
+                    Some("File too large to compress in-memory")
+                ).await.map_err(|e| ServiceError::Domain(e))?;
+            }
+
+            // Update global stats for skipped
+            let mut tx = self.pool.begin().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+            self.compression_repo.update_stats_for_skipped(&mut tx).await
+                .map_err(|e| ServiceError::Domain(e))?;
+            tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+
+            return Err(ServiceError::Domain(DomainError::Validation(
+                crate::errors::ValidationError::custom("File too large to compress in-memory")
+            )));
+        }
+
+        // 7. Read the original file (safe size)
         let file_data = match self.file_storage_service.get_file_data(&document.file_path).await {
             Ok(data) => data,
             Err(e) => {
@@ -480,6 +534,19 @@ impl CompressionService for CompressionServiceImpl {
         // Get document to make sure it exists
         let document = FindById::<MediaDocument>::find_by_id(&*self.media_doc_repo, document_id).await
             .map_err(|e| ServiceError::Domain(e))?;
+
+        // Do not queue documents that came from sync
+        if document.source_of_change == SourceOfChange::Sync {
+            log::info!("Skipping queueing for compression for synced document: {}", document_id);
+            // Update compression_status to SKIPPED to prevent reprocessing
+            self.media_doc_repo.update_compression_status(
+                document_id, 
+                CompressionStatus::Skipped, 
+                None, 
+                None
+            ).await.map_err(|e| ServiceError::Domain(e))?;
+            return Ok(());
+        }
             
         // Don't queue if already compressed or has error
         if document.has_error.unwrap_or(0) == 1 {

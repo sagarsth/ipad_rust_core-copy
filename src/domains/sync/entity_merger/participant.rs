@@ -1,43 +1,42 @@
-// sync/entity_merger/project.rs
-
 use super::{DomainEntityMerger, BaseDomainMerger};
-use crate::domains::project::repository::ProjectRepository;
-use crate::domains::project::types::Project;
+use crate::domains::participant::repository::ParticipantRepository;
+use crate::domains::participant::types::Participant;
 use crate::domains::sync::types::{ChangeLogEntry, MergeOutcome, Tombstone};
 use crate::auth::AuthContext;
-use crate::errors::{DomainResult, DomainError};
+use crate::errors::{DomainError, DomainResult};
 use crate::domains::core::delete_service::{DeleteService, DeleteOptions};
-use sqlx::{Transaction, Sqlite, SqlitePool};
 use async_trait::async_trait;
+use sqlx::{SqlitePool, Transaction, Sqlite};
 use std::sync::Arc;
 
-/// Entity merger for `projects` table – parallels other domain mergers.
-pub struct ProjectEntityMerger {
-    repo: Arc<dyn ProjectRepository + Send + Sync>,
+pub struct ParticipantEntityMerger {
+    repo: Arc<dyn ParticipantRepository + Send + Sync>,
     pool: SqlitePool,
-    delete_service: Arc<dyn DeleteService<Project> + Send + Sync>,
+    delete_service: Arc<dyn DeleteService<Participant> + Send + Sync>,
 }
 
-impl ProjectEntityMerger {
+impl ParticipantEntityMerger {
     pub fn new(
-        repo: Arc<dyn ProjectRepository + Send + Sync>,
+        repo: Arc<dyn ParticipantRepository + Send + Sync>,
         pool: SqlitePool,
-        delete_service: Arc<dyn DeleteService<Project> + Send + Sync>,
+        delete_service: Arc<dyn DeleteService<Participant> + Send + Sync>,
     ) -> Self {
         Self { repo, pool, delete_service }
     }
 }
 
 #[async_trait]
-impl DomainEntityMerger for ProjectEntityMerger {
-    fn entity_table(&self) -> &'static str { "projects" }
+impl DomainEntityMerger for ParticipantEntityMerger {
+    fn entity_table(&self) -> &'static str { "participants" }
 
     async fn apply_create(&self, change: &ChangeLogEntry, auth: &AuthContext) -> DomainResult<()> {
-        if BaseDomainMerger::is_local_change(change, auth) { return Ok(()); }
+        if BaseDomainMerger::is_local_change(change, auth) {
+            return Ok(());
+        }
         let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(e.into()))?;
         match self.repo.merge_remote_change(&mut tx, change).await {
             Ok(_) => { tx.commit().await.map_err(|e| DomainError::Database(e.into()))?; Ok(()) },
-            Err(e) => { let _ = tx.rollback().await; Err(e) }
+            Err(e) => { let _=tx.rollback().await; Err(e) }
         }
     }
 
@@ -46,22 +45,21 @@ impl DomainEntityMerger for ProjectEntityMerger {
         let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(e.into()))?;
         match self.repo.merge_remote_change(&mut tx, change).await {
             Ok(_) => { tx.commit().await.map_err(|e| DomainError::Database(e.into()))?; Ok(()) },
-            Err(e) => { let _ = tx.rollback().await; Err(e) }
+            Err(e) => { let _=tx.rollback().await; Err(e) }
         }
     }
 
     async fn apply_soft_delete(&self, _change: &ChangeLogEntry, _auth: &AuthContext) -> DomainResult<()> {
-        Ok(()) // ignore remote soft deletes
+        Ok(()) // ignore remote soft delete
     }
 
     async fn apply_hard_delete(&self, tombstone: &Tombstone, auth: &AuthContext) -> DomainResult<()> {
-        if tombstone.entity_type != self.entity_table() {
-            return Err(DomainError::Internal("Tombstone entity type mismatch".into()));
-        }
+        if tombstone.entity_type != self.entity_table() { return Err(DomainError::Internal("Tombstone entity type mismatch".into())); }
         let options = DeleteOptions { allow_hard_delete: true, fallback_to_soft_delete: false, force: true };
         match self.delete_service.delete(tombstone.entity_id, auth, options).await {
-            Ok(_) | Err(DomainError::EntityNotFound(_, _)) => Ok(()),
-            Err(e) => Err(e),
+            Ok(_) => Ok(()),
+            Err(DomainError::EntityNotFound(_, _)) => Ok(()),
+            Err(e) => Err(e)
         }
     }
 

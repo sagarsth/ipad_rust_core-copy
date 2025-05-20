@@ -624,6 +624,8 @@ impl SqliteMediaDocumentRepository {
         let sync_priority_str = SyncPriorityFromSyncTypes::Normal.as_str(); // Default 'normal'
         let last_sync_attempt_at_str: Option<String> = None;
         let sync_attempt_count_val: i32 = 0; // Default 0
+        // New field: source_of_change
+        let source_of_change_str = "sync"; // Because insert_from_full_state is called for remote changes
 
         // Ensure all NOT NULL columns in media_documents are covered
         sqlx::query!(
@@ -633,19 +635,18 @@ impl SqliteMediaDocumentRepository {
                 original_filename, file_path, compressed_file_path, compressed_size_bytes,
                 field_identifier, title, description, mime_type, size_bytes,
                 has_error, error_message, error_type, compression_status,
-                blob_status, blob_key, sync_priority, last_sync_attempt_at,
+                blob_status, blob_key, sync_priority, source_of_change, last_sync_attempt_at,
                 sync_attempt_count, created_at, updated_at, created_by_user_id,
                 updated_by_user_id, deleted_at, deleted_by_user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
             id_str, related_table_str, related_id_str, temp_related_id_str, type_id_str,
             original_filename_str, file_path_str, compressed_file_path_str, compressed_size_bytes_val,
             field_identifier_str, title_str, description_str, mime_type_str, size_bytes_val,
             has_error_val, error_message_str, error_type_str, compression_status_str,
-            blob_status_str, blob_key_str, sync_priority_str, last_sync_attempt_at_str,
-            sync_attempt_count_val, created_at_str, updated_at_str, created_by_user_id_str, 
-            updated_by_user_id_str, 
-            deleted_at_str, deleted_by_user_id_str
+            blob_status_str, blob_key_str, sync_priority_str, source_of_change_str, last_sync_attempt_at_str,
+            sync_attempt_count_val, created_at_str, updated_at_str, created_by_user_id_str,
+            updated_by_user_id_str, deleted_at_str, deleted_by_user_id_str
         )
         .execute(&mut **tx)
         .await

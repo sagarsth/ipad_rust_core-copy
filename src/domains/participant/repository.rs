@@ -8,7 +8,7 @@ use crate::domains::participant::types::{
     WorkshopSummary, LivelihoodSummary
 };
 use crate::domains::sync::repository::ChangeLogRepository;
-use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use async_trait::async_trait;
@@ -20,9 +20,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json;
 use std::str::FromStr;
+use crate::domains::user::repository::MergeableEntityRepository;
 /// Trait defining participant repository operations
 #[async_trait]
-pub trait ParticipantRepository: DeleteServiceRepository<Participant> + Send + Sync {
+pub trait ParticipantRepository: DeleteServiceRepository<Participant> + MergeableEntityRepository<Participant> + Send + Sync {
     async fn create(
         &self,
         new_participant: &NewParticipant,
@@ -1250,5 +1251,106 @@ impl ParticipantRepository for SqliteParticipantRepository {
         .map_err(DbError::from)?;
         
         Ok((total, active))
+    }
+}
+
+// === Sync Merge Implementation ===
+#[async_trait]
+impl MergeableEntityRepository<Participant> for SqliteParticipantRepository {
+    fn entity_name(&self) -> &'static str { "participants" }
+
+    async fn merge_remote_change<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote_change: &ChangeLogEntry,
+    ) -> DomainResult<MergeOutcome> {
+        match remote_change.operation_type {
+            ChangeOperationType::Create | ChangeOperationType::Update => {
+                // Parse JSON state
+                let state_json = remote_change.new_value.as_ref().ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for participant change")))?;
+                let remote_state: Participant = serde_json::from_str(state_json).map_err(|e| DomainError::Validation(ValidationError::format("new_value_participant", &format!("Invalid JSON: {}", e))))?;
+
+                // Fetch local if exists
+                let local_opt = match self.find_by_id_with_tx(remote_state.id, tx).await {
+                    Ok(ent) => Some(ent),
+                    Err(DomainError::EntityNotFound(_, _)) => None,
+                    Err(e) => return Err(e),
+                };
+
+                if let Some(local) = local_opt {
+                    if remote_state.updated_at <= local.updated_at {
+                        return Ok(MergeOutcome::NoOp("Local copy newer or equal".into()));
+                    }
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Updated(remote_state.id))
+                } else {
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Created(remote_state.id))
+                }
+            }
+            ChangeOperationType::Delete => Ok(MergeOutcome::NoOp("Remote soft delete ignored".into())),
+            ChangeOperationType::HardDelete => Ok(MergeOutcome::HardDeleted(remote_change.entity_id)),
+        }
+    }
+}
+
+impl SqliteParticipantRepository {
+    async fn upsert_remote_state_with_tx<'t>(&self, tx: &mut Transaction<'t, Sqlite>, remote: &Participant) -> DomainResult<()> {
+        use sqlx::query;
+        query(r#"
+            INSERT OR REPLACE INTO participants (
+                id, name, name_updated_at, name_updated_by, name_updated_by_device_id,
+                gender, gender_updated_at, gender_updated_by, gender_updated_by_device_id,
+                disability, disability_updated_at, disability_updated_by, disability_updated_by_device_id,
+                disability_type, disability_type_updated_at, disability_type_updated_by, disability_type_updated_by_device_id,
+                age_group, age_group_updated_at, age_group_updated_by, age_group_updated_by_device_id,
+                location, location_updated_at, location_updated_by, location_updated_by_device_id,
+                sync_priority,
+                created_at, updated_at, created_by_user_id, updated_by_user_id,
+                created_by_device_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
+            ) VALUES (
+                ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?, ?,?,?, ?,?,?,?
+            )
+        "#)
+        .bind(remote.id.to_string())
+        .bind(&remote.name)
+        .bind(remote.name_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.name_updated_by.map(|u| u.to_string()))
+        .bind(remote.name_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.gender)
+        .bind(remote.gender_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.gender_updated_by.map(|u| u.to_string()))
+        .bind(remote.gender_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.disability as i64)
+        .bind(remote.disability_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.disability_updated_by.map(|u| u.to_string()))
+        .bind(remote.disability_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.disability_type)
+        .bind(remote.disability_type_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.disability_type_updated_by.map(|u| u.to_string()))
+        .bind(remote.disability_type_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.age_group)
+        .bind(remote.age_group_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.age_group_updated_by.map(|u| u.to_string()))
+        .bind(remote.age_group_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.location)
+        .bind(remote.location_updated_at.map(|d| d.to_rfc3339()))
+        .bind(remote.location_updated_by.map(|u| u.to_string()))
+        .bind(remote.location_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.sync_priority.unwrap_or_default().as_str())
+        .bind(remote.created_at.to_rfc3339())
+        .bind(remote.updated_at.to_rfc3339())
+        .bind(remote.created_by_user_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_user_id.map(|u| u.to_string()))
+        .bind(remote.created_by_device_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.deleted_at.map(|d| d.to_rfc3339()))
+        .bind(remote.deleted_by_user_id.map(|u| u.to_string()))
+        .bind(remote.deleted_by_device_id.map(|u| u.to_string()))
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        Ok(())
     }
 }

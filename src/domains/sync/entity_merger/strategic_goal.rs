@@ -1,36 +1,34 @@
-// sync/entity_merger/project.rs
-
 use super::{DomainEntityMerger, BaseDomainMerger};
-use crate::domains::project::repository::ProjectRepository;
-use crate::domains::project::types::Project;
-use crate::domains::sync::types::{ChangeLogEntry, MergeOutcome, Tombstone};
+use crate::domains::strategic_goal::repository::StrategicGoalRepository;
+use crate::domains::strategic_goal::types::StrategicGoal;
+use crate::domains::sync::types::{ChangeLogEntry, Tombstone};
 use crate::auth::AuthContext;
-use crate::errors::{DomainResult, DomainError};
+use crate::errors::{DomainError, DomainResult};
 use crate::domains::core::delete_service::{DeleteService, DeleteOptions};
-use sqlx::{Transaction, Sqlite, SqlitePool};
 use async_trait::async_trait;
+use sqlx::{SqlitePool, Transaction, Sqlite};
 use std::sync::Arc;
 
-/// Entity merger for `projects` table – parallels other domain mergers.
-pub struct ProjectEntityMerger {
-    repo: Arc<dyn ProjectRepository + Send + Sync>,
+/// Entity merger for `strategic_goals` table – follows pattern of other mergers.
+pub struct StrategicGoalEntityMerger {
+    repo: Arc<dyn StrategicGoalRepository + Send + Sync>,
     pool: SqlitePool,
-    delete_service: Arc<dyn DeleteService<Project> + Send + Sync>,
+    delete_service: Arc<dyn DeleteService<StrategicGoal> + Send + Sync>,
 }
 
-impl ProjectEntityMerger {
+impl StrategicGoalEntityMerger {
     pub fn new(
-        repo: Arc<dyn ProjectRepository + Send + Sync>,
+        repo: Arc<dyn StrategicGoalRepository + Send + Sync>,
         pool: SqlitePool,
-        delete_service: Arc<dyn DeleteService<Project> + Send + Sync>,
+        delete_service: Arc<dyn DeleteService<StrategicGoal> + Send + Sync>,
     ) -> Self {
         Self { repo, pool, delete_service }
     }
 }
 
 #[async_trait]
-impl DomainEntityMerger for ProjectEntityMerger {
-    fn entity_table(&self) -> &'static str { "projects" }
+impl DomainEntityMerger for StrategicGoalEntityMerger {
+    fn entity_table(&self) -> &'static str { "strategic_goals" }
 
     async fn apply_create(&self, change: &ChangeLogEntry, auth: &AuthContext) -> DomainResult<()> {
         if BaseDomainMerger::is_local_change(change, auth) { return Ok(()); }
@@ -60,8 +58,9 @@ impl DomainEntityMerger for ProjectEntityMerger {
         }
         let options = DeleteOptions { allow_hard_delete: true, fallback_to_soft_delete: false, force: true };
         match self.delete_service.delete(tombstone.entity_id, auth, options).await {
-            Ok(_) | Err(DomainError::EntityNotFound(_, _)) => Ok(()),
-            Err(e) => Err(e),
+            Ok(_) => Ok(()),
+            Err(DomainError::EntityNotFound(_, _)) => Ok(()), // Already deleted locally
+            Err(e) => Err(e)
         }
     }
 

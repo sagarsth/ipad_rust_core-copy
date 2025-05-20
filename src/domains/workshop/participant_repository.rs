@@ -14,10 +14,12 @@ use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, SyncPrior
 use serde_json; // Added serde_json for serialization
 use std::sync::Arc;
 use log::{debug, error, warn};
+use crate::domains::user::repository::MergeableEntityRepository;
+use crate::domains::sync::types::MergeOutcome;
 
 /// Trait defining workshop-participant relationship repository operations
 #[async_trait]
-pub trait WorkshopParticipantRepository: Send + Sync {
+pub trait WorkshopParticipantRepository: Send + Sync + MergeableEntityRepository<WorkshopParticipant> {
     /// Add a participant to a workshop
     async fn add_participant(
         &self,
@@ -180,6 +182,44 @@ impl SqliteWorkshopParticipantRepository {
             sync_error: None,
         };
         self.change_log_repo.create_change_log(&log_entry).await
+    }
+
+    async fn upsert_remote_state_with_tx<'t>(&self, tx: &mut Transaction<'t, Sqlite>, remote: &WorkshopParticipant) -> DomainResult<()> {
+        sqlx::query(
+            r#"
+INSERT OR REPLACE INTO workshop_participants (
+    id, workshop_id, participant_id,
+    pre_evaluation, pre_evaluation_updated_at, pre_evaluation_updated_by, pre_evaluation_updated_by_device_id,
+    post_evaluation, post_evaluation_updated_at, post_evaluation_updated_by, post_evaluation_updated_by_device_id,
+    created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id,
+    deleted_at, deleted_by_user_id, deleted_by_device_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#
+        )
+        .bind(remote.id.to_string())
+        .bind(remote.workshop_id.to_string())
+        .bind(remote.participant_id.to_string())
+        .bind(remote.pre_evaluation.as_deref())
+        .bind(remote.pre_evaluation_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.pre_evaluation_updated_by.map(|u| u.to_string()))
+        .bind(remote.pre_evaluation_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.post_evaluation.as_deref())
+        .bind(remote.post_evaluation_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.post_evaluation_updated_by.map(|u| u.to_string()))
+        .bind(remote.post_evaluation_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.created_at.to_rfc3339())
+        .bind(remote.updated_at.to_rfc3339())
+        .bind(remote.created_by_user_id.map(|u| u.to_string()))
+        .bind(remote.created_by_device_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_user_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.deleted_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.deleted_by_user_id.map(|u| u.to_string()))
+        .bind(remote.deleted_by_device_id.map(|u| u.to_string()))
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        Ok(())
     }
 }
 
@@ -929,5 +969,40 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
             .collect::<DomainResult<Vec<_>>>()?;
 
         Ok(summaries)
+    }
+}
+
+#[async_trait]
+impl MergeableEntityRepository<WorkshopParticipant> for SqliteWorkshopParticipantRepository {
+    fn entity_name(&self) -> &'static str { "workshop_participants" }
+    async fn merge_remote_change<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote_change: &ChangeLogEntry,
+    ) -> DomainResult<MergeOutcome> {
+        match remote_change.operation_type {
+            ChangeOperationType::Create | ChangeOperationType::Update => {
+                let state_json = remote_change.new_value.as_ref().ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for workshop_participant change")))?;
+                let remote_state: WorkshopParticipant = serde_json::from_str(state_json)
+                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_workshop_participant", &format!("Invalid JSON: {}", e))))?;
+                let local_opt = match self.find_link_by_ids_with_tx(remote_state.workshop_id, remote_state.participant_id, tx).await {
+                    Ok(ent) => Some(ent),
+                    Err(DomainError::EntityNotFound(_, _)) => None,
+                    Err(e) => return Err(e),
+                };
+                if let Some(local) = local_opt.clone() {
+                    if remote_state.updated_at <= local.updated_at {
+                        return Ok(MergeOutcome::NoOp("Local copy newer or equal".into()));
+                    }
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Updated(remote_state.id))
+                } else {
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Created(remote_state.id))
+                }
+            }
+            ChangeOperationType::Delete => Ok(MergeOutcome::NoOp("Remote soft delete ignored".into())),
+            ChangeOperationType::HardDelete => Ok(MergeOutcome::HardDeleted(remote_change.entity_id)),
+        }
     }
 } 

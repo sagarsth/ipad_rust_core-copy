@@ -13,17 +13,18 @@ use crate::validation::Validate;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use crate::domains::sync::repository::ChangeLogRepository;
-use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
 use crate::types::SyncPriority;
 use serde_json;
 use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
 use std::str::FromStr;
 use std::sync::Arc;
+use crate::domains::user::repository::MergeableEntityRepository;
 
 /// Repository for livelihood entities and their subsequent grants
 #[async_trait]
 pub trait LivehoodRepository:
-    DeleteServiceRepository<Livelihood> + Send + Sync
+    DeleteServiceRepository<Livelihood> + MergeableEntityRepository<Livelihood> + Send + Sync
 {
     /// Create a new livelihood
     async fn create(
@@ -136,7 +137,7 @@ pub trait LivehoodRepository:
 
 /// Repository for subsequent grants
 #[async_trait]
-pub trait SubsequentGrantRepository: Send + Sync {
+pub trait SubsequentGrantRepository: Send + Sync + MergeableEntityRepository<SubsequentGrant> {
     /// Create a new subsequent grant
     async fn create(
         &self,
@@ -1239,6 +1240,99 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
     }
 }
 
+// === Sync Merge Implementation for Livelihood ===
+#[async_trait]
+impl MergeableEntityRepository<Livelihood> for SqliteLivelihoodRepository {
+    fn entity_name(&self) -> &'static str { "livelihoods" }
+    async fn merge_remote_change<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote_change: &ChangeLogEntry,
+    ) -> DomainResult<MergeOutcome> {
+        match remote_change.operation_type {
+            ChangeOperationType::Create | ChangeOperationType::Update => {
+                let state_json = remote_change.new_value.as_ref().ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for livelihood change")))?;
+                let remote_state: Livelihood = serde_json::from_str(state_json)
+                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_livelihood", &format!("Invalid JSON: {}", e))))?;
+                let local_opt = match self.find_by_id_with_tx(remote_state.id, tx).await {
+                    Ok(ent) => Some(ent),
+                    Err(DomainError::EntityNotFound(_, _)) => None,
+                    Err(e) => return Err(e),
+                };
+                if let Some(local) = local_opt.clone() {
+                    if remote_state.updated_at <= local.updated_at {
+                        return Ok(MergeOutcome::NoOp("Local copy newer or equal".into()));
+                    }
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Updated(remote_state.id))
+                } else {
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Created(remote_state.id))
+                }
+            }
+            ChangeOperationType::Delete => Ok(MergeOutcome::NoOp("Remote soft delete ignored".into())),
+            ChangeOperationType::HardDelete => Ok(MergeOutcome::HardDeleted(remote_change.entity_id)),
+        }
+    }
+}
+
+impl SqliteLivelihoodRepository {
+    async fn upsert_remote_state_with_tx<'t>(&self, tx: &mut Transaction<'t, Sqlite>, remote: &Livelihood) -> DomainResult<()> {
+        sqlx::query(
+            r#"
+INSERT OR REPLACE INTO livelihoods (
+    id, participant_id, project_id,
+    type_, type_updated_at, type_updated_by, type_updated_by_device_id,
+    description, description_updated_at, description_updated_by, description_updated_by_device_id,
+    status_id, status_id_updated_at, status_id_updated_by, status_id_updated_by_device_id,
+    initial_grant_date, initial_grant_date_updated_at, initial_grant_date_updated_by, initial_grant_date_updated_by_device_id,
+    initial_grant_amount, initial_grant_amount_updated_at, initial_grant_amount_updated_by, initial_grant_amount_updated_by_device_id,
+    sync_priority,
+    created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id,
+    deleted_at, deleted_by_user_id, deleted_by_device_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(remote.id.to_string())
+        .bind(remote.participant_id.map(|u| u.to_string()))
+        .bind(remote.project_id.map(|u| u.to_string()))
+        .bind(&remote.type_)
+        .bind(remote.type_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.type_updated_by.map(|u| u.to_string()))
+        .bind(remote.type_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.description)
+        .bind(remote.description_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.description_updated_by.map(|u| u.to_string()))
+        .bind(remote.description_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.status_id)
+        .bind(remote.status_id_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.status_id_updated_by.map(|u| u.to_string()))
+        .bind(remote.status_id_updated_by_device_id.map(|u| u.to_string()))
+        .bind(&remote.initial_grant_date)
+        .bind(remote.initial_grant_date_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.initial_grant_date_updated_by.map(|u| u.to_string()))
+        .bind(remote.initial_grant_date_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.initial_grant_amount)
+        .bind(remote.initial_grant_amount_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.initial_grant_amount_updated_by.map(|u| u.to_string()))
+        .bind(remote.initial_grant_amount_updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.sync_priority.as_str())
+        .bind(remote.created_at.to_rfc3339())
+        .bind(remote.updated_at.to_rfc3339())
+        .bind(remote.created_by_user_id.map(|u| u.to_string()))
+        .bind(remote.created_by_device_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_user_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_device_id.map(|u| u.to_string()))
+        .bind(remote.deleted_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.deleted_by_user_id.map(|u| u.to_string()))
+        .bind(remote.deleted_by_device_id.map(|u| u.to_string()))
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        Ok(())
+    }
+}
+
 /// SQLite implementation of the subsequent grant repository
 pub struct SqliteSubsequentGrantRepository {
     pool: Pool<Sqlite>,
@@ -1744,5 +1838,82 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         }
 
         Ok(stats)
+    }
+}
+
+// === Sync Merge Implementation for SubsequentGrant ===
+#[async_trait]
+impl MergeableEntityRepository<SubsequentGrant> for SqliteSubsequentGrantRepository {
+    fn entity_name(&self) -> &'static str { "subsequent_grants" }
+    async fn merge_remote_change<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote_change: &ChangeLogEntry,
+    ) -> DomainResult<MergeOutcome> {
+        match remote_change.operation_type {
+            ChangeOperationType::Create | ChangeOperationType::Update => {
+                let state_json = remote_change.new_value.as_ref().ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for subsequent_grant change")))?;
+                let remote_state: SubsequentGrant = serde_json::from_str(state_json)
+                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_subsequent_grant", &format!("Invalid JSON: {}", e))))?;
+                let local_opt = match self.find_by_id_with_tx(remote_state.id, tx).await {
+                    Ok(ent) => Some(ent),
+                    Err(DomainError::EntityNotFound(_, _)) => None,
+                    Err(e) => return Err(e),
+                };
+                if let Some(local) = local_opt.clone() {
+                    if remote_state.updated_at <= local.updated_at {
+                        return Ok(MergeOutcome::NoOp("Local copy newer or equal".into()));
+                    }
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Updated(remote_state.id))
+                } else {
+                    self.upsert_remote_state_with_tx(tx, &remote_state).await?;
+                    Ok(MergeOutcome::Created(remote_state.id))
+                }
+            }
+            ChangeOperationType::Delete => Ok(MergeOutcome::NoOp("Remote soft delete ignored".into())),
+            ChangeOperationType::HardDelete => Ok(MergeOutcome::HardDeleted(remote_change.entity_id)),
+        }
+    }
+}
+
+impl SqliteSubsequentGrantRepository {
+    /// Upsert a remote SubsequentGrant state within a transaction
+    async fn upsert_remote_state_with_tx<'t>(&self, tx: &mut Transaction<'t, Sqlite>, remote: &SubsequentGrant) -> DomainResult<()> {
+        sqlx::query(
+            r#"
+INSERT OR REPLACE INTO subsequent_grants (
+    id, livelihood_id,
+    amount, amount_updated_at, amount_updated_by,
+    purpose, purpose_updated_at, purpose_updated_by,
+    grant_date, grant_date_updated_at, grant_date_updated_by,
+    sync_priority,
+    created_at, updated_at, created_by_user_id, updated_by_user_id,
+    deleted_at, deleted_by_user_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#
+        )
+        .bind(remote.id.to_string())
+        .bind(remote.livelihood_id.to_string())
+        .bind(remote.amount)
+        .bind(remote.amount_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.amount_updated_by.map(|u| u.to_string()))
+        .bind(&remote.purpose)
+        .bind(remote.purpose_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.purpose_updated_by.map(|u| u.to_string()))
+        .bind(&remote.grant_date)
+        .bind(remote.grant_date_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.grant_date_updated_by.map(|u| u.to_string()))
+        .bind(remote.sync_priority.as_str())
+        .bind(remote.created_at.to_rfc3339())
+        .bind(remote.updated_at.to_rfc3339())
+        .bind(remote.created_by_user_id.map(|u| u.to_string()))
+        .bind(remote.updated_by_user_id.map(|u| u.to_string()))
+        .bind(remote.deleted_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.deleted_by_user_id.map(|u| u.to_string()))
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        Ok(())
     }
 }

@@ -236,10 +236,26 @@ impl BaseDomainMerger {
 pub use self::user::UserEntityMerger;
 pub use self::donor::DonorEntityMerger;
 pub use self::document::DocumentEntityMerger;
+pub use self::funding::FundingEntityMerger;
+pub use self::participant::ParticipantEntityMerger;
+pub use self::workshop::WorkshopEntityMerger;
+pub use self::livelihood::{LivelihoodEntityMerger, SubsequentGrantEntityMerger};
+pub use self::workshop_participant::WorkshopParticipantEntityMerger;
+pub use self::activity::ActivityEntityMerger;
+pub use self::project::ProjectEntityMerger;
+pub use self::strategic_goal::StrategicGoalEntityMerger;
 
 pub mod user;
 pub mod donor;
 pub mod document;
+pub mod funding;
+pub mod participant;
+pub mod workshop;
+pub mod livelihood;
+pub mod workshop_participant;
+pub mod activity;
+pub mod project;
+pub mod strategic_goal;
 
 #[cfg(test)]
 mod tests {
