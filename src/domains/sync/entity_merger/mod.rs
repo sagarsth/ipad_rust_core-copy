@@ -236,6 +236,7 @@ impl BaseDomainMerger {
 pub use self::user::UserEntityMerger;
 pub use self::donor::DonorEntityMerger;
 pub use self::document::DocumentEntityMerger;
+pub use self::document_type::DocumentTypeEntityMerger;
 pub use self::funding::FundingEntityMerger;
 pub use self::participant::ParticipantEntityMerger;
 pub use self::workshop::WorkshopEntityMerger;
@@ -248,6 +249,7 @@ pub use self::strategic_goal::StrategicGoalEntityMerger;
 pub mod user;
 pub mod donor;
 pub mod document;
+pub mod document_type;
 pub mod funding;
 pub mod participant;
 pub mod workshop;

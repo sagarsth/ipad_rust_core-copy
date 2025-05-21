@@ -105,8 +105,16 @@ pub trait WorkshopParticipantRepository: Send + Sync + MergeableEntityRepository
         eval_type: &str, // "pre" or "post"
     ) -> DomainResult<Vec<ParticipantSummary>>;
     
-    // Hard delete might be needed for cleanup or admin tasks
-    // async fn hard_delete_relationship(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()>;
+    /// Find a workshop-participant link by its own unique ID
+    async fn find_by_id(&self, id: Uuid) -> DomainResult<WorkshopParticipant>;
+
+    /// Hard delete a workshop-participant link by its own unique ID within a transaction
+    async fn hard_delete_link_by_id_with_tx<'t>(
+        &self,
+        id: Uuid,
+        auth: &AuthContext, // Auth context for potential future use (logging, specific checks)
+        tx: &mut Transaction<'t, Sqlite>,
+    ) -> DomainResult<()>;
 }
 
 /// SQLite implementation for WorkshopParticipantRepository
@@ -327,22 +335,32 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
     ) -> DomainResult<()> {
         let now = Utc::now().to_rfc3339();
         let deleted_by = auth.user_id.to_string();
+        let deleted_by_device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
         
         let result = query(
             r#"
-            UPDATE workshop_participants SET 
-             deleted_at = ?, 
-             deleted_by_user_id = ?
-            WHERE workshop_id = ? AND participant_id = ? AND deleted_at IS NULL
-            "#
-        )
-        .bind(now)
-        .bind(deleted_by)
-        .bind(workshop_id.to_string())
-        .bind(participant_id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(DbError::from)?;
+        UPDATE workshop_participants SET 
+         deleted_at = ?, 
+         deleted_by_user_id = ?,
+         deleted_by_device_id = ?, -- Added for device ID
+         updated_at = ?, -- Also update the main updated_at timestamp
+         updated_by_user_id = ?, -- and who updated it (the deleter)
+         updated_by_device_id = ?  -- and which device did it
+        WHERE workshop_id = ? AND participant_id = ? AND deleted_at IS NULL
+        "#
+    )
+    .bind(&now)
+    .bind(&deleted_by)
+    .bind(&deleted_by_device_id_str) // Bind device_id
+    .bind(&now) // For updated_at
+    .bind(&deleted_by) // For updated_by_user_id
+    .bind(&deleted_by_device_id_str) // For updated_by_device_id
+    .bind(workshop_id.to_string())
+    .bind(participant_id.to_string())
+    .execute(&self.pool)
+    .await
+    .map_err(DbError::from)?;
+
 
         if result.rows_affected() == 0 {
             // Link might not exist or was already deleted
@@ -356,19 +374,7 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
                  Err(e) => Err(e), // Propagate DB error
              }
         } else {
-            // Log change - use the composite key for identification if ID isn't readily available
-            // Or fetch the ID before updating if needed for logging
-            // For simplicity, logging with composite key info if ID is unknown
-             let details = serde_json::json!({
-                 "workshop_id": workshop_id,
-                 "participant_id": participant_id,
-                 "reason": "Soft deleted"
-             });
-             // We don't have the link's specific UUID here easily without another query.
-             // Log against one of the known IDs or a placeholder if necessary.
-             // Using workshop_id as a stand-in entity ID for the log for now.
-             // A better approach might be to fetch the link ID first.
-             self.log_change(workshop_id, ChangeOperationType::Delete, Some(details), auth).await?;
+            //cascade in database handles the soft delete of the participant
             Ok(())
         }
     }
@@ -969,6 +975,37 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
             .collect::<DomainResult<Vec<_>>>()?;
 
         Ok(summaries)
+    }
+
+    async fn find_by_id(&self, id: Uuid) -> DomainResult<WorkshopParticipant> {
+        let row = query_as::<_, WorkshopParticipantRow>(
+            "SELECT * FROM workshop_participants WHERE id = ? AND deleted_at IS NULL",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(DbError::from)?
+        .ok_or_else(|| DomainError::EntityNotFound("WorkshopParticipant".to_string(), id))?;
+        Self::map_row_to_entity(row)
+    }
+
+    async fn hard_delete_link_by_id_with_tx<'t>(
+        &self,
+        id: Uuid,
+        _auth: &AuthContext, // Auth context for potential future use (logging, specific checks)
+        tx: &mut Transaction<'t, Sqlite>,
+    ) -> DomainResult<()> {
+        let result = query("DELETE FROM workshop_participants WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(DbError::from)?;
+
+        if result.rows_affected() == 0 {
+            Err(DomainError::EntityNotFound("WorkshopParticipant".to_string(), id))
+        } else {
+            Ok(())
+        }
     }
 }
 

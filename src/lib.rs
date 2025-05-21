@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 
 // Public modules
 pub mod auth;

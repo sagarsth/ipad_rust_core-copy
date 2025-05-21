@@ -163,6 +163,75 @@ impl SqliteDonorRepository {
             None => Ok(None),
         }
     }
+
+    /// Upsert remote Donor state within a transaction
+    async fn upsert_remote_state_with_tx<'t>(
+        &self,
+        tx: &mut Transaction<'t, Sqlite>,
+        remote: &Donor,
+        remote_device_id_str: Option<String>
+    ) -> DomainResult<()> {
+        sqlx::query(
+            r#"INSERT OR REPLACE INTO donors (
+                id, name, name_updated_at, name_updated_by, name_updated_by_device_id,
+                type_, type_updated_at, type_updated_by, type_updated_by_device_id,
+                contact_person, contact_person_updated_at, contact_person_updated_by, contact_person_updated_by_device_id,
+                email, email_updated_at, email_updated_by, email_updated_by_device_id,
+                phone, phone_updated_at, phone_updated_by, phone_updated_by_device_id,
+                country, country_updated_at, country_updated_by, country_updated_by_device_id,
+                first_donation_date, first_donation_date_updated_at, first_donation_date_updated_by, first_donation_date_updated_by_device_id,
+                notes, notes_updated_at, notes_updated_by, notes_updated_by_device_id,
+                created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id,
+                deleted_at, deleted_by_user_id, deleted_by_device_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? )"#
+        )
+        .bind(remote.id.to_string())
+        .bind(remote.name.clone())
+        .bind(remote.name_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.name_updated_by.map(|id| id.to_string()))
+        .bind(remote.name_updated_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.type_.clone())
+        .bind(remote.type_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.type_updated_by.map(|id| id.to_string()))
+        .bind(remote.type_updated_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.contact_person.clone())
+        .bind(remote.contact_person_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.contact_person_updated_by.map(|id| id.to_string()))
+        .bind(remote.contact_person_updated_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.email.clone())
+        .bind(remote.email_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.email_updated_by.map(|id| id.to_string()))
+        .bind(remote.email_updated_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.phone.clone())
+        .bind(remote.phone_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.phone_updated_by.map(|id| id.to_string()))
+        .bind(remote.phone_updated_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.country.clone())
+        .bind(remote.country_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.country_updated_by.map(|id| id.to_string()))
+        .bind(remote.country_updated_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.first_donation_date.clone())
+        .bind(remote.first_donation_date_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.first_donation_date_updated_by.map(|id| id.to_string()))
+        .bind(remote.first_donation_date_updated_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.notes.clone())
+        .bind(remote.notes_updated_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.notes_updated_by.map(|id| id.to_string()))
+        .bind(remote.notes_updated_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.created_at.to_rfc3339())
+        .bind(remote.updated_at.to_rfc3339())
+        .bind(remote.created_by_user_id.map(|id| id.to_string()))
+        .bind(remote.created_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.updated_by_user_id.map(|id| id.to_string()))
+        .bind(remote.updated_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .bind(remote.deleted_at.map(|dt| dt.to_rfc3339()))
+        .bind(remote.deleted_by_user_id.map(|id| id.to_string()))
+        .bind(remote.deleted_by_device_id.map(|id| id.to_string()).or(remote_device_id_str.clone()))
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -259,9 +328,7 @@ impl HardDeletable for SqliteDonorRepository {
 
 #[async_trait]
 impl MergeableEntityRepository<Donor> for SqliteDonorRepository {
-    fn entity_name(&self) -> &'static str {
-        "donors"
-    }
+    fn entity_name(&self) -> &'static str { "donors" }
 
     async fn merge_remote_change<'t>(
         &self,
@@ -280,177 +347,40 @@ impl MergeableEntityRepository<Donor> for SqliteDonorRepository {
             )));
         }
 
-        let entity_id = remote_change.entity_id;
+        let remote_device_id_str = remote_change.device_id.map(|id| id.to_string());
 
         match remote_change.operation_type {
-            ChangeOperationType::Create => {
+            ChangeOperationType::Create | ChangeOperationType::Update => {
                 let state_json = remote_change.new_value.as_ref()
-                    .ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for donor create")))?;
-                let payload: DonorFullState = serde_json::from_str(state_json)
-                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_donor_create", &format!("Invalid JSON: {}", e))))?;
-
-                if let Some(_local_donor) = self.find_by_id_with_tx(entity_id, tx).await? {
-                    log::warn!("Donor {} already exists, remote CREATE. LWW logic needed. For now, NoOp.", entity_id);
-                    return Ok(MergeOutcome::NoOp(format!("Donor {} already exists, LWW check needed.", entity_id)));
-                }
-                
-                let remote_device_id_str = remote_change.device_id.map(|id| id.to_string());
-
-                // Direct query for INSERT
-                let sql = r#"INSERT INTO donors (
-                    id, name, name_updated_at, name_updated_by, name_updated_by_device_id,
-                    type_, type_updated_at, type_updated_by, type_updated_by_device_id,
-                    contact_person, contact_person_updated_at, contact_person_updated_by, contact_person_updated_by_device_id,
-                    email, email_updated_at, email_updated_by, email_updated_by_device_id,
-                    phone, phone_updated_at, phone_updated_by, phone_updated_by_device_id,
-                    country, country_updated_at, country_updated_by, country_updated_by_device_id,
-                    first_donation_date, first_donation_date_updated_at, first_donation_date_updated_by, first_donation_date_updated_by_device_id,
-                    notes, notes_updated_at, notes_updated_by, notes_updated_by_device_id,
-                    created_at, updated_at, 
-                    created_by_user_id, created_by_device_id, 
-                    updated_by_user_id, updated_by_device_id,
-                    deleted_at, deleted_by_user_id, deleted_by_device_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#;
-
-                query(sql)
-                    .bind(payload.id.to_string())
-                    .bind(payload.name)
-                    .bind(payload.name_updated_at.map(|dt| dt.to_rfc3339()))
-                    .bind(payload.name_updated_by.map(|id| id.to_string()))
-                    .bind(payload.name_updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.type_)
-                    .bind(payload.type_updated_at.map(|dt| dt.to_rfc3339()))
-                    .bind(payload.type_updated_by.map(|id| id.to_string()))
-                    .bind(payload.type_updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.contact_person)
-                    .bind(payload.contact_person_updated_at.map(|dt| dt.to_rfc3339()))
-                    .bind(payload.contact_person_updated_by.map(|id| id.to_string()))
-                    .bind(payload.contact_person_updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.email)
-                    .bind(payload.email_updated_at.map(|dt| dt.to_rfc3339()))
-                    .bind(payload.email_updated_by.map(|id| id.to_string()))
-                    .bind(payload.email_updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.phone)
-                    .bind(payload.phone_updated_at.map(|dt| dt.to_rfc3339()))
-                    .bind(payload.phone_updated_by.map(|id| id.to_string()))
-                    .bind(payload.phone_updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.country)
-                    .bind(payload.country_updated_at.map(|dt| dt.to_rfc3339()))
-                    .bind(payload.country_updated_by.map(|id| id.to_string()))
-                    .bind(payload.country_updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.first_donation_date) // Already Option<String>
-                    .bind(payload.first_donation_date_updated_at.map(|dt| dt.to_rfc3339()))
-                    .bind(payload.first_donation_date_updated_by.map(|id| id.to_string()))
-                    .bind(payload.first_donation_date_updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.notes)
-                    .bind(payload.notes_updated_at.map(|dt| dt.to_rfc3339()))
-                    .bind(payload.notes_updated_by.map(|id| id.to_string()))
-                    .bind(payload.notes_updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.created_at.to_rfc3339())
-                    .bind(payload.updated_at.to_rfc3339())
-                    .bind(payload.created_by_user_id.map(|id| id.to_string()))
-                    .bind(payload.created_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.updated_by_user_id.map(|id| id.to_string()))
-                    .bind(payload.updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .bind(payload.deleted_at.map(|dt| dt.to_rfc3339()))
-                    .bind(payload.deleted_by_user_id.map(|id| id.to_string()))
-                    .bind(payload.deleted_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()))
-                    .execute(&mut **tx).await.map_err(DbError::from)?;
-
-                Ok(MergeOutcome::Created(entity_id))
-            }
-            ChangeOperationType::Update => {
-                let local_donor_opt = self.find_by_id_with_tx(entity_id, tx).await?;
-                if local_donor_opt.is_none() {
-                    log::warn!("Remote UPDATE for non-existent donor {}. Treating as NoOp or potential CREATE.", entity_id);
-                    return Ok(MergeOutcome::NoOp(format!("Donor {} not found for update", entity_id)));
-                }
-                let local_donor = local_donor_opt.unwrap();
-                
-                let state_json = remote_change.new_value.as_ref().ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for donor update")))?;
-                let remote_state: DonorFullState = serde_json::from_str(state_json).map_err(|e| DomainError::Validation(ValidationError::format("new_value_donor_update", &format!("Invalid JSON: {}", e))))?;
-
-                if remote_state.updated_at > local_donor.updated_at {
-                    let remote_device_id_str = remote_change.device_id.map(|id| id.to_string());
-                    let mut qb = QueryBuilder::new("UPDATE donors SET ");
-                    let mut separated = qb.separated(", ");
-
-                    macro_rules! add_merge_lww_field {
-                        ($builder:expr, $field_name:ident, $db_col:literal, $remote_val:expr, $remote_ts:expr, $remote_uid:expr, $remote_did_from_payload:expr, $remote_did_from_changelog:expr) => {
-                            let final_device_id = $remote_did_from_payload.map(|id| id.to_string()).or_else(|| $remote_did_from_changelog.clone());
-                            if let Some(val) = $remote_val {
-                                $builder.push(concat!($db_col, " = "));
-                                $builder.push_bind_unseparated(val); 
-                                $builder.push(concat!(" ", $db_col, "_updated_at = "));
-                                $builder.push_bind_unseparated($remote_ts.map(|dt| dt.to_rfc3339()));
-                                $builder.push(concat!(" ", $db_col, "_updated_by = "));
-                                $builder.push_bind_unseparated($remote_uid.map(|id| id.to_string()));
-                                $builder.push(concat!(" ", $db_col, "_updated_by_device_id = "));
-                                $builder.push_bind_unseparated(final_device_id);
-                            } else if $remote_ts.is_some() { 
-                                $builder.push(concat!($db_col, " = NULL"));
-                                $builder.push(concat!(" ", $db_col, "_updated_at = "));
-                                $builder.push_bind_unseparated($remote_ts.map(|dt| dt.to_rfc3339()));
-                                $builder.push(concat!(" ", $db_col, "_updated_by = "));
-                                $builder.push_bind_unseparated($remote_uid.map(|id| id.to_string()));
-                                $builder.push(concat!(" ", $db_col, "_updated_by_device_id = "));
-                                $builder.push_bind_unseparated(final_device_id);
-                            }
-                        };
+                    .ok_or_else(|| DomainError::Validation(ValidationError::custom("Missing new_value for donor change")))?;
+                let remote_state: Donor = serde_json::from_str(state_json)
+                    .map_err(|e| DomainError::Validation(ValidationError::format("new_value_donor_change", &format!("Invalid JSON: {}", e))))?;
+                // Fetch local record (None if soft-deleted or not exists)
+                let local_opt = self.find_by_id_with_tx(remote_state.id, tx).await?;
+                if let Some(local) = local_opt {
+                    // Only proceed if remote is newer
+                    if remote_state.updated_at <= local.updated_at {
+                        return Ok(MergeOutcome::NoOp("Local donor copy newer or equal".into()));
                     }
-                    
-                    add_merge_lww_field!(separated, name, "name", Some(remote_state.name.clone()), remote_state.name_updated_at, remote_state.name_updated_by, remote_state.name_updated_by_device_id, remote_device_id_str.clone());
-                    add_merge_lww_field!(separated, type_, "type_", remote_state.type_.clone(), remote_state.type_updated_at, remote_state.type_updated_by, remote_state.type_updated_by_device_id, remote_device_id_str.clone());
-                    add_merge_lww_field!(separated, contact_person, "contact_person", remote_state.contact_person.clone(), remote_state.contact_person_updated_at, remote_state.contact_person_updated_by, remote_state.contact_person_updated_by_device_id, remote_device_id_str.clone());
-                    add_merge_lww_field!(separated, email, "email", remote_state.email.clone(), remote_state.email_updated_at, remote_state.email_updated_by, remote_state.email_updated_by_device_id, remote_device_id_str.clone());
-                    add_merge_lww_field!(separated, phone, "phone", remote_state.phone.clone(), remote_state.phone_updated_at, remote_state.phone_updated_by, remote_state.phone_updated_by_device_id, remote_device_id_str.clone());
-                    add_merge_lww_field!(separated, country, "country", remote_state.country.clone(), remote_state.country_updated_at, remote_state.country_updated_by, remote_state.country_updated_by_device_id, remote_device_id_str.clone());
-                    add_merge_lww_field!(separated, first_donation_date, "first_donation_date", remote_state.first_donation_date.clone(), remote_state.first_donation_date_updated_at, remote_state.first_donation_date_updated_by, remote_state.first_donation_date_updated_by_device_id, remote_device_id_str.clone());
-                    add_merge_lww_field!(separated, notes, "notes", remote_state.notes.clone(), remote_state.notes_updated_at, remote_state.notes_updated_by, remote_state.notes_updated_by_device_id, remote_device_id_str.clone());
-
-                    separated.push("updated_at = ");
-                    separated.push_bind_unseparated(remote_state.updated_at.to_rfc3339());
-                    separated.push("updated_by_user_id = ");
-                    separated.push_bind_unseparated(remote_state.updated_by_user_id.map(|id| id.to_string()));
-                    separated.push("updated_by_device_id = ");
-                    separated.push_bind_unseparated(remote_state.updated_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()));
-                    
-                    if remote_state.deleted_at.is_some() {
-                        separated.push("deleted_at = ");
-                        separated.push_bind_unseparated(remote_state.deleted_at.map(|dt| dt.to_rfc3339()));
-                        separated.push("deleted_by_user_id = ");
-                        separated.push_bind_unseparated(remote_state.deleted_by_user_id.map(|id| id.to_string()));
-                        separated.push("deleted_by_device_id = ");
-                        separated.push_bind_unseparated(remote_state.deleted_by_device_id.map(|id| id.to_string()).or_else(|| remote_device_id_str.clone()));
-                    } else {
-                         if local_donor.deleted_at.is_some() { 
-                            separated.push("deleted_at = NULL");
-                            separated.push("deleted_by_user_id = NULL");
-                            separated.push("deleted_by_device_id = NULL");
-                         }
-                    }
-
-                    qb.push(" WHERE id = ");
-                    qb.push_bind(entity_id.to_string());
-                    
-                    qb.build().execute(&mut **tx).await.map_err(DbError::from)?;
-                    Ok(MergeOutcome::Updated(entity_id))
+                    self.upsert_remote_state_with_tx(tx, &remote_state, remote_device_id_str.clone()).await?;
+                    Ok(MergeOutcome::Updated(remote_state.id))
                 } else {
-                    Ok(MergeOutcome::NoOp(format!("Local donor {} is newer or same as remote, no update.", entity_id)))
+                    self.upsert_remote_state_with_tx(tx, &remote_state, remote_device_id_str.clone()).await?;
+                    Ok(MergeOutcome::Created(remote_state.id))
                 }
             }
             ChangeOperationType::Delete => {
-                log::info!("Remote soft DELETE for donor {} - NoOp as soft deletes are local-only.", entity_id);
+                log::info!("Remote soft DELETE for donor {} - NoOp as soft deletes are local-only.", remote_change.entity_id);
                 Ok(MergeOutcome::NoOp("Soft deletes are local-only".to_string()))
             }
             ChangeOperationType::HardDelete => {
-                log::info!("Applying HARD DELETE for donor {} directly in merge_remote_change", entity_id);
-                if self.find_by_id_with_tx(entity_id, tx).await?.is_none() {
-                    return Ok(MergeOutcome::NoOp(format!("Donor {} already deleted or not found", entity_id)));
+                log::info!("Applying HARD DELETE for donor {} directly in merge_remote_change", remote_change.entity_id);
+                if self.find_by_id_with_tx(remote_change.entity_id, tx).await?.is_none() {
+                    return Ok(MergeOutcome::NoOp(format!("Donor {} already deleted or not found", remote_change.entity_id)));
                 }
-                let temp_auth = AuthContext::internal_system_context(); // Consider if a specific user/device from tombstone is needed
-                self.hard_delete_with_tx(entity_id, &temp_auth, tx).await?;
-                Ok(MergeOutcome::HardDeleted(entity_id))
+                let temp_auth = AuthContext::internal_system_context();
+                self.hard_delete_with_tx(remote_change.entity_id, &temp_auth, tx).await?;
+                Ok(MergeOutcome::HardDeleted(remote_change.entity_id))
             }
         }
     }
@@ -496,7 +426,7 @@ impl DonorRepository for SqliteDonorRepository {
             first_donation_date, first_donation_date_updated_at, first_donation_date_updated_by, first_donation_date_updated_by_device_id,
             notes, notes_updated_at, notes_updated_by, notes_updated_by_device_id,
             created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#; // 40 fields
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#; // 40 fields
 
         query(sql)
             .bind(id.to_string())

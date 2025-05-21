@@ -11,6 +11,8 @@ use reqwest::Client;
 use std::time::Duration;
 use reqwest::multipart::{Form, Part};
 use chrono::Utc;
+use sha2::{Sha256, Digest};
+use tokio::time::{sleep, Duration as TokioDuration};
 
 /// Trait for cloud storage service operations
 #[async_trait]
@@ -67,38 +69,73 @@ impl ApiCloudStorageService {
     }
 }
 
+const MAX_RETRIES: usize = 3;
+const BASE_DELAY_MS: u64 = 1_000; // 1 second base delay for backoff
+
+fn should_retry_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+fn compute_sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let result = hasher.finalize();
+    hex::encode(result)
+}
+
 #[async_trait]
 impl CloudStorageService for ApiCloudStorageService {
     async fn get_changes_since(&self, api_token: &str, device_id: Uuid, sync_token: Option<String>) -> ServiceResult<FetchChangesResponse> {
         debug!("Fetching changes for device {} since token: {:?}", device_id, sync_token);
-        
+
+        if crate::globals::is_offline_mode() {
+            warn!("Device is offline. Skipping get_changes_since API call.");
+            return Err(ServiceError::ExternalService("Device is offline. Cannot fetch changes.".to_string()));
+        }
+
         let device_id_str = device_id.to_string();
         let mut url_string = format!("{}/api/sync/changes?deviceId={}", self.base_url, device_id_str);
 
         if let Some(token) = &sync_token {
             url_string.push_str(&format!("&since={}", token));
         }
-        
-        // Make the API request
-        let response = self.client.get(&url_string)
-            .header("Authorization", self.auth_header(api_token))
-            .send()
-            .await
-            .map_err(|e| ServiceError::ExternalService(format!("Failed to fetch changes: {}", e)))?;
-            
-        // Check status and parse response
-        if response.status().is_success() {
-            let changes_response = response.json::<FetchChangesResponse>()
-                .await
-                .map_err(|e| ServiceError::ExternalService(format!("Failed to parse changes response: {}", e)))?;
-                
-            Ok(changes_response)
-        } else {
-            let status = response.status();
-            let error_text = response.text().await
-                .unwrap_or_else(|_| "Unable to get error details".to_string());
-                
-            Err(ServiceError::ExternalService(format!("Server returned error {}: {}", status, error_text)))
+
+        let mut attempt = 0usize;
+        loop {
+            let resp_result = self.client.get(&url_string)
+                .header("Authorization", self.auth_header(api_token))
+                .send()
+                .await;
+
+            match resp_result {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        let decoded = response.json::<FetchChangesResponse>().await
+                            .map_err(|e| ServiceError::ExternalService(format!("Failed to parse changes response: {}", e)))?;
+                        return Ok(decoded);
+                    } else if should_retry_status(response.status()) && attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay = BASE_DELAY_MS * 2u64.pow(attempt as u32 - 1);
+                        debug!("Retrying fetch_changes (attempt {}) after {} ms (status {})", attempt, delay, response.status());
+                        sleep(TokioDuration::from_millis(delay)).await;
+                        continue;
+                    } else {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_else(|_| "Unable to get error details".to_string());
+                        return Err(ServiceError::ExternalService(format!("Server returned error {}: {}", status, error_text)));
+                    }
+                }
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay = BASE_DELAY_MS * 2u64.pow(attempt as u32 - 1);
+                        debug!("Network error fetching changes (attempt {}): {}. Retrying after {} ms", attempt, e, delay);
+                        sleep(TokioDuration::from_millis(delay)).await;
+                        continue;
+                    }
+                    return Err(ServiceError::ExternalService(format!("Failed to fetch changes: {}", e)));
+                }
+            }
         }
     }
     
@@ -106,157 +143,208 @@ impl CloudStorageService for ApiCloudStorageService {
         debug!("Pushing {} changes and {} tombstones for device {}",
                payload.changes.len(),
                payload.tombstones.as_ref().map_or(0, |t| t.len()),
-               payload.device_id); // Log the device_id from payload
-        
+               payload.device_id);
+
+        if crate::globals::is_offline_mode() {
+            warn!("Device is offline. Skipping push_changes API call.");
+            return Err(ServiceError::ExternalService("Device is offline. Cannot push changes.".to_string()));
+        }
+
         let url = format!("{}/api/sync/push", self.base_url);
-        
-        // Make the API request
-        let response = self.client.post(&url)
-            .header("Authorization", self.auth_header(api_token))
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| ServiceError::ExternalService(format!("Failed to push changes: {}", e)))?;
-            
-        // Check status and parse response
-        if response.status().is_success() {
-            let push_response = response.json::<PushChangesResponse>()
-                .await
-                .map_err(|e| ServiceError::ExternalService(format!("Failed to parse push response: {}", e)))?;
-                
-            Ok(push_response)
-        } else {
-            let status = response.status();
-            let error_text = response.text().await
-                .unwrap_or_else(|_| "Unable to get error details".to_string());
-                
-            Err(ServiceError::ExternalService(format!("Server returned error {}: {}", status, error_text)))
+
+        let mut attempt = 0usize;
+        loop {
+            let resp_res = self.client.post(&url)
+                .header("Authorization", self.auth_header(api_token))
+                .json(&payload)
+                .send()
+                .await;
+
+            match resp_res {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        let parsed = response.json::<PushChangesResponse>().await
+                            .map_err(|e| ServiceError::ExternalService(format!("Failed to parse push response: {}", e)))?;
+                        return Ok(parsed);
+                    } else if should_retry_status(response.status()) && attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay = BASE_DELAY_MS * 2u64.pow(attempt as u32 - 1);
+                        debug!("Retrying push_changes (attempt {}) after {} ms (status {})", attempt, delay, response.status());
+                        sleep(TokioDuration::from_millis(delay)).await;
+                        continue;
+                    } else {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_else(|_| "Unable to get error details".to_string());
+                        return Err(ServiceError::ExternalService(format!("Server returned error {}: {}", status, error_text)));
+                    }
+                }
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay = BASE_DELAY_MS * 2u64.pow(attempt as u32 - 1);
+                        debug!("Network error pushing changes (attempt {}): {}. Retrying after {} ms", attempt, e, delay);
+                        sleep(TokioDuration::from_millis(delay)).await;
+                        continue;
+                    }
+                    return Err(ServiceError::ExternalService(format!("Failed to push changes: {}", e)));
+                }
+            }
         }
     }
     
     async fn upload_document(&self, device_id_of_uploader: Uuid, document_id: Uuid, local_path: &str, mime_type: &str, _size_bytes: u64) -> ServiceResult<String> {
         debug!("Uploading document {} from device {} from path {}", document_id, device_id_of_uploader, local_path);
-        
+
+        if crate::globals::is_offline_mode() {
+            warn!("Device is offline. Skipping upload_document API call for document {}.", document_id);
+            return Err(ServiceError::ExternalService(format!("Device is offline. Cannot upload document {}.", document_id)));
+        }
+
         let doc_id_str = document_id.to_string();
         let uploader_device_id_str = device_id_of_uploader.to_string();
-        let url = format!("{}/api/documents/upload/{}", self.base_url, doc_id_str); // Assuming API takes doc_id in path
-        
+        let url = format!("{}/api/documents/upload/{}", self.base_url, doc_id_str);
+
         // Read the file
         let file_content = tokio::fs::read(local_path)
             .await
             .map_err(|e| ServiceError::Domain(DomainError::File(format!("Failed to read local file: {}", e))))?;
-            
-        // Prepare the multipart form
-        let part = Part::bytes(file_content)
-            .file_name(Path::new(local_path).file_name().unwrap_or_default().to_string_lossy().into_owned())
-            .mime_str(mime_type)
-            .map_err(|e| ServiceError::Domain(DomainError::Internal(format!("Invalid MIME type for upload: {}", e))))?;
-            
-        let form = Form::new()
-            .part("file", part)
-            .text("documentId", doc_id_str.clone()) // Keep if API expects it, or remove if doc_id in path is enough
-            .text("deviceId", uploader_device_id_str); // Add deviceId
-            
-        // Make the API request
-        let response = self.client.post(&url)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| ServiceError::ExternalService(format!("Failed to upload document: {}", e)))?;
-            
-        // Check status and parse response
-        if response.status().is_success() {
-            #[derive(Deserialize)]
-            struct UploadResponse {
-                blob_key: String,
+
+        let file_hash = compute_sha256_hex(&file_content);
+
+        let mut attempt = 0usize;
+        loop {
+            let part = Part::bytes(file_content.clone())
+                .file_name(Path::new(local_path).file_name().unwrap_or_default().to_string_lossy().into_owned())
+                .mime_str(mime_type)
+                .map_err(|e| ServiceError::Domain(DomainError::Internal(format!("Invalid MIME type for upload: {}", e))))?;
+
+            let form = Form::new()
+                .part("file", part)
+                .text("documentId", doc_id_str.clone())
+                .text("deviceId", uploader_device_id_str.clone());
+
+            let resp_res = self.client.post(&url)
+                .header("X-Content-Sha256", file_hash.as_str())
+                .multipart(form)
+                .send()
+                .await;
+
+            match resp_res {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        let server_hash_opt = response.headers().get("X-Verified-Sha256").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+
+                        #[derive(Deserialize)]
+                        struct UploadResponse { blob_key: String }
+                        let upload_response = response.json::<UploadResponse>().await
+                            .map_err(|e| ServiceError::ExternalService(format!("Failed to parse upload response: {}", e)))?;
+
+                        if let Some(server_hash) = server_hash_opt {
+                            if server_hash != file_hash {
+                                return Err(ServiceError::Domain(DomainError::Internal("Checksum mismatch after upload".into())));
+                            }
+                        }
+
+                        return Ok(upload_response.blob_key);
+                    } else if should_retry_status(response.status()) && attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay = BASE_DELAY_MS * 2u64.pow(attempt as u32 - 1);
+                        debug!("Retrying upload_document (attempt {}) after {} ms (status {})", attempt, delay, response.status());
+                        sleep(TokioDuration::from_millis(delay)).await;
+                        continue;
+                    } else {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_else(|_| "Unable to get error details".to_string());
+                        return Err(ServiceError::ExternalService(format!("Server returned error {}: {}", status, error_text)));
+                    }
+                }
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay = BASE_DELAY_MS * 2u64.pow(attempt as u32 - 1);
+                        debug!("Network error uploading document (attempt {}): {}. Retrying after {} ms", attempt, e, delay);
+                        sleep(TokioDuration::from_millis(delay)).await;
+                        continue;
+                    }
+                    return Err(ServiceError::ExternalService(format!("Failed to upload document: {}", e)));
+                }
             }
-            
-            let upload_response = response.json::<UploadResponse>()
-                .await
-                .map_err(|e| ServiceError::ExternalService(format!("Failed to parse upload response: {}", e)))?;
-                
-            Ok(upload_response.blob_key)
-        } else {
-            let status = response.status();
-            let error_text = response.text().await
-                .unwrap_or_else(|_| "Unable to get error details".to_string());
-                
-            Err(ServiceError::ExternalService(format!("Server returned error {}: {}", status, error_text)))
         }
     }
     
     async fn download_document(&self, document_id: Uuid, blob_key: &str) -> ServiceResult<(String, u64, bool)> {
         debug!("Downloading document {} with key {}", document_id, blob_key);
-        
-        // Ensure local storage directory exists
+
+        if crate::globals::is_offline_mode() {
+            warn!("Device is offline. Skipping download_document API call for document {} with key {}.", document_id, blob_key);
+            return Err(ServiceError::ExternalService(format!("Device is offline. Cannot download document {} with key {}.", document_id, blob_key)));
+        }
+
         self.ensure_storage_dir()?;
-        
+
         let doc_id_str = document_id.to_string();
         let url = format!("{}/api/documents/download/{}", self.base_url, blob_key);
-        
-        // Make the API request
-        let response = self.client.get(&url)
-            .send()
-            .await
-            .map_err(|e| ServiceError::ExternalService(format!("Failed to download document: {}", e)))?;
-            
-        // Check status and process response
-        if response.status().is_success() {
-            // Get content type to determine compression
-            let content_type = response.headers()
-                .get(reqwest::header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("application/octet-stream");
-                
-            let is_compressed = content_type.contains("compressed") || 
-                               content_type.contains("zip") ||
-                               response.headers()
-                                      .get("X-Compressed")
-                                      .and_then(|v| v.to_str().ok())
-                                      .map(|v| v == "true")
-                                      .unwrap_or(false);
-            
-            // Get content length
-            let size = response.content_length().unwrap_or(0);
-            
-            // Determine file extension from content type
-            let extension = if content_type.contains("jpeg") || content_type.contains("jpg") {
-                "jpg"
-            } else if content_type.contains("png") {
-                "png"
-            } else if content_type.contains("pdf") {
-                "pdf"
-            } else if content_type.contains("zip") || is_compressed {
-                "zip"
-            } else {
-                "bin" // Default binary extension
-            };
-            
-            // Create local path
-            let filename = if is_compressed {
-                format!("{}_compressed.{}", doc_id_str, extension)
-            } else {
-                format!("{}.{}", doc_id_str, extension)
-            };
-            
-            let local_path = format!("{}/{}", self.local_storage_path, filename);
-            
-            // Download and save the file
-            let bytes = response.bytes()
-                .await
-                .map_err(|e| ServiceError::Domain(DomainError::File(format!("Failed to read document bytes: {}", e))))?;
-                
-            tokio::fs::write(&local_path, &bytes)
-                .await
-                .map_err(|e| ServiceError::Domain(DomainError::File(format!("Failed to write document to disk: {}", e))))?;
-                
-            Ok((local_path, size, is_compressed))
-        } else {
-            let status = response.status();
-            let error_text = response.text().await
-                .unwrap_or_else(|_| "Unable to get error details".to_string());
-                
-            Err(ServiceError::ExternalService(format!("Server returned error {}: {}", status, error_text)))
+
+        let mut attempt = 0usize;
+        loop {
+            let resp_res = self.client.get(&url).send().await;
+
+            match resp_res {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        // Determine compression via headers
+                        let content_type = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("application/octet-stream");
+                        let is_compressed = content_type.contains("compressed") || content_type.contains("zip") || response.headers().get("X-Compressed").and_then(|v| v.to_str().ok()).map(|v| v == "true").unwrap_or(false);
+
+                        let size = response.content_length().unwrap_or(0);
+
+                        let extension = if content_type.contains("jpeg") || content_type.contains("jpg") { "jpg" } else if content_type.contains("png") { "png" } else if content_type.contains("pdf") { "pdf" } else if content_type.contains("zip") || is_compressed { "zip" } else { "bin" };
+
+                        let filename = if is_compressed { format!("{}_compressed.{}", doc_id_str, extension) } else { format!("{}.{}", doc_id_str, extension) };
+                        let local_path = format!("{}/{}", self.local_storage_path, filename);
+
+                        // Capture checksum header before consuming response
+                        let server_hash_opt = response.headers()
+                            .get("X-Content-Sha256")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_string());
+                        
+                        let bytes = response.bytes().await.map_err(|e| ServiceError::Domain(DomainError::File(format!("Failed to read document bytes: {}", e))))?;
+                        
+                        // Verify checksum if header present
+                        if let Some(expected_hash) = server_hash_opt {
+                            let actual_hash = compute_sha256_hex(&bytes);
+                            if actual_hash != expected_hash {
+                                return Err(ServiceError::Domain(DomainError::Internal("Checksum mismatch in downloaded file".into())));
+                            }
+                        }
+
+                        tokio::fs::write(&local_path, &bytes).await.map_err(|e| ServiceError::Domain(DomainError::File(format!("Failed to write document to disk: {}", e))))?;
+
+                        return Ok((local_path, size, is_compressed));
+                    } else if should_retry_status(response.status()) && attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay = BASE_DELAY_MS * 2u64.pow(attempt as u32 - 1);
+                        debug!("Retrying download_document (attempt {}) after {} ms (status {})", attempt, delay, response.status());
+                        sleep(TokioDuration::from_millis(delay)).await;
+                        continue;
+                    } else {
+                        let status = response.status();
+                        let error_text = response.text().await.unwrap_or_else(|_| "Unable to get error details".to_string());
+                        return Err(ServiceError::ExternalService(format!("Server returned error {}: {}", status, error_text)));
+                    }
+                }
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        attempt += 1;
+                        let delay = BASE_DELAY_MS * 2u64.pow(attempt as u32 - 1);
+                        debug!("Network error downloading document (attempt {}): {}. Retrying after {} ms", attempt, e, delay);
+                        sleep(TokioDuration::from_millis(delay)).await;
+                        continue;
+                    }
+                    return Err(ServiceError::ExternalService(format!("Failed to download document: {}", e)));
+                }
+            }
         }
     }
 }

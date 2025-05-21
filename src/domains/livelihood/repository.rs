@@ -137,7 +137,7 @@ pub trait LivehoodRepository:
 
 /// Repository for subsequent grants
 #[async_trait]
-pub trait SubsequentGrantRepository: Send + Sync + MergeableEntityRepository<SubsequentGrant> {
+pub trait SubsequentGrantRepository: Send + Sync + MergeableEntityRepository<SubsequentGrant> + HardDeletable + SoftDeletable {
     /// Create a new subsequent grant
     async fn create(
         &self,
@@ -349,23 +349,80 @@ impl HardDeletable for SqliteLivelihoodRepository {
         _auth: &AuthContext,
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
-        // Check if the record exists first
-        let _existing = self.find_by_id_with_tx(id, tx).await?;
-        
-        // Delete the record permanently
-        let rows_affected = query(
-            "DELETE FROM livelihoods WHERE id = ?"
+        // 1. Ensure record exists
+        self.find_by_id_with_tx(id, tx).await?;
+
+        // 2. Fetch subsequent grant IDs linked to this livelihood (will be cascaded by FK)
+        let livelihood_id_str = id.to_string();
+        let rows = sqlx::query!(
+            "SELECT id FROM subsequent_grants WHERE livelihood_id = ?",
+            livelihood_id_str
         )
-        .bind(id.to_string())
-        .execute(&mut **tx)
+        .fetch_all(&mut **tx)
         .await
-        .map_err(DbError::from)?
-        .rows_affected();
-        
+        .map_err(DbError::from)?;
+
+        // 3. For each grant, create tombstone + changelog (HardDelete)
+        use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType};
+        for row in rows {
+            let grant_id = Uuid::parse_str(row.id.as_deref().ok_or_else(|| DomainError::Internal("Missing UUID in subsequent_grants".to_string()))?)
+                .map_err(|_| DomainError::Internal("Invalid UUID in subsequent_grants".to_string()))?;
+
+            // Generate operation id same as tombstone id for simplicity
+            let operation_id = Uuid::new_v4();
+            let now = Utc::now();
+
+            let id_str = id.to_string();
+            let operation_id_str = operation_id.to_string();
+            let grant_id_str = grant_id.to_string();
+            let user_id_str = _auth.user_id.to_string();
+            let now_str = now.to_rfc3339();
+
+            sqlx::query!(
+                "INSERT INTO tombstones (id, entity_id, entity_type, deleted_by, deleted_at, operation_id) VALUES (?,?,?,?,?,?)",
+                operation_id_str,
+                grant_id_str,
+                "subsequent_grants",
+                user_id_str,
+                now_str,
+                operation_id_str
+            )
+            .execute(&mut **tx)
+            .await
+            .map_err(DbError::from)?;
+
+            // Change log entry
+            let change_entry = ChangeLogEntry {
+                operation_id,
+                entity_table: "subsequent_grants".to_string(),
+                entity_id: grant_id,
+                operation_type: ChangeOperationType::HardDelete,
+                field_name: None,
+                old_value: None,
+                new_value: None,
+                document_metadata: None,
+                timestamp: now,
+                user_id: _auth.user_id,
+                device_id: _auth.device_id.parse::<Uuid>().ok(),
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+            self.change_log_repo.create_change_log_with_tx(&change_entry, tx).await?;
+        }
+
+        // 4. Delete livelihood record – cascades will remove subsequent_grants
+        let rows_affected = sqlx::query("DELETE FROM livelihoods WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(DbError::from)?
+            .rows_affected();
+
         if rows_affected == 0 {
             return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
         }
-        
+
         Ok(())
     }
     
@@ -1915,5 +1972,106 @@ INSERT OR REPLACE INTO subsequent_grants (
         .await
         .map_err(DbError::from)?;
         Ok(())
+    }
+}
+
+// === New SoftDeletable / HardDeletable impls for SubsequentGrant ===
+
+#[async_trait::async_trait]
+impl crate::domains::core::repository::SoftDeletable for SqliteSubsequentGrantRepository {
+    async fn soft_delete_with_tx(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> DomainResult<()> {
+        // Adapt logic from existing soft_delete but operate on provided tx
+        let existing = self.find_by_id_with_tx(id, tx).await?;
+
+        if existing.deleted_at.is_some() {
+            return Err(DomainError::DeletedEntity(self.entity_name().to_string(), id));
+        }
+
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let device_id_str = auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string());
+
+        let mut builder = sqlx::QueryBuilder::new("UPDATE subsequent_grants SET ");
+        builder.push("deleted_at = ");
+        builder.push_bind(now_str.clone());
+        builder.push(", deleted_by_user_id = ");
+        builder.push_bind(auth.user_id.to_string());
+        builder.push(", deleted_by_device_id = ");
+        builder.push_bind(device_id_str);
+        builder.push(", updated_at = ");
+        builder.push_bind(now_str);
+        builder.push(", updated_by_device_id = ");
+        builder.push_bind(auth.device_id.parse::<Uuid>().ok().map(|u| u.to_string()));
+        builder.push(" WHERE id = ");
+        builder.push_bind(id.to_string());
+
+        let query = builder.build();
+        let result = query.execute(&mut **tx).await.map_err(DbError::from)?;
+        if result.rows_affected() == 0 {
+            return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
+        }
+        Ok(())
+    }
+
+    async fn soft_delete(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()> {
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let res = self.soft_delete_with_tx(id, auth, &mut tx).await;
+        if res.is_ok() {
+            tx.commit().await.map_err(DbError::from)?;
+        } else {
+            tx.rollback().await.map_err(DbError::from)?;
+        }
+        res
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::domains::core::repository::HardDeletable for SqliteSubsequentGrantRepository {
+    fn entity_name(&self) -> &'static str { "subsequent_grants" }
+
+    async fn hard_delete_with_tx(
+        &self,
+        id: Uuid,
+        _auth: &AuthContext,
+        tx: &mut sqlx::Transaction<'_, Sqlite>,
+    ) -> DomainResult<()> {
+        // Ensure record exists
+        let _ = self.find_by_id_with_tx(id, tx).await?;
+
+        let rows_affected = sqlx::query("DELETE FROM subsequent_grants WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(DbError::from)?
+            .rows_affected();
+
+        if rows_affected == 0 {
+            return Err(DomainError::EntityNotFound(self.entity_name().to_string(), id));
+        }
+        Ok(())
+    }
+
+    async fn hard_delete(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> DomainResult<()> {
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        let res = self.hard_delete_with_tx(id, auth, &mut tx).await;
+        if res.is_ok() {
+            tx.commit().await.map_err(DbError::from)?;
+        } else {
+            tx.rollback().await.map_err(DbError::from)?;
+        }
+        res
     }
 }
