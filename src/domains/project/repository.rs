@@ -111,6 +111,14 @@ pub trait ProjectRepository: DeleteServiceRepository<Project> + MergeableEntityR
     
     /// Get project metadata counts
     async fn get_project_metadata_counts(&self) -> DomainResult<ProjectMetadataCounts>;
+
+    /// Find projects within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Project>>;
 }
 
 /// SQLite implementation for ProjectRepository
@@ -1192,6 +1200,54 @@ impl ProjectRepository for SqliteProjectRepository {
             projects_by_status,
             projects_by_goal,
         })
+    }
+
+    /// Find projects within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Project>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM projects 
+             WHERE updated_at >= ? AND updated_at <= ? 
+             AND deleted_at IS NULL"
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, ProjectRow>(
+            "SELECT * FROM projects 
+             WHERE updated_at >= ? AND updated_at <= ? 
+             AND deleted_at IS NULL 
+             ORDER BY updated_at ASC LIMIT ? OFFSET ?"
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Project>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
     }
 }
 

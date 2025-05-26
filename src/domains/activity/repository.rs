@@ -45,6 +45,19 @@ pub trait ActivityRepository: DeleteServiceRepository<Activity> + MergeableEntit
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<Activity>;
 
+    async fn find_all(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Activity>>;
+
+    /// Find activities within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: chrono::DateTime<chrono::Utc>,
+        end_date: chrono::DateTime<chrono::Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Activity>>;
+
     async fn find_by_project_id(
         &self,
         project_id: Uuid,
@@ -467,6 +480,85 @@ impl ActivityRepository for SqliteActivityRepository {
         }
         
         Ok(new_entity)
+    }
+
+    async fn find_all(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Activity>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        let total: i64 = query_scalar(
+             "SELECT COUNT(*) FROM activities WHERE deleted_at IS NULL"
+         )
+         .fetch_one(&self.pool)
+         .await
+         .map_err(DbError::from)?;
+
+        let rows = query_as::<_, ActivityRow>(
+            "SELECT * FROM activities WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT ? OFFSET ?",
+        )
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Activity>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    /// Find activities within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: chrono::DateTime<chrono::Utc>,
+        end_date: chrono::DateTime<chrono::Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Activity>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        let total: i64 = query_scalar(
+             "SELECT COUNT(*) FROM activities WHERE deleted_at IS NULL AND (created_at BETWEEN ? AND ? OR updated_at BETWEEN ? AND ?)"
+         )
+         .bind(start_date.to_rfc3339())
+         .bind(end_date.to_rfc3339())
+         .bind(start_date.to_rfc3339())
+         .bind(end_date.to_rfc3339())
+         .fetch_one(&self.pool)
+         .await
+         .map_err(DbError::from)?;
+
+        let rows = query_as::<_, ActivityRow>(
+            "SELECT * FROM activities WHERE deleted_at IS NULL AND (created_at BETWEEN ? AND ? OR updated_at BETWEEN ? AND ?) ORDER BY created_at ASC LIMIT ? OFFSET ?",
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Activity>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
     }
 
     async fn find_by_project_id(

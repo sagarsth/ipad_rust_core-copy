@@ -93,6 +93,17 @@ pub trait ActivityService: DeleteService<Activity> + Send + Sync {
         document_type_id: Uuid,
         auth: &AuthContext,
     ) -> ServiceResult<(ActivityResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)>;
+
+    /// Find activities within a date range (created_at or updated_at)
+    /// Expects RFC3339 format timestamps (e.g., "2024-01-01T00:00:00Z")
+    async fn find_activities_by_date_range(
+        &self,
+        start_rfc3339: &str, // RFC3339 format datetime string
+        end_rfc3339: &str,   // RFC3339 format datetime string
+        params: PaginationParams,
+        include: Option<&[ActivityInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ActivityResponse>>;
 }
 
 /// Implementation of the activity service
@@ -576,5 +587,60 @@ impl ActivityService for ActivityServiceImpl {
         // Potentially enrich response here if needed after create + docs
         // let enriched_response = self.enrich_response(response, Some(&[ActivityInclude::Documents]), auth).await?;
         Ok((response, document_results))
+    }
+
+    /// Find activities within a date range (created_at or updated_at)
+    /// Expects RFC3339 format timestamps (e.g., "2024-01-01T00:00:00Z")
+    async fn find_activities_by_date_range(
+        &self,
+        start_rfc3339: &str, // RFC3339 format datetime string
+        end_rfc3339: &str,   // RFC3339 format datetime string
+        params: PaginationParams,
+        include: Option<&[ActivityInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ActivityResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewActivities)?;
+
+        // 2. Parse RFC3339 datetime strings
+        let start_datetime = chrono::DateTime::parse_from_rfc3339(start_rfc3339)
+            .map_err(|e| ServiceError::Domain(DomainError::Validation(
+                ValidationError::format("start_date", &format!("Invalid RFC3339 date format: {}", e))
+            )))?
+            .with_timezone(&chrono::Utc);
+
+        let end_datetime = chrono::DateTime::parse_from_rfc3339(end_rfc3339)
+            .map_err(|e| ServiceError::Domain(DomainError::Validation(
+                ValidationError::format("end_date", &format!("Invalid RFC3339 date format: {}", e))
+            )))?
+            .with_timezone(&chrono::Utc);
+
+        // 3. Validate date range
+        if start_datetime > end_datetime {
+            return Err(ServiceError::Domain(DomainError::Validation(
+                ValidationError::custom("Start date must be before end date")
+            )));
+        }
+
+        // 4. Get activities in date range
+        let paginated_result = self.repo
+            .find_by_date_range(start_datetime, end_datetime, params)
+            .await
+            .map_err(ServiceError::Domain)?;
+
+        // 5. Convert to response DTOs and enrich
+        let mut enriched_items = Vec::new();
+        for activity in paginated_result.items {
+            let response = ActivityResponse::from(activity);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 6. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
     }
 }

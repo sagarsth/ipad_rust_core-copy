@@ -1,7 +1,7 @@
 use crate::errors::{DomainError, DomainResult, ValidationError};
 use crate::validation::{Validate, ValidationBuilder};
 use uuid::Uuid;
-use chrono::{DateTime, Utc, NaiveDate};
+use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use crate::domains::document::types::MediaDocumentResponse;
@@ -73,9 +73,12 @@ impl Livelihood {
         
         initial + subsequent
     }
-
-    pub fn parsed_initial_grant_date(&self) -> Option<NaiveDate> {
-        self.initial_grant_date.as_ref().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+    pub fn parsed_initial_grant_date(&self) -> Option<DateTime<Utc>> {
+        self.initial_grant_date.as_ref().and_then(|d| {
+            DateTime::parse_from_rfc3339(d)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        })
     }
 }
 
@@ -131,8 +134,12 @@ impl SubsequentGrant {
     pub fn is_deleted(&self) -> bool {
         self.deleted_at.is_some()
     }
-    pub fn parsed_grant_date(&self) -> Option<NaiveDate> {
-        self.grant_date.as_ref().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+    pub fn parsed_grant_date(&self) -> Option<DateTime<Utc>> {
+        self.grant_date.as_ref().and_then(|d| {
+            DateTime::parse_from_rfc3339(d)
+                .map(|dt| dt.with_timezone(&Utc))
+                .ok()
+        })
     }
 }
 
@@ -173,7 +180,7 @@ impl Validate for NewLivelihood {
             .validate()?;
 
         if let Some(date) = &self.initial_grant_date {
-            if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+            if DateTime::parse_from_rfc3339(date).is_err() {
                 return Err(DomainError::Validation(
                     crate::errors::ValidationError::format(
                         "initial_grant_date", 
@@ -214,7 +221,7 @@ impl Validate for UpdateLivelihood {
         }
         if let Some(date_opt) = &self.initial_grant_date {
             if let Some(date_str) = date_opt {
-                if NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_err() {
+                if DateTime::parse_from_rfc3339(date_str).is_err() {
                     return Err(DomainError::Validation(
                         crate::errors::ValidationError::format(
                             "initial_grant_date", 
@@ -446,7 +453,7 @@ impl LivelihoodResponse {
 }
 
 /// Enum to specify included relations when fetching livelihoods
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LivelihoodInclude {
     Project,
     Participant,
@@ -618,7 +625,7 @@ impl Validate for NewSubsequentGrant {
             ValidationBuilder::new("amount", Some(amount)).min(0.0).validate()?;
         }
         if let Some(date) = &self.grant_date {
-            if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+            if DateTime::parse_from_rfc3339(date).is_err() {
                 return Err(DomainError::Validation(crate::errors::ValidationError::format("grant_date", "Invalid date format. Expected YYYY-MM-DD")));
             }
         }
@@ -642,7 +649,7 @@ impl Validate for UpdateSubsequentGrant {
             ValidationBuilder::new("amount", Some(amount)).min(0.0).validate()?;
         }
         if let Some(date) = &self.grant_date {
-            if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+            if DateTime::parse_from_rfc3339(date).is_err() {
                 return Err(DomainError::Validation(crate::errors::ValidationError::format("grant_date", "Invalid date format. Expected YYYY-MM-DD")));
             }
         }

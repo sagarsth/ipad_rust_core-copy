@@ -24,7 +24,7 @@ use crate::domains::document::service::DocumentService;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
-use chrono::{NaiveDate, Local};
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use crate::domains::core::delete_service::PendingDeletionManager;
@@ -137,8 +137,8 @@ pub trait WorkshopService: DeleteService<Workshop> + Send + Sync {
     /// Find workshops by date range
     async fn find_workshops_by_date_range(
         &self,
-        start_date: NaiveDate,
-        end_date: NaiveDate,
+        start_rfc3339: &str, // RFC3339 format datetime string
+        end_rfc3339: &str,   // RFC3339 format datetime string
         params: PaginationParams,
         include: Option<&[WorkshopInclude]>,
         auth: &AuthContext,
@@ -857,8 +857,8 @@ impl WorkshopService for WorkshopServiceImpl {
 
     async fn find_workshops_by_date_range(
         &self,
-        start_date: NaiveDate,
-        end_date: NaiveDate,
+        start_rfc3339: &str, // RFC3339 format datetime string
+        end_rfc3339: &str,   // RFC3339 format datetime string
         params: PaginationParams,
         include: Option<&[WorkshopInclude]>,
         auth: &AuthContext,
@@ -866,7 +866,19 @@ impl WorkshopService for WorkshopServiceImpl {
         // 1. Check permissions
         auth.authorize(Permission::ViewWorkshops)?;
 
-        // 2. Validate date range
+        // 2. Parse date range
+        let start_date = DateTime::parse_from_rfc3339(start_rfc3339)
+            .map_err(|e| ServiceError::Domain(DomainError::Validation(ValidationError::custom(
+                &format!("Invalid start date format: {}", e)
+            ))))?
+            .with_timezone(&Utc);
+        let end_date = DateTime::parse_from_rfc3339(end_rfc3339)
+            .map_err(|e| ServiceError::Domain(DomainError::Validation(ValidationError::custom(
+                &format!("Invalid end date format: {}", e)
+            ))))?
+            .with_timezone(&Utc);
+
+        // 3. Validate date range
         if start_date > end_date {
             return Err(ServiceError::Domain(
                 DomainError::Validation(ValidationError::custom(
@@ -875,11 +887,11 @@ impl WorkshopService for WorkshopServiceImpl {
             ));
         }
 
-        // 3. Find workshops in date range
+        // 4. Find workshops in date range
         let paginated_result = self.repo.find_by_date_range(start_date, end_date, params).await
             .map_err(ServiceError::Domain)?;
 
-        // 4. Convert and enrich each workshop
+        // 5. Convert and enrich each workshop
         let mut enriched_items = Vec::new();
         for workshop in paginated_result.items {
             let response = WorkshopResponse::from_workshop(workshop);
@@ -887,7 +899,7 @@ impl WorkshopService for WorkshopServiceImpl {
             enriched_items.push(enriched);
         }
 
-        // 5. Return paginated result
+        // 6. Return paginated result
         Ok(PaginatedResult::new(
             enriched_items,
             paginated_result.total,

@@ -200,10 +200,11 @@ pub trait LivehoodService: DeleteService<Livelihood> + Send + Sync {
     ) -> ServiceResult<LivelihoodDashboardMetrics>;
     
     /// Find livelihoods created in date range
+    /// Expects RFC3339 format timestamps (e.g., "2024-01-01T00:00:00Z")
     async fn find_livelihoods_by_date_range(
         &self,
-        start_date: &str,
-        end_date: &str,
+        start_rfc3339: &str, // RFC3339 format datetime string
+        end_rfc3339: &str,   // RFC3339 format datetime string  
         params: PaginationParams,
         include: Option<&[LivelihoodInclude]>,
         auth: &AuthContext,
@@ -1477,8 +1478,8 @@ impl LivehoodService for LivehoodServiceImpl {
     
     async fn find_livelihoods_by_date_range(
         &self,
-        start_date: &str,
-        end_date: &str,
+        start_rfc3339: &str, // RFC3339 format datetime string
+        end_rfc3339: &str,   // RFC3339 format datetime string  
         params: PaginationParams,
         include: Option<&[LivelihoodInclude]>,
         auth: &AuthContext,
@@ -1490,28 +1491,29 @@ impl LivehoodService for LivehoodServiceImpl {
             ));
         }
 
-        // Validate date format - YYYY-MM-DD
-        if chrono::NaiveDate::parse_from_str(start_date, "%Y-%m-%d").is_err() {
+        // Parse RFC3339 datetime strings following recommended architecture
+        let start_datetime = DateTime::parse_from_rfc3339(start_rfc3339)
+            .map_err(|e| ServiceError::Domain(DomainError::Validation(
+                ValidationError::format("start_date", &format!("Invalid RFC3339 date format: {}", e))
+            )))?
+            .with_timezone(&Utc);
+
+        let end_datetime = DateTime::parse_from_rfc3339(end_rfc3339)
+            .map_err(|e| ServiceError::Domain(DomainError::Validation(
+                ValidationError::format("end_date", &format!("Invalid RFC3339 date format: {}", e))
+            )))?
+            .with_timezone(&Utc);
+
+        // Validate date range
+        if start_datetime > end_datetime {
             return Err(ServiceError::Domain(DomainError::Validation(
-                ValidationError::format(
-                    "start_date", 
-                    "Invalid date format. Expected YYYY-MM-DD"
-                )
-            )));
-        }
-        
-        if chrono::NaiveDate::parse_from_str(end_date, "%Y-%m-%d").is_err() {
-            return Err(ServiceError::Domain(DomainError::Validation(
-                 ValidationError::format(
-                    "end_date", 
-                    "Invalid date format. Expected YYYY-MM-DD"
-                )
+                ValidationError::custom("Start date must be before end date")
             )));
         }
 
         // 2. Get livelihoods in date range
         let paginated_result = self.repo
-            .find_by_date_range(start_date, end_date, params)
+            .find_by_date_range(start_datetime, end_datetime, params)
             .await
             .map_err(ServiceError::Domain)?;
 

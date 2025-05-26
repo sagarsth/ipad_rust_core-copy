@@ -122,8 +122,8 @@ pub trait LivehoodRepository:
     /// Find livelihoods by creation date range
     async fn find_by_date_range(
         &self,
-        start_date: &str,
-        end_date: &str,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Livelihood>>;
 
@@ -211,8 +211,8 @@ pub trait SubsequentGrantRepository: Send + Sync + MergeableEntityRepository<Sub
     /// Find by date range
     async fn find_by_date_range(
         &self,
-        start_date: &str,
-        end_date: &str,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
     ) -> DomainResult<Vec<SubsequentGrant>>;
     
     /// Get monthly grant statistics
@@ -1152,49 +1152,54 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
     
     async fn find_by_date_range(
         &self,
-        start_date: &str,
-        end_date: &str,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Livelihood>> {
         let offset = (params.page - 1) * params.per_page;
 
-        // Get total count
         let total: i64 = query_scalar(
             "SELECT COUNT(*) FROM livelihoods 
-             WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)
-             AND deleted_at IS NULL"
+             WHERE deleted_at IS NULL 
+             AND (created_at >= ? OR updated_at >= ?) 
+             AND (created_at <= ? OR updated_at <= ?)"
         )
-        .bind(start_date)
-        .bind(end_date)
+        .bind(start_date.to_rfc3339()) // Convert to string
+        .bind(start_date.to_rfc3339()) // Convert to string
+        .bind(end_date.to_rfc3339())   // Convert to string
+        .bind(end_date.to_rfc3339())   // Convert to string
         .fetch_one(&self.pool)
         .await
         .map_err(DbError::from)?;
 
-        // Fetch paginated rows
-        let rows = query_as::<_, LivelihoodRow>(
+        let mut query_builder = QueryBuilder::new(
             "SELECT * FROM livelihoods 
-             WHERE DATE(created_at) BETWEEN DATE(?) AND DATE(?)
-             AND deleted_at IS NULL 
-             ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        )
-        .bind(start_date)
-        .bind(end_date)
-        .bind(params.per_page as i64)
-        .bind(offset as i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(DbError::from)?;
+             WHERE deleted_at IS NULL 
+             AND (created_at >= "
+        );
+        query_builder.push_bind(start_date.to_rfc3339()); // Convert to string
+        query_builder.push(" OR updated_at >= ");
+        query_builder.push_bind(start_date.to_rfc3339()); // Convert to string
+        query_builder.push(") AND (created_at <= ");
+        query_builder.push_bind(end_date.to_rfc3339());   // Convert to string
+        query_builder.push(" OR updated_at <= ");
+        query_builder.push_bind(end_date.to_rfc3339());   // Convert to string
+        query_builder.push(") ORDER BY created_at DESC LIMIT ");
+        query_builder.push_bind(params.per_page as i64);
+        query_builder.push(" OFFSET ");
+        query_builder.push_bind(offset as i64);
+        
+        let rows = query_builder.build_query_as::<LivelihoodRow>()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
 
         let entities = rows
             .into_iter()
             .map(Self::map_row_to_entity)
             .collect::<DomainResult<Vec<Livelihood>>>()?;
 
-        Ok(PaginatedResult::new(
-            entities,
-            total as u64,
-            params,
-        ))
+        Ok(PaginatedResult::new(entities, total as u64, params))
     }
 
     async fn update_sync_priority(
@@ -1824,21 +1829,20 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
     
     async fn find_by_date_range(
         &self,
-        start_date: &str,
-        end_date: &str,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
     ) -> DomainResult<Vec<SubsequentGrant>> {
         let rows = query_as::<_, SubsequentGrantRow>(
-            "SELECT id, livelihood_id, amount, amount_updated_at, amount_updated_by, amount_updated_by_device_id, purpose, purpose_updated_at, purpose_updated_by, purpose_updated_by_device_id, grant_date, grant_date_updated_at, grant_date_updated_by, grant_date_updated_by_device_id, sync_priority, created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id FROM subsequent_grants 
-             WHERE 
-                (grant_date BETWEEN ? AND ?) OR
-                (DATE(created_at) BETWEEN DATE(?) AND DATE(?))
-             AND deleted_at IS NULL 
+            "SELECT * FROM subsequent_grants 
+             WHERE deleted_at IS NULL 
+             AND (created_at >= ? OR updated_at >= ?) 
+             AND (created_at <= ? OR updated_at <= ?) 
              ORDER BY created_at DESC"
         )
-        .bind(start_date)
-        .bind(end_date)
-        .bind(start_date)
-        .bind(end_date)
+        .bind(start_date.to_rfc3339()) // Convert to string
+        .bind(start_date.to_rfc3339()) // Convert to string
+        .bind(end_date.to_rfc3339())   // Convert to string
+        .bind(end_date.to_rfc3339())   // Convert to string
         .fetch_all(&self.pool)
         .await
         .map_err(DbError::from)?;
@@ -1847,7 +1851,6 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
             .into_iter()
             .map(Self::map_row_to_entity)
             .collect::<DomainResult<Vec<SubsequentGrant>>>()?;
-
         Ok(entities)
     }
     

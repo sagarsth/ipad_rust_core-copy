@@ -132,6 +132,14 @@ pub trait StrategicGoalRepository:
         cutoff_date: DateTime<Utc>,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<StrategicGoal>>;
+
+    /// Find strategic goals within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<StrategicGoal>>;
 }
 
 /// SQLite implementation for StrategicGoalRepository
@@ -1084,6 +1092,47 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
             total as u64,
             params,
         ))
+    }
+
+    /// Find strategic goals within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<StrategicGoal>> {
+        let offset = (params.page - 1) * params.per_page;
+        let start_date_str = start_date.to_rfc3339();
+        let end_date_str = end_date.to_rfc3339();
+
+        // Get total count of goals within the date range
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM strategic_goals WHERE updated_at >= ? AND updated_at <= ? AND deleted_at IS NULL"
+        )
+        .bind(&start_date_str)
+        .bind(&end_date_str)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated goals within the date range
+        let rows = query_as::<_, StrategicGoalRow>(
+            "SELECT * FROM strategic_goals WHERE updated_at >= ? AND updated_at <= ? AND deleted_at IS NULL ORDER BY updated_at ASC LIMIT ? OFFSET ?"
+        )
+        .bind(&start_date_str)
+        .bind(&end_date_str)
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<StrategicGoal>>>()?;
+
+        Ok(PaginatedResult::new(entities, total as u64, params))
     }
 }
 

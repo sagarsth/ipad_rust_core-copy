@@ -21,6 +21,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use std::str::FromStr;
 use std::collections::HashMap;
+use chrono::{DateTime, Utc};
 
 // Import necessary types related to documents and sync/compression
 use crate::domains::document::repository::MediaDocumentRepository;
@@ -157,6 +158,17 @@ pub trait ProjectService: DeleteService<Project> + Send + Sync {
     async fn search_projects(
         &self,
         query: &str,
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>>;
+
+    /// Find projects within a date range (created_at or updated_at)
+    /// Expects RFC3339 format timestamps (e.g., "2024-01-01T00:00:00Z")
+    async fn find_projects_by_date_range(
+        &self,
+        start_rfc3339: &str, // RFC3339 format datetime string
+        end_rfc3339: &str,   // RFC3339 format datetime string
         params: PaginationParams,
         include: Option<&[ProjectInclude]>,
         auth: &AuthContext,
@@ -866,6 +878,59 @@ impl ProjectService for ProjectServiceImpl {
         }
 
         // 5. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    /// Find projects within a date range (created_at or updated_at)
+    /// Expects RFC3339 format timestamps (e.g., "2024-01-01T00:00:00Z")
+    async fn find_projects_by_date_range(
+        &self,
+        start_rfc3339: &str, // RFC3339 format datetime string
+        end_rfc3339: &str,   // RFC3339 format datetime string
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Parse RFC3339 datetime strings
+        let start_datetime = DateTime::parse_from_rfc3339(start_rfc3339)
+            .map_err(|e| ServiceError::Domain(DomainError::Validation(
+                ValidationError::format("start_date", &format!("Invalid RFC3339 date format: {}", e))
+            )))?
+            .with_timezone(&Utc);
+
+        let end_datetime = DateTime::parse_from_rfc3339(end_rfc3339)
+            .map_err(|e| ServiceError::Domain(DomainError::Validation(
+                ValidationError::format("end_date", &format!("Invalid RFC3339 date format: {}", e))
+            )))?
+            .with_timezone(&Utc);
+
+        // 3. Validate date range
+        if start_datetime > end_datetime {
+            return Err(ServiceError::Domain(DomainError::Validation(
+                ValidationError::custom("Start date must be before end date")
+            )));
+        }
+
+        // 4. Find projects by date range
+        let paginated_result = self.repo.find_by_date_range(start_datetime, end_datetime, params).await
+            .map_err(ServiceError::Domain)?;
+
+        // 5. Convert and enrich each project
+        let mut enriched_items = Vec::new();
+        for project in paginated_result.items {
+            let response = ProjectResponse::from_project(project);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 6. Return paginated result
         Ok(PaginatedResult::new(
             enriched_items,
             paginated_result.total,

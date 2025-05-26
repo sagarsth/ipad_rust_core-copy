@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO tombstones (id, entity_id, entity_type, deleted_by, deleted_at, operation_id) VALUES (?,?,?,?,?,?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "c2717295fdd9e97d4afba8e55b1e2698b7306087f9e5fd44810324cf649752a5"
+}

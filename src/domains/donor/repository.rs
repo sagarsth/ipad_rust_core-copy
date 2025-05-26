@@ -6,7 +6,7 @@ use crate::domains::donor::types::{Donor, NewDonor, UpdateDonor, DonorRow, UserD
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use async_trait::async_trait;
-use chrono::{Utc, DateTime};
+use chrono::{Utc, DateTime, Local};
 use sqlx::{Pool, Sqlite, Transaction, query, query_as, query_scalar, QueryBuilder};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -123,6 +123,14 @@ pub trait DonorRepository:
         user_id: Uuid,
         role: UserDonorRole,
     ) -> DomainResult<Vec<Uuid>>;
+
+    /// Find donors within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>>;
 }
 
 /// SQLite implementation for DonorRepository
@@ -821,5 +829,60 @@ impl DonorRepository for SqliteDonorRepository {
             .collect::<Result<Vec<Uuid>, DomainError>>()?;
 
         Ok(ids)
+    }
+
+    /// Find donors within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        let total: i64 = query_scalar(
+            "SELECT COUNT(DISTINCT d.id) 
+             FROM donors d
+             WHERE d.deleted_at IS NULL
+             AND (d.created_at >= ? OR d.updated_at >= ?)
+             AND (d.created_at < ? OR d.updated_at < ?)"
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let rows = query_as::<_, DonorRow>(
+            "SELECT DISTINCT d.id, d.name, d.name_updated_at, d.name_updated_by, d.name_updated_by_device_id, d.type_ AS type, d.type_updated_at, d.type_updated_by, d.type_updated_by_device_id, d.contact_person, d.contact_person_updated_at, d.contact_person_updated_by, d.contact_person_updated_by_device_id, d.email, d.email_updated_at, d.email_updated_by, d.email_updated_by_device_id, d.phone, d.phone_updated_at, d.phone_updated_by, d.phone_updated_by_device_id, d.country, d.country_updated_at, d.country_updated_by, d.country_updated_by_device_id, d.first_donation_date, d.first_donation_date_updated_at, d.first_donation_date_updated_by, d.first_donation_date_updated_by_device_id, d.notes, d.notes_updated_at, d.notes_updated_by, d.notes_updated_by_device_id, d.created_at, d.updated_at, d.created_by_user_id, d.created_by_device_id, d.updated_by_user_id, d.updated_by_device_id, d.deleted_at, d.deleted_by_user_id, d.deleted_by_device_id
+             FROM donors d
+             WHERE d.deleted_at IS NULL
+             AND (d.created_at >= ? OR d.updated_at >= ?)
+             AND (d.created_at < ? OR d.updated_at < ?)
+             ORDER BY d.name ASC
+             LIMIT ? OFFSET ?"
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Donor>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
     }
 }

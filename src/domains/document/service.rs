@@ -35,8 +35,9 @@ use std::path::Path;
 use chrono::{Utc, DateTime};
 use serde_json;
 use crate::domains::core::delete_service::PendingDeletionManager;
+use serde::{Serialize, Deserialize};
 // --- Includes Enum ---
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum DocumentInclude {
     DocumentType,
     Versions,

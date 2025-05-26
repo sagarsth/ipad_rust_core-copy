@@ -11,7 +11,7 @@ use crate::domains::sync::types::SyncPriority;
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use async_trait::async_trait;
-use chrono::{Utc, NaiveDate, Local};
+use chrono::{Utc, NaiveDate, Local, DateTime};
 use sqlx::{query, query_as, query_scalar, Executor, Row, Sqlite, Transaction, sqlite::SqliteArguments, QueryBuilder};
 use sqlx::Arguments;
 use uuid::Uuid;
@@ -92,8 +92,8 @@ pub trait WorkshopRepository:
     /// Find workshops by date range
     async fn find_by_date_range(
         &self,
-        start_date: NaiveDate, 
-        end_date: NaiveDate,
+        start_date: DateTime<Utc>, 
+        end_date: DateTime<Utc>,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Workshop>>;
     
@@ -1038,8 +1038,8 @@ impl WorkshopRepository for SqliteWorkshopRepository {
     
     async fn find_by_date_range(
         &self,
-        start_date: NaiveDate, 
-        end_date: NaiveDate,
+        start_date: DateTime<Utc>, 
+        end_date: DateTime<Utc>,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Workshop>> {
         let offset = (params.page - 1) * params.per_page;

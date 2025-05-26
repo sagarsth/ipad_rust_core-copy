@@ -39,11 +39,64 @@ pub enum DbError {
     Other(String),
 }
 
-// Manual Clone implementation for DbError
+impl serde::Serialize for DbError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("DbError", 2)?;
+        match self {
+            DbError::Sqlx(err) => {
+                state.serialize_field("type", "Sqlx")?;
+                state.serialize_field("message", &err.to_string())?;
+            }
+            DbError::ConnectionPool(s) => {
+                state.serialize_field("type", "ConnectionPool")?;
+                state.serialize_field("message", s)?;
+            }
+            DbError::Transaction(s) => {
+                state.serialize_field("type", "Transaction")?;
+                state.serialize_field("message", s)?;
+            }
+            DbError::Query(s) => {
+                state.serialize_field("type", "Query")?;
+                state.serialize_field("message", s)?;
+            }
+            DbError::Execution(s) => {
+                state.serialize_field("type", "Execution")?;
+                state.serialize_field("message", s)?;
+            }
+            DbError::NotFound(s1, s2) => {
+                state.serialize_field("type", "NotFound")?;
+                state.serialize_field("message", &format!("Record not found: {} with ID {}", s1, s2))?;
+            }
+            DbError::Conflict(s) => {
+                state.serialize_field("type", "Conflict")?;
+                state.serialize_field("message", s)?;
+            }
+            DbError::Locked => {
+                state.serialize_field("type", "Locked")?;
+                state.serialize_field("message", "Database is locked")?;
+            }
+            DbError::Migration(s) => {
+                state.serialize_field("type", "Migration")?;
+                state.serialize_field("message", s)?;
+            }
+            DbError::Other(s) => {
+                state.serialize_field("type", "Other")?;
+                state.serialize_field("message", s)?;
+            }
+        }
+        state.end()
+    }
+}
+
+/// Manual Clone implementation for DbError
 impl Clone for DbError {
     fn clone(&self) -> Self {
         match self {
-            DbError::Sqlx(err) => DbError::Other(format!("Cloned SQLx error: {}", err)), // Convert non-cloneable error to string
+            DbError::Sqlx(err) => DbError::Other(format!("SQLx error: {}", err.to_string())),
             DbError::ConnectionPool(s) => DbError::ConnectionPool(s.clone()),
             DbError::Transaction(s) => DbError::Transaction(s.clone()),
             DbError::Query(s) => DbError::Query(s.clone()),
@@ -58,7 +111,7 @@ impl Clone for DbError {
 }
 
 /// Domain-level errors
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error, Clone, Serialize)]
 pub enum DomainError {
     #[error("Database error: {0}")]
     Database(#[from] DbError),
@@ -115,7 +168,7 @@ impl From<FileStorageError> for DomainError {
 }
 
 /// Service-level errors (application specific)
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error, Clone, Serialize)]
 pub enum ServiceError {
     #[error("Domain error: {0}")]
     Domain(#[from] DomainError),
@@ -155,7 +208,7 @@ pub enum ServiceError {
 }
 
 /// Sync-specific errors
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error, Clone, Serialize)]
 pub enum SyncError {
     #[error("Network error: {0}")]
     Network(String),
@@ -220,7 +273,7 @@ pub struct SyncConflict {
 }
 
 /// Validation errors
-#[derive(Debug, Error, Clone)]
+#[derive(Debug, Error, Clone, Serialize)]
 pub enum ValidationError {
     #[error("Field '{field}' is required")]
     Required {

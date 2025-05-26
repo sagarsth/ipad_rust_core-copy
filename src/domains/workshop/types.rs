@@ -569,7 +569,7 @@ impl WorkshopResponse {
 }
 
 /// Enum for specifying included relations when fetching workshops
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkshopInclude {
     Project,
     Participants,

@@ -429,7 +429,7 @@ impl DonorResponse {
 }
 
 /// Enum for specifying included relations when fetching donors
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DonorInclude {
     FundingStats,
     Documents,

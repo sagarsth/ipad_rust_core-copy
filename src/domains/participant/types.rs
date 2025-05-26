@@ -386,7 +386,7 @@ impl From<Participant> for ParticipantResponse {
 }
 
 /// Enum to specify related data to include in participant responses
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParticipantInclude {
     WorkshopCount,
     LivelihoodCount,

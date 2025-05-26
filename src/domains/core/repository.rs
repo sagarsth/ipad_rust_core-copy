@@ -4,9 +4,10 @@ use uuid::Uuid;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use sqlx::{Transaction, Sqlite}; // Import transaction types
+use serde::Serialize;
 
 /// Result type for delete operations
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum DeleteResult {
     /// Record was hard deleted
     HardDeleted,

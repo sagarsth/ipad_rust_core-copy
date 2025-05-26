@@ -240,3 +240,32 @@ pub unsafe extern "C" fn free_string(ptr: *mut c_char) {
         unsafe { let _ = CString::from_raw(ptr); }
     }
 }
+
+/// Hash a plaintext password using Argon2 and return the hashed string.
+///
+/// # Safety
+///
+/// This function should only be called with:
+/// - A valid, null-terminated UTF-8 C string for `password`.
+/// - A valid pointer to receive the returned hash.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hash_password(
+    password: *const c_char,
+    result: *mut *mut c_char,
+) -> c_int {
+    handle_result(|| unsafe {
+        if password.is_null() || result.is_null() {
+            return Err(FFIError::invalid_argument("Null pointer(s) provided"));
+        }
+
+        let pwd_str = CStr::from_ptr(password).to_str()
+            .map_err(|_| FFIError::invalid_argument("Invalid password string"))?;
+
+        let auth_service = crate::globals::get_auth_service()?;
+        let hash = auth_service.hash_password(pwd_str)?;
+
+        let c_hash = CString::new(hash)?;
+        *result = c_hash.into_raw();
+        Ok(())
+    })
+}

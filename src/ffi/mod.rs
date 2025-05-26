@@ -8,9 +8,16 @@ use serde::Serialize;
 // Declare necessary FFI submodules
 pub mod auth;
 pub mod error; // Ensure error module is declared
-// pub mod user; // Include if you have src/ffi/user.rs
+pub mod export;
+pub mod user; // Include if you have src/ffi/user.rs
 // pub mod init; // Include if you have src/ffi/init.rs
 // Consider removing jwt_init
+pub mod document;
+pub mod compression;
+pub mod strategic_goal;
+pub mod project;
+pub mod donor;
+pub mod funding;
 
 /// Error handling helper for FFI boundaries (returns error code)
 pub fn handle_status_result<F>(func: F) -> c_int

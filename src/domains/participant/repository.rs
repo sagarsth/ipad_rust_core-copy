@@ -145,6 +145,14 @@ pub trait ParticipantRepository: DeleteServiceRepository<Participant> + Mergeabl
         &self,
         participant_id: Uuid,
     ) -> DomainResult<(i64, i64)>; // (total, active)
+
+    /// Find participants within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: chrono::DateTime<chrono::Utc>,
+        end_date: chrono::DateTime<chrono::Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Participant>>;
 }
 
 /// SQLite implementation for ParticipantRepository
@@ -1251,6 +1259,49 @@ impl ParticipantRepository for SqliteParticipantRepository {
         .map_err(DbError::from)?;
         
         Ok((total, active))
+    }
+
+    /// Find participants within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: chrono::DateTime<chrono::Utc>,
+        end_date: chrono::DateTime<chrono::Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Participant>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM participants WHERE updated_at >= ? AND updated_at <= ? AND deleted_at IS NULL"
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, ParticipantRow>(
+            "SELECT * FROM participants WHERE updated_at >= ? AND updated_at <= ? AND deleted_at IS NULL ORDER BY name ASC LIMIT ? OFFSET ?"
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Participant>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
     }
 }
 

@@ -583,7 +583,7 @@ impl ProjectFundingResponse {
 }
 
 /// Enum for specifying included relations when fetching funding
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FundingInclude {
     Project,
     Donor,

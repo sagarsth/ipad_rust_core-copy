@@ -531,6 +531,20 @@ pub trait MediaDocumentRepository:
         final_related_id: Uuid,
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<u64>;
+
+    /// Get document counts by related entity
+    async fn get_document_counts_by_related_entity(
+        &self,
+        related_entity_ids: &[Uuid],
+    ) -> DomainResult<HashMap<Uuid, i64>>;
+    
+    /// Find media documents within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<MediaDocument>>;
 }
 
 pub struct SqliteMediaDocumentRepository {
@@ -1494,6 +1508,65 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
             Ok(())
         }
+    }
+
+    // --- Added: required trait methods ---------------------------------------
+
+    async fn get_document_counts_by_related_entity(
+        &self,
+        related_entity_ids: &[Uuid],
+    ) -> DomainResult<HashMap<Uuid, i64>> {
+        let mut counts = HashMap::new();
+        for &entity_id in related_entity_ids {
+            let count: i64 = query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM media_documents WHERE related_entity_id = ? AND deleted_at IS NULL",
+            )
+            .bind(entity_id.to_string())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+            counts.insert(entity_id, count);
+        }
+        Ok(counts)
+    }
+
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<MediaDocument>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        let total: i64 = query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM media_documents\n             WHERE deleted_at IS NULL\n             AND ((created_at >= ? AND created_at <= ?)\n                  OR (updated_at >= ? AND updated_at <= ?))",
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let rows = query_as::<_, MediaDocumentRow>(
+            "SELECT * FROM media_documents\n             WHERE deleted_at IS NULL\n             AND ((created_at >= ? AND created_at <= ?)\n                  OR (updated_at >= ? AND updated_at <= ?))\n             ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let items = rows
+            .into_iter()
+            .map(Self::map_row)
+            .collect::<DomainResult<Vec<_>>>()?;
+        Ok(PaginatedResult::new(items, total as u64, params))
     }
 }
 

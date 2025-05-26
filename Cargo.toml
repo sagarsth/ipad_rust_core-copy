@@ -75,6 +75,9 @@ mime = "0.3.16"
 hex = "0.4"
 sha2 = "0.10"
 
+# Added dependency
+paste = "1"
+
 
 
 [features]

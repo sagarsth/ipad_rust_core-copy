@@ -6,7 +6,7 @@ use crate::domains::funding::types::{ProjectFunding, NewProjectFunding, UpdatePr
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams};
 use async_trait::async_trait;
-use chrono::{Utc, Local};
+use chrono::{Utc, DateTime, Local};
 use sqlx::{Pool, Sqlite, Transaction, query, query_as, query_scalar, Row};
 use uuid::Uuid;
 use std::collections::HashMap;
@@ -121,6 +121,14 @@ pub trait ProjectFundingRepository:
     async fn find_by_project_id(
         &self,
         project_id: Uuid,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<ProjectFunding>>;
+
+    /// Find project funding within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<ProjectFunding>>;
 }
@@ -1068,6 +1076,45 @@ impl ProjectFundingRepository for SqliteProjectFundingRepository {
              ORDER BY updated_at DESC LIMIT ? OFFSET ?"
         )
         .bind(project_id_str)
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<ProjectFunding>>>()?;
+
+        Ok(PaginatedResult::new(entities, total as u64, params))
+    }
+
+    /// Find project funding within a date range (created_at or updated_at)
+    async fn find_by_date_range(
+        &self,
+        start_date: DateTime<Utc>,
+        end_date: DateTime<Utc>,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<ProjectFunding>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM project_funding WHERE deleted_at IS NULL AND updated_at BETWEEN ? AND ?"
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, ProjectFundingRow>(
+            "SELECT * FROM project_funding WHERE deleted_at IS NULL AND updated_at BETWEEN ? AND ? ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        )
+        .bind(start_date.to_rfc3339())
+        .bind(end_date.to_rfc3339())
         .bind(params.per_page as i64)
         .bind(offset as i64)
         .fetch_all(&self.pool)
