@@ -33,7 +33,6 @@ use std::os::raw::{c_char, c_int};
 use std::str::FromStr;
 use uuid::Uuid;
 use serde::Deserialize;
-use tokio::runtime::Runtime;
 
 // ---------------------------------------------------------------------------
 // Helper utilities
@@ -44,8 +43,7 @@ fn block_on_async<F, T, E>(future: F) -> Result<T, E>
 where
     F: std::future::Future<Output = Result<T, E>>,
 {
-    let rt = Runtime::new().expect("failed to create tokio runtime");
-    rt.block_on(future)
+    crate::ffi::block_on_async(future)
 }
 
 /// DTO mirroring the subset of `AuthContext` that we expect to receive from

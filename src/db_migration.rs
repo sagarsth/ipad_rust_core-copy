@@ -3,10 +3,9 @@ use sqlx::SqlitePool;
 use crate::globals;
 use std::path::Path;
 use std::fs;
-use tokio::runtime::Runtime;
 
 /// List of schema migration files in order
-const MIGRATION_FILES: [&str; 19] = [
+const MIGRATION_FILES: [&str; 22] = [
     "20240320000000_basic.sql",
     "20240404000000_cascade.sql",
     "20240407000000_tombstone.sql",
@@ -16,7 +15,7 @@ const MIGRATION_FILES: [&str; 19] = [
     "20240421000000_document_updates.sql",
     "20240422000000_add_sync_priority.sql",
     "20240423000000_add_temp_doc_link.sql",
-    "20240730100000_add_sync_priority_to_activities_donors.sql", // Note: Chronologically, this might seem out of place with 2025, ensure order is correct for your logic
+    "20240730100000_add_sync_priority_to_activities_donors.sql",
     "20240801000000_add_document_ref_columns.sql",
     "20250421170655_add_total_files_skipped_to_compression_stats.sql",
     "20250422061436_update_document_type_compression_check.sql",
@@ -26,28 +25,25 @@ const MIGRATION_FILES: [&str; 19] = [
     "20250502040000_merge_sync_types.sql",
     "20250503000000_standardize_sync_priority.sql",
     "20250503000001_update_donors_sync_priority.sql",
+    "20250516000000_device_id.sql",
+    "20250517000000_add_source_of_change_to_media_documents.sql",
+    "20250523000000_create_export_jobs.sql",
 ];
 
-/// Initialize the database with migrations (synchronous wrapper)
-pub fn initialize_database() -> FFIResult<()> {
-    // Create a temporary runtime to block on async operations
-    let rt = Runtime::new().map_err(|e| FFIError::internal(format!("Failed to create Tokio runtime: {}", e)))?;
-
-    // Block on the async initialization logic
-    rt.block_on(async {
-        let pool = globals::get_db_pool()?;
-        
-        // Create migrations table if it doesn't exist
-        create_migrations_table(&pool).await?;
-        
-        // Get last applied migration
-        let last_migration = get_last_migration(&pool).await?;
-        
-        // Apply missing migrations
-        apply_pending_migrations(&pool, last_migration).await?;
-        
-        Ok(())
-    })
+/// Initialize the database with migrations (async version)
+pub async fn initialize_database() -> FFIResult<()> {
+    let pool = globals::get_db_pool()?;
+    
+    // Create migrations table if it doesn't exist
+    create_migrations_table(&pool).await?;
+    
+    // Get last applied migration
+    let last_migration = get_last_migration(&pool).await?;
+    
+    // Apply missing migrations
+    apply_pending_migrations(&pool, last_migration).await?;
+    
+    Ok(())
 }
 
 /// Create migrations table if it doesn't exist

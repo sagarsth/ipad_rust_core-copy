@@ -32,3 +32,19 @@ Thumbs.db
 
 # Database files
 dev.db
+
+# Build artifacts
+.build/
+*.a
+*.dylib
+*.so
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+build/
+
+# Temporary files
+combined_code_content.txt
+MyTestApp

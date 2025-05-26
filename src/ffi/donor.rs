@@ -38,7 +38,7 @@ use std::os::raw::{c_char, c_int};
 use std::str::FromStr;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Runtime;               
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Helper utilities
@@ -49,8 +49,7 @@ fn block_on_async<F, T, E>(future: F) -> Result<T, E>
 where
     F: std::future::Future<Output = Result<T, E>>,
 {
-    let rt = Runtime::new().expect("failed to create tokio runtime");
-    rt.block_on(future)
+    crate::ffi::block_on_async(future)
 }
 
 /// Ensure pointer is not null
@@ -365,9 +364,11 @@ pub unsafe extern "C" fn donor_update(payload_json: *const c_char, result: *mut 
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn donor_delete(payload_json: *const c_char) -> c_int {
+pub unsafe extern "C" fn donor_delete(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
         let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
         
         #[derive(Deserialize)]
@@ -382,8 +383,13 @@ pub unsafe extern "C" fn donor_delete(payload_json: *const c_char) -> c_int {
         let auth: AuthContext = p.auth.try_into()?;
         let svc = globals::get_donor_service()?;
         
-        block_on_async(svc.delete_donor(id, p.hard_delete.unwrap_or(false), &auth))
+        let delete_result = block_on_async(svc.delete_donor(id, p.hard_delete.unwrap_or(false), &auth))
             .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&delete_result)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
         Ok(())
     })
 }
@@ -941,6 +947,8 @@ pub unsafe extern "C" fn donor_get_with_document_timeline(payload_json: *const c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn donor_free(ptr: *mut c_char) {
     if !ptr.is_null() {
-        let _ = CString::from_raw(ptr);
+        unsafe {
+            let _ = CString::from_raw(ptr);
+        }
     }
 } 

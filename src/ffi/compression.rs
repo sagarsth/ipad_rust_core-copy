@@ -35,7 +35,6 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use tokio::runtime::Runtime;
 
 // -----------------------------------------------------------------------------
 // DTO Types for JSON Deserialization -------------------------------------------
@@ -118,10 +117,8 @@ pub unsafe extern "C" fn compression_compress_document(payload_json: *const c_ch
             .map_err(|_| FFIError::new(ErrorCode::InvalidArgument, "Invalid document_id UUID"))?;
         
         let service = globals::get_compression_service()?;
-        let rt = Runtime::new()
-            .map_err(|e| FFIError::with_details(ErrorCode::InternalError, "Failed to create async runtime", &e.to_string()))?;
         
-        rt.block_on(async {
+        crate::ffi::block_on_async(async {
             service.compress_document(document_id, request.config).await
                 .map_err(|e| to_ffi_error(e))
         })
@@ -139,10 +136,8 @@ pub unsafe extern "C" fn compression_compress_document(payload_json: *const c_ch
 pub unsafe extern "C" fn compression_get_queue_status(result: *mut *mut c_char) -> c_int {
     let json_result = handle_json_result(|| -> FFIResult<_> {
         let service = globals::get_compression_service()?;
-        let rt = Runtime::new()
-            .map_err(|e| FFIError::with_details(ErrorCode::InternalError, "Failed to create async runtime", &e.to_string()))?;
         
-        rt.block_on(async {
+        crate::ffi::block_on_async(async {
             service.get_compression_queue_status().await
                 .map_err(|e| to_ffi_error(e))
         })
@@ -165,10 +160,8 @@ pub unsafe extern "C" fn compression_queue_document(payload_json: *const c_char)
         let priority = parse_priority(&request.priority)?;
         
         let service = globals::get_compression_service()?;
-        let rt = Runtime::new()
-            .map_err(|e| FFIError::with_details(ErrorCode::InternalError, "Failed to create async runtime", &e.to_string()))?;
         
-        rt.block_on(async {
+        crate::ffi::block_on_async(async {
             service.queue_document_for_compression(document_id, priority).await
                 .map_err(|e| to_ffi_error(e))
         })
@@ -186,10 +179,8 @@ pub unsafe extern "C" fn compression_cancel(payload_json: *const c_char, result:
             .map_err(|_| FFIError::new(ErrorCode::InvalidArgument, "Invalid document_id UUID"))?;
         
         let service = globals::get_compression_service()?;
-        let rt = Runtime::new()
-            .map_err(|e| FFIError::with_details(ErrorCode::InternalError, "Failed to create async runtime", &e.to_string()))?;
         
-        let cancelled = rt.block_on(async {
+        let cancelled = crate::ffi::block_on_async(async {
             service.cancel_compression(document_id).await
                 .map_err(|e| to_ffi_error(e))
         })?;
@@ -209,10 +200,8 @@ pub unsafe extern "C" fn compression_cancel(payload_json: *const c_char, result:
 pub unsafe extern "C" fn compression_get_stats(result: *mut *mut c_char) -> c_int {
     let json_result = handle_json_result(|| -> FFIResult<_> {
         let service = globals::get_compression_service()?;
-        let rt = Runtime::new()
-            .map_err(|e| FFIError::with_details(ErrorCode::InternalError, "Failed to create async runtime", &e.to_string()))?;
         
-        rt.block_on(async {
+        crate::ffi::block_on_async(async {
             service.get_compression_stats().await
                 .map_err(|e| to_ffi_error(e))
         })
@@ -235,10 +224,8 @@ pub unsafe extern "C" fn compression_get_document_status(payload_json: *const c_
             .map_err(|_| FFIError::new(ErrorCode::InvalidArgument, "Invalid document_id UUID"))?;
         
         let service = globals::get_compression_service()?;
-        let rt = Runtime::new()
-            .map_err(|e| FFIError::with_details(ErrorCode::InternalError, "Failed to create async runtime", &e.to_string()))?;
         
-        rt.block_on(async {
+        crate::ffi::block_on_async(async {
             service.get_document_compression_status(document_id).await
                 .map_err(|e| to_ffi_error(e))
         })
@@ -262,10 +249,8 @@ pub unsafe extern "C" fn compression_update_priority(payload_json: *const c_char
         let priority = parse_priority(&request.priority)?;
         
         let service = globals::get_compression_service()?;
-        let rt = Runtime::new()
-            .map_err(|e| FFIError::with_details(ErrorCode::InternalError, "Failed to create async runtime", &e.to_string()))?;
         
-        let updated = rt.block_on(async {
+        let updated = crate::ffi::block_on_async(async {
             service.update_compression_priority(document_id, priority).await
                 .map_err(|e| to_ffi_error(e))
         })?;
@@ -294,10 +279,8 @@ pub unsafe extern "C" fn compression_bulk_update_priority(payload_json: *const c
         let priority = parse_priority(&request.priority)?;
         
         let service = globals::get_compression_service()?;
-        let rt = Runtime::new()
-            .map_err(|e| FFIError::with_details(ErrorCode::InternalError, "Failed to create async runtime", &e.to_string()))?;
         
-        let updated_count = rt.block_on(async {
+        let updated_count = crate::ffi::block_on_async(async {
             service.bulk_update_compression_priority(&document_ids, priority).await
                 .map_err(|e| to_ffi_error(e))
         })?;
@@ -322,10 +305,8 @@ pub unsafe extern "C" fn compression_is_document_in_use(payload_json: *const c_c
             .map_err(|_| FFIError::new(ErrorCode::InvalidArgument, "Invalid document_id UUID"))?;
         
         let service = globals::get_compression_service()?;
-        let rt = Runtime::new()
-            .map_err(|e| FFIError::with_details(ErrorCode::InternalError, "Failed to create async runtime", &e.to_string()))?;
         
-        let in_use = rt.block_on(async {
+        let in_use = crate::ffi::block_on_async(async {
             service.is_document_in_use(document_id).await
                 .map_err(|e| to_ffi_error(e))
         })?;
@@ -339,15 +320,11 @@ pub unsafe extern "C" fn compression_is_document_in_use(payload_json: *const c_c
     if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
 }
 
-// -----------------------------------------------------------------------------
-// Memory management -----------------------------------------------------------
-// -----------------------------------------------------------------------------
-
-/// Free string memory allocated by Rust
-/// SAFETY: Must be called exactly once for each string returned from compression FFI functions
+/// Free memory allocated by compression functions
+/// SAFETY: ptr must be a valid pointer returned by a compression function
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn compression_free(ptr: *mut c_char) {
     if !ptr.is_null() {
-        unsafe { let _ = CString::from_raw(ptr); }
+        let _ = CString::from_raw(ptr);
     }
 } 

@@ -4,9 +4,12 @@ use std::ffi::CString;
 // Corrected imports for FFIError and FFIResult
 use crate::ffi::error::{FFIError, ErrorCode};
 use serde::Serialize;
+use std::sync::OnceLock;
+use tokio::runtime::Runtime;
 
 // Declare necessary FFI submodules
 pub mod auth;
+pub mod core; // Core library functions
 pub mod error; // Ensure error module is declared
 pub mod export;
 pub mod user; // Include if you have src/ffi/user.rs
@@ -18,6 +21,31 @@ pub mod strategic_goal;
 pub mod project;
 pub mod donor;
 pub mod funding;
+pub mod activity;
+pub mod livelihood;
+pub mod workshop;
+pub mod participant;
+
+// Global runtime instance
+static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+/// Get or create the global Tokio runtime
+pub fn get_runtime() -> &'static Runtime {
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create Tokio runtime")
+    })
+}
+
+/// Execute an async function using the global runtime
+pub fn block_on_async<F, T, E>(future: F) -> Result<T, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    get_runtime().block_on(future)
+}
 
 /// Error handling helper for FFI boundaries (returns error code)
 pub fn handle_status_result<F>(func: F) -> c_int
@@ -25,9 +53,14 @@ where
     F: FnOnce() -> FFIResult<()>,
 {
     match func() {
-        Ok(_) => ErrorCode::Success as c_int, // Use ErrorCode enum for clarity
+        Ok(_) => {
+            // Clear any previous error on success
+            error::clear_last_error();
+            ErrorCode::Success as c_int
+        }
         Err(e) => {
-            // TODO: Implement proper error storage/retrieval for Swift
+            // Store the error in thread-local storage
+            error::store_last_error(&e);
             eprintln!("[Rust FFI Error] Code: {:?}, Message: {}, Details: {:?}",
                       e.code, e.message, e.details.as_deref().unwrap_or("None"));
             e.code as c_int
@@ -45,11 +78,15 @@ where
     let result = func();
     let json_string = match result {
         Ok(value) => {
+            // Clear any previous error on success
+            error::clear_last_error();
             // Wrap the successful value in a standard structure if desired, or serialize directly
             // Example: Serialize directly
             serde_json::to_string(&value)
         },
         Err(ffi_error) => {
+            // Store the error in thread-local storage
+            error::store_last_error(&ffi_error);
             // Serialize the FFIError itself
             serde_json::to_string(&ffi_error)
         },

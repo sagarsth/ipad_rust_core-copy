@@ -1,0 +1,5 @@
+module iPadRustCoreC {
+    header "ipad_rust_core_complete.h"
+    link "ipad_rust_core"
+    export *
+} 

@@ -1,9 +1,16 @@
 // Content for src/ffi/error.rs
 use std::fmt;
+use std::ffi::CString;
+use std::cell::RefCell;
 use serde::{Deserialize, Serialize};
 // Use the re-exported path for SyncConflict
 use crate::errors::{DomainError, DbError, ServiceError, SyncError, ValidationError};
  // Make sure sqlx is imported if used in DbError::Sqlx details
+
+// Thread-local storage for the last error message
+thread_local! {
+    static LAST_ERROR: RefCell<Option<String>> = RefCell::new(None);
+}
 
 /// Error codes for FFI boundary
 #[repr(i32)]
@@ -550,3 +557,39 @@ pub fn success_code() -> i32 {
 
 // Result type alias for FFI functions
 pub type FFIResult<T> = Result<T, FFIError>;
+
+/// Store an error message in thread-local storage
+pub fn store_last_error(error: &FFIError) {
+    let error_message = format!("{}", error);
+    LAST_ERROR.with(|last_error| {
+        *last_error.borrow_mut() = Some(error_message);
+    });
+}
+
+/// Retrieve the last error message from thread-local storage
+/// Returns a heap-allocated CString or null if no error
+pub fn get_last_error_message() -> *mut std::os::raw::c_char {
+    LAST_ERROR.with(|last_error| {
+        if let Some(ref error_msg) = *last_error.borrow() {
+            match CString::new(error_msg.clone()) {
+                Ok(c_string) => c_string.into_raw(),
+                Err(_) => {
+                    // If we can't create a CString, return a generic error
+                    match CString::new("Error message contains null bytes") {
+                        Ok(c_string) => c_string.into_raw(),
+                        Err(_) => std::ptr::null_mut(),
+                    }
+                }
+            }
+        } else {
+            std::ptr::null_mut()
+        }
+    })
+}
+
+/// Clear the last error message
+pub fn clear_last_error() {
+    LAST_ERROR.with(|last_error| {
+        *last_error.borrow_mut() = None;
+    });
+}

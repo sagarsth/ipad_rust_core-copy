@@ -1,6 +1,6 @@
-// src/ffi/funding.rs
+// src/ffi/activity.rs
 // ============================================================================
-// FFI bindings for the `FundingService`.
+// FFI bindings for the `ActivityService`.
 // All heavy–lifting logic lives in the domain/service layer. These wrappers
 // simply (1) decode C-strings coming from Swift, (2) forward the request to the
 // relevant async service method using a temporary Tokio runtime, (3) encode the
@@ -8,9 +8,9 @@
 //
 // IMPORTANT – memory ownership rules:
 //   •  Any *mut c_char returned from Rust must be freed by Swift by calling
-//      the `funding_free` function exported below. Internally we create the
+//      the `activity_free` function exported below. Internally we create the
 //      CString with `into_raw()` which transfers ownership to the caller.
-//   •  Never pass a pointer obtained from Swift back into `funding_free` more than
+//   •  Never pass a pointer obtained from Swift back into `activity_free` more than
 //      once – double-free will crash.
 //   •  All pointers received from Swift are assumed to be valid, non-NULL,
 //      null-terminated UTF-8 strings. We defensively validate this and return
@@ -23,9 +23,8 @@
 // ----------------------------------------------------------------------------
 
 use crate::ffi::{handle_status_result, error::FFIError};
-use crate::domains::funding::types::{
-    NewProjectFunding, UpdateProjectFunding, ProjectFundingResponse, FundingInclude,
-    FundingStatsSummary, DonorWithFundingDetails, FundingWithDocumentTimeline
+use crate::domains::activity::types::{
+    NewActivity, UpdateActivity, ActivityResponse, ActivityInclude
 };
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
@@ -103,25 +102,27 @@ impl From<PaginationDto> for PaginationParams {
     }
 }
 
-/// DTO for funding includes
+/// DTO for activity includes
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum FundingIncludeDto {
+enum ActivityIncludeDto {
     Project,
-    Donor,
+    Status,
     Documents,
-    DocumentCounts,
+    CreatedBy,
+    UpdatedBy,
     All,
 }
 
-impl From<FundingIncludeDto> for FundingInclude {
-    fn from(dto: FundingIncludeDto) -> Self {
+impl From<ActivityIncludeDto> for ActivityInclude {
+    fn from(dto: ActivityIncludeDto) -> Self {
         match dto {
-            FundingIncludeDto::Project => FundingInclude::Project,
-            FundingIncludeDto::Donor => FundingInclude::Donor,
-            FundingIncludeDto::Documents => FundingInclude::Documents,
-            FundingIncludeDto::DocumentCounts => FundingInclude::DocumentCounts,
-            FundingIncludeDto::All => FundingInclude::All,
+            ActivityIncludeDto::Project => ActivityInclude::Project,
+            ActivityIncludeDto::Status => ActivityInclude::Status,
+            ActivityIncludeDto::Documents => ActivityInclude::Documents,
+            ActivityIncludeDto::CreatedBy => ActivityInclude::CreatedBy,
+            ActivityIncludeDto::UpdatedBy => ActivityInclude::UpdatedBy,
+            ActivityIncludeDto::All => ActivityInclude::All,
         }
     }
 }
@@ -130,14 +131,14 @@ impl From<FundingIncludeDto> for FundingInclude {
 // Basic CRUD Operations
 // ---------------------------------------------------------------------------
 
-/// Create a new funding
+/// Create a new activity
 /// Expected JSON payload:
 /// {
-///   "funding": { NewFunding },
+///   "activity": { NewActivity },
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_create(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_create(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -146,18 +147,18 @@ pub unsafe extern "C" fn funding_create(payload_json: *const c_char, result: *mu
         
         #[derive(Deserialize)]
         struct Payload {
-            funding: NewProjectFunding,
+            activity: NewActivity,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
+        let svc = globals::get_activity_service()?;
         
-        let funding = block_on_async(svc.create_funding(p.funding, &auth))
+        let activity = block_on_async(svc.create_activity(p.activity, &auth))
             .map_err(FFIError::from_service_error)?;
         
-        let json_resp = serde_json::to_string(&funding)
+        let json_resp = serde_json::to_string(&activity)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -165,16 +166,16 @@ pub unsafe extern "C" fn funding_create(payload_json: *const c_char, result: *mu
     })
 }
 
-/// Create a new funding with documents
+/// Create a new activity with documents
 /// Expected JSON payload:
 /// {
-///   "funding": { NewFunding },
+///   "activity": { NewActivity },
 ///   "documents": [{"file_data": "base64", "filename": "string", "linked_field": "optional_string"}, ...],
 ///   "document_type_id": "uuid",
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_create_with_documents(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_create_with_documents(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -190,7 +191,7 @@ pub unsafe extern "C" fn funding_create_with_documents(payload_json: *const c_ch
         
         #[derive(Deserialize)]
         struct Payload {
-            funding: NewProjectFunding,
+            activity: NewActivity,
             documents: Vec<DocumentData>,
             document_type_id: String,
             auth: AuthCtxDto,
@@ -209,37 +210,20 @@ pub unsafe extern "C" fn funding_create_with_documents(payload_json: *const c_ch
         let document_type_id = Uuid::parse_str(&p.document_type_id)
             .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
+        let svc = globals::get_activity_service()?;
         
-        // Create the funding first
-        let funding = block_on_async(svc.create_funding(p.funding, &auth))
-            .map_err(FFIError::from_service_error)?;
-        
-        // Then upload documents for the funding
-        let mut doc_results = Vec::new();
-        for (data, filename, linked_field) in documents {
-            let result = block_on_async(svc.upload_document_for_funding(
-                funding.id,
-                data,
-                filename,
-                None, // title
-                document_type_id,
-                linked_field,
-                crate::domains::sync::types::SyncPriority::Normal,
-                None, // compression_priority
-                &auth,
-            )).map_err(|e| e.to_string());
-            doc_results.push(result);
-        }
+        let (activity, doc_results) = block_on_async(svc.create_activity_with_documents(
+            p.activity, documents, document_type_id, &auth
+        )).map_err(FFIError::from_service_error)?;
         
         #[derive(Serialize)]
         struct CreateWithDocsResponse {
-            funding: ProjectFundingResponse,
+            activity: ActivityResponse,
             document_results: Vec<Result<crate::domains::document::types::MediaDocumentResponse, String>>,
         }
         
         let response = CreateWithDocsResponse {
-            funding,
+            activity,
             document_results: doc_results.into_iter().map(|r| r.map_err(|e| e.to_string())).collect(),
         };
         
@@ -251,15 +235,14 @@ pub unsafe extern "C" fn funding_create_with_documents(payload_json: *const c_ch
     })
 }
 
-/// Get funding by ID
+/// Get activity by ID
 /// Expected JSON payload:
 /// {
 ///   "id": "uuid",
-///   "include": [FundingIncludeDto, ...],
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_get(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_get(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -269,7 +252,6 @@ pub unsafe extern "C" fn funding_get(payload_json: *const c_char, result: *mut *
         #[derive(Deserialize)]
         struct Payload {
             id: String,
-            include: Option<Vec<FundingIncludeDto>>,
             auth: AuthCtxDto,
         }
         
@@ -277,16 +259,11 @@ pub unsafe extern "C" fn funding_get(payload_json: *const c_char, result: *mut *
         let id = Uuid::parse_str(&p.id).map_err(|_| FFIError::invalid_argument("uuid"))?;
         let auth: AuthContext = p.auth.try_into()?;
         
-        let include: Option<Vec<FundingInclude>> = p.include.map(|inc| 
-            inc.into_iter().map(|i| i.into()).collect()
-        );
-        let include_slice = include.as_ref().map(|v| v.as_slice());
-        
-        let svc = globals::get_funding_service()?;
-        let funding = block_on_async(svc.get_funding_by_id(id, include_slice, &auth))
+        let svc = globals::get_activity_service()?;
+        let activity = block_on_async(svc.get_activity_by_id(id, &auth))
             .map_err(FFIError::from_service_error)?;
         
-        let json_resp = serde_json::to_string(&funding)
+        let json_resp = serde_json::to_string(&activity)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -294,15 +271,15 @@ pub unsafe extern "C" fn funding_get(payload_json: *const c_char, result: *mut *
     })
 }
 
-/// List fundings with pagination and includes
+/// List activities for a project with pagination
 /// Expected JSON payload:
 /// {
+///   "project_id": "uuid",
 ///   "pagination": { PaginationDto },
-///   "include": [FundingIncludeDto, ...],
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_list(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_list_for_project(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -311,25 +288,21 @@ pub unsafe extern "C" fn funding_list(payload_json: *const c_char, result: *mut 
         
         #[derive(Deserialize)]
         struct Payload {
+            project_id: String,
             pagination: Option<PaginationDto>,
-            include: Option<Vec<FundingIncludeDto>>,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("invalid project_id"))?;
         let params = p.pagination.map(|p| p.into()).unwrap_or_default();
         let auth: AuthContext = p.auth.try_into()?;
         
-        let include: Option<Vec<FundingInclude>> = p.include.map(|inc| 
-            inc.into_iter().map(|i| i.into()).collect()
-        );
-        let include_slice = include.as_ref().map(|v| v.as_slice());
-        
-        let svc = globals::get_funding_service()?;
-        let fundings = block_on_async(svc.list_fundings(params, include_slice, &auth))
+        let svc = globals::get_activity_service()?;
+        let activities = block_on_async(svc.list_activities_for_project(project_id, params, &auth))
             .map_err(FFIError::from_service_error)?;
         
-        let json_resp = serde_json::to_string(&fundings)
+        let json_resp = serde_json::to_string(&activities)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -337,15 +310,15 @@ pub unsafe extern "C" fn funding_list(payload_json: *const c_char, result: *mut 
     })
 }
 
-/// Update funding
+/// Update activity
 /// Expected JSON payload:
 /// {
 ///   "id": "uuid",
-///   "update": { UpdateFunding },
+///   "update": { UpdateActivity },
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_update(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_update(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -355,19 +328,19 @@ pub unsafe extern "C" fn funding_update(payload_json: *const c_char, result: *mu
         #[derive(Deserialize)]
         struct Payload {
             id: String,
-            update: UpdateProjectFunding,
+            update: UpdateActivity,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
         let id = Uuid::parse_str(&p.id).map_err(|_| FFIError::invalid_argument("uuid"))?;
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
+        let svc = globals::get_activity_service()?;
         
-        let funding = block_on_async(svc.update_funding(id, p.update, &auth))
+        let activity = block_on_async(svc.update_activity(id, p.update, &auth))
             .map_err(FFIError::from_service_error)?;
         
-        let json_resp = serde_json::to_string(&funding)
+        let json_resp = serde_json::to_string(&activity)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -375,7 +348,7 @@ pub unsafe extern "C" fn funding_update(payload_json: *const c_char, result: *mu
     })
 }
 
-/// Delete funding (soft or hard delete) - RETURNS DeleteResult!
+/// Delete activity (soft or hard delete) - RETURNS DeleteResult!
 /// Expected JSON payload:
 /// {
 ///   "id": "uuid",
@@ -383,7 +356,7 @@ pub unsafe extern "C" fn funding_update(payload_json: *const c_char, result: *mu
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_delete(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_delete(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -400,10 +373,10 @@ pub unsafe extern "C" fn funding_delete(payload_json: *const c_char, result: *mu
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
         let id = Uuid::parse_str(&p.id).map_err(|_| FFIError::invalid_argument("uuid"))?;
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
+        let svc = globals::get_activity_service()?;
         
         // Important: Capture the DeleteResult
-        let delete_result = block_on_async(svc.delete_funding(id, p.hard_delete.unwrap_or(false), &auth))
+        let delete_result = block_on_async(svc.delete_activity(id, p.hard_delete.unwrap_or(false), &auth))
             .map_err(FFIError::from_service_error)?;
         
         // Serialize and return the DeleteResult
@@ -419,16 +392,17 @@ pub unsafe extern "C" fn funding_delete(payload_json: *const c_char, result: *mu
 // Filtered Queries
 // ---------------------------------------------------------------------------
 
-/// Find fundings by donor
+/// Find activities by date range
 /// Expected JSON payload:
 /// {
-///   "donor_id": "uuid",
+///   "start_date": "2023-01-01T00:00:00Z",
+///   "end_date": "2023-12-31T23:59:59Z",
 ///   "pagination": { PaginationDto },
-///   "include": [FundingIncludeDto, ...],
+///   "include": [ActivityIncludeDto, ...],
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_find_by_donor(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_find_by_date_range(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -437,27 +411,27 @@ pub unsafe extern "C" fn funding_find_by_donor(payload_json: *const c_char, resu
         
         #[derive(Deserialize)]
         struct Payload {
-            donor_id: String,
+            start_date: String,
+            end_date: String,
             pagination: Option<PaginationDto>,
-            include: Option<Vec<FundingIncludeDto>>,
+            include: Option<Vec<ActivityIncludeDto>>,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let donor_id = Uuid::parse_str(&p.donor_id).map_err(|_| FFIError::invalid_argument("invalid donor_id"))?;
         let params = p.pagination.map(|p| p.into()).unwrap_or_default();
         let auth: AuthContext = p.auth.try_into()?;
         
-        let include: Option<Vec<FundingInclude>> = p.include.map(|inc| 
+        let include: Option<Vec<ActivityInclude>> = p.include.map(|inc| 
             inc.into_iter().map(|i| i.into()).collect()
         );
         let include_slice = include.as_ref().map(|v| v.as_slice());
         
-        let svc = globals::get_funding_service()?;
-        let fundings = block_on_async(svc.list_fundings_by_donor(donor_id, params, include_slice, &auth))
+        let svc = globals::get_activity_service()?;
+        let activities = block_on_async(svc.find_activities_by_date_range(&p.start_date, &p.end_date, params, include_slice, &auth))
             .map_err(FFIError::from_service_error)?;
         
-        let json_resp = serde_json::to_string(&fundings)
+        let json_resp = serde_json::to_string(&activities)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -465,16 +439,114 @@ pub unsafe extern "C" fn funding_find_by_donor(payload_json: *const c_char, resu
     })
 }
 
-/// Find fundings by project
+/// Get activity progress summary for a project
+/// Expected JSON payload:
+/// {
+///   "project_id": "uuid",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_get_project_progress_summary(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            project_id: String,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("invalid project_id"))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_activity_service()?;
+        
+        // Get all activities for the project and calculate summary
+        let activities = block_on_async(svc.list_activities_for_project(project_id, PaginationParams::default(), &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        #[derive(Serialize)]
+        struct ProgressSummary {
+            project_id: Uuid,
+            total_activities: usize,
+            activities_with_targets: usize,
+            activities_with_actuals: usize,
+            average_progress_percentage: Option<f64>,
+            activities_completed: usize, // progress >= 100%
+            activities_in_progress: usize, // 0% < progress < 100%
+            activities_not_started: usize, // progress = 0% or no actual value
+        }
+        
+        let total_activities = activities.items.len();
+        let mut activities_with_targets = 0;
+        let mut activities_with_actuals = 0;
+        let mut total_progress = 0.0;
+        let mut progress_count = 0;
+        let mut activities_completed = 0;
+        let mut activities_in_progress = 0;
+        let mut activities_not_started = 0;
+        
+        for activity in &activities.items {
+            if activity.target_value.is_some() {
+                activities_with_targets += 1;
+            }
+            if activity.actual_value.is_some() {
+                activities_with_actuals += 1;
+            }
+            
+            if let Some(progress) = activity.progress_percentage {
+                total_progress += progress;
+                progress_count += 1;
+                
+                if progress >= 100.0 {
+                    activities_completed += 1;
+                } else if progress > 0.0 {
+                    activities_in_progress += 1;
+                } else {
+                    activities_not_started += 1;
+                }
+            } else {
+                activities_not_started += 1;
+            }
+        }
+        
+        let average_progress_percentage = if progress_count > 0 {
+            Some(total_progress / progress_count as f64)
+        } else {
+            None
+        };
+        
+        let summary = ProgressSummary {
+            project_id,
+            total_activities,
+            activities_with_targets,
+            activities_with_actuals,
+            average_progress_percentage,
+            activities_completed,
+            activities_in_progress,
+            activities_not_started,
+        };
+        
+        let json_resp = serde_json::to_string(&summary)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get activities that are behind target (actual < target)
 /// Expected JSON payload:
 /// {
 ///   "project_id": "uuid",
 ///   "pagination": { PaginationDto },
-///   "include": [FundingIncludeDto, ...],
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_find_by_project(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_find_behind_target(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -485,25 +557,52 @@ pub unsafe extern "C" fn funding_find_by_project(payload_json: *const c_char, re
         struct Payload {
             project_id: String,
             pagination: Option<PaginationDto>,
-            include: Option<Vec<FundingIncludeDto>>,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("invalid project_id"))?;
-        let params = p.pagination.map(|p| p.into()).unwrap_or_default();
+        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("project_id"))?;
         let auth: AuthContext = p.auth.try_into()?;
+        let params: PaginationParams = p.pagination.map(|dto| dto.into()).unwrap_or_default();
+        let svc = globals::get_activity_service()?;
+
+        // Fetch all activities for the project (or a large enough page to cover most cases for client-side-like filtering)
+        // Consider if the service layer should offer more dedicated filtering if performance becomes an issue.
+        let all_activities_result = block_on_async(svc.list_activities_for_project(
+            project_id, 
+            PaginationParams { page: 1, per_page: 10000 }, // Fetch a large set
+            &auth
+        )).map_err(FFIError::from_service_error)?;
+
+        let behind_target: Vec<ActivityResponse> = all_activities_result.items.into_iter()
+            .filter(|activity| {
+                if let (Some(actual), Some(target)) = (activity.actual_value, activity.target_value) {
+                    actual < target && target > 0.0 // Ensure target is positive to avoid trivial matches
+                } else {
+                    false
+                }
+            })
+            .collect();
         
-        let include: Option<Vec<FundingInclude>> = p.include.map(|inc| 
-            inc.into_iter().map(|i| i.into()).collect()
-        );
-        let include_slice = include.as_ref().map(|v| v.as_slice());
+        let total = behind_target.len() as u64;
+        let start = ((params.page.saturating_sub(1)) * params.per_page) as usize; // u32 to usize
+        let end = std::cmp::min(start + (params.per_page as usize), total as usize);
         
-        let svc = globals::get_funding_service()?;
-        let fundings = block_on_async(svc.list_fundings_by_project(project_id, params, include_slice, &auth))
-            .map_err(FFIError::from_service_error)?;
+        let paginated_items = if start < total as usize {
+            behind_target[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let paginated_response = crate::types::PaginatedResult {
+            items: paginated_items,
+            total,
+            page: params.page,
+            per_page: params.per_page,
+            total_pages: if params.per_page > 0 { (total as f64 / params.per_page as f64).ceil() as u32 } else { 0 },
+        };
         
-        let json_resp = serde_json::to_string(&fundings)
+        let json_resp = serde_json::to_string(&paginated_response)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -511,17 +610,15 @@ pub unsafe extern "C" fn funding_find_by_project(payload_json: *const c_char, re
     })
 }
 
-/// Find fundings by date range
+/// Get activities that have exceeded their target (actual > target)
 /// Expected JSON payload:
 /// {
-///   "start_date": "2023-01-01T00:00:00Z",
-///   "end_date": "2023-12-31T23:59:59Z",
+///   "project_id": "uuid",
 ///   "pagination": { PaginationDto },
-///   "include": [FundingIncludeDto, ...],
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_find_by_date_range(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_find_exceeding_target(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -530,29 +627,52 @@ pub unsafe extern "C" fn funding_find_by_date_range(payload_json: *const c_char,
         
         #[derive(Deserialize)]
         struct Payload {
-            start_date: String,
-            end_date: String,
+            project_id: String,
             pagination: Option<PaginationDto>,
-            include: Option<Vec<FundingIncludeDto>>,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let params = p.pagination.map(|p| p.into()).unwrap_or_default();
+        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("project_id"))?;
         let auth: AuthContext = p.auth.try_into()?;
+        let params: PaginationParams = p.pagination.map(|dto| dto.into()).unwrap_or_default();
+        let svc = globals::get_activity_service()?;
+
+        let all_activities_result = block_on_async(svc.list_activities_for_project(
+            project_id, 
+            PaginationParams { page: 1, per_page: 10000 }, // Fetch a large set
+            &auth
+        )).map_err(FFIError::from_service_error)?;
+
+        let exceeding_target: Vec<ActivityResponse> = all_activities_result.items.into_iter()
+            .filter(|activity| {
+                if let (Some(actual), Some(target)) = (activity.actual_value, activity.target_value) {
+                    actual > target && target > 0.0 // Ensure target is positive
+                } else {
+                    false
+                }
+            })
+            .collect();
         
-        let include: Option<Vec<FundingInclude>> = p.include.map(|inc| 
-            inc.into_iter().map(|i| i.into()).collect()
-        );
-        let include_slice = include.as_ref().map(|v| v.as_slice());
+        let total = exceeding_target.len() as u64;
+        let start = ((params.page.saturating_sub(1)) * params.per_page) as usize;
+        let end = std::cmp::min(start + (params.per_page as usize), total as usize);
         
-        let svc = globals::get_funding_service()?;
-        // Parse dates and call list_fundings with date filtering (this would need to be implemented in the service)
-        // For now, just call list_fundings
-        let fundings = block_on_async(svc.list_fundings(params, include_slice, &auth))
-            .map_err(FFIError::from_service_error)?;
+        let paginated_items = if start < total as usize {
+            exceeding_target[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
+
+        let paginated_response = crate::types::PaginatedResult {
+            items: paginated_items,
+            total,
+            page: params.page,
+            per_page: params.per_page,
+            total_pages: if params.per_page > 0 { (total as f64 / params.per_page as f64).ceil() as u32 } else { 0 },
+        };
         
-        let json_resp = serde_json::to_string(&fundings)
+        let json_resp = serde_json::to_string(&paginated_response)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -560,18 +680,15 @@ pub unsafe extern "C" fn funding_find_by_date_range(payload_json: *const c_char,
     })
 }
 
-// ---------------------------------------------------------------------------
-// Project Funding Operations
-// ---------------------------------------------------------------------------
-
-/// Create project funding
+/// Get activities without targets set
 /// Expected JSON payload:
 /// {
-///   "project_funding": { NewProjectFunding },
+///   "project_id": "uuid",
+///   "pagination": { PaginationDto },
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_create_project_funding(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_find_without_targets(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -580,199 +697,46 @@ pub unsafe extern "C" fn funding_create_project_funding(payload_json: *const c_c
         
         #[derive(Deserialize)]
         struct Payload {
-            project_funding: NewProjectFunding,
+            project_id: String,
+            pagination: Option<PaginationDto>,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("project_id"))?;
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
-        
-        let project_funding = block_on_async(svc.create_funding(p.project_funding, &auth))
-            .map_err(FFIError::from_service_error)?;
-        
-        let json_resp = serde_json::to_string(&project_funding)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
+        let params: PaginationParams = p.pagination.map(|dto| dto.into()).unwrap_or_default();
+        let svc = globals::get_activity_service()?;
 
-/// Update project funding
-/// Expected JSON payload:
-/// {
-///   "id": "uuid",
-///   "update": { UpdateProjectFunding },
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_update_project_funding(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
-        
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload {
-            id: String,
-            update: UpdateProjectFunding,
-            auth: AuthCtxDto,
-        }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let id = Uuid::parse_str(&p.id).map_err(|_| FFIError::invalid_argument("uuid"))?;
-        let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
-        
-        let project_funding = block_on_async(svc.update_funding(id, p.update, &auth))
-            .map_err(FFIError::from_service_error)?;
-        
-        let json_resp = serde_json::to_string(&project_funding)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
+        let all_activities_result = block_on_async(svc.list_activities_for_project(
+            project_id, 
+            PaginationParams { page: 1, per_page: 10000 }, // Fetch a large set
+            &auth
+        )).map_err(FFIError::from_service_error)?;
 
-// ---------------------------------------------------------------------------
-// Analytics and Reports
-// ---------------------------------------------------------------------------
+        let without_targets: Vec<ActivityResponse> = all_activities_result.items.into_iter()
+            .filter(|activity| activity.target_value.is_none())
+            .collect();
+        
+        let total = without_targets.len() as u64;
+        let start = ((params.page.saturating_sub(1)) * params.per_page) as usize;
+        let end = std::cmp::min(start + (params.per_page as usize), total as usize);
+        
+        let paginated_items = if start < total as usize {
+            without_targets[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
 
-/// Get funding analytics
-/// Expected JSON payload:
-/// {
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_get_analytics(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
+        let paginated_response = crate::types::PaginatedResult {
+            items: paginated_items,
+            total,
+            page: params.page,
+            per_page: params.per_page,
+            total_pages: if params.per_page > 0 { (total as f64 / params.per_page as f64).ceil() as u32 } else { 0 },
+        };
         
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload { auth: AuthCtxDto }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
-        
-        let analytics = block_on_async(svc.get_funding_statistics(&auth))
-            .map_err(FFIError::from_service_error)?;
-        
-        let json_resp = serde_json::to_string(&analytics)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
-
-/// Get funding by donor summary
-/// Expected JSON payload:
-/// {
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_get_by_donor_summary(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
-        
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload { auth: AuthCtxDto }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
-        
-        // This method doesn't exist - would need to be implemented
-        // For now, return empty summary
-        let summary = serde_json::json!({
-            "message": "get_funding_by_donor_summary not implemented yet"
-        });
-        
-        let json_resp = serde_json::to_string(&summary)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
-
-/// Get funding by project summary
-/// Expected JSON payload:
-/// {
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_get_by_project_summary(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
-        
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload { auth: AuthCtxDto }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
-        
-        // This method doesn't exist - would need to be implemented
-        // For now, return empty summary
-        let summary = serde_json::json!({
-            "message": "get_funding_by_project_summary not implemented yet"
-        });
-        
-        let json_resp = serde_json::to_string(&summary)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
-
-/// Get funding timeline
-/// Expected JSON payload:
-/// {
-///   "start_date": "2023-01-01T00:00:00Z",
-///   "end_date": "2023-12-31T23:59:59Z",
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_get_timeline(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
-        
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload {
-            start_date: String,
-            end_date: String,
-            auth: AuthCtxDto,
-        }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
-        
-        // This method doesn't exist - would need to be implemented
-        // For now, return empty timeline
-        let timeline = serde_json::json!({
-            "message": "get_funding_timeline not implemented yet"
-        });
-        
-        let json_resp = serde_json::to_string(&timeline)
+        let json_resp = serde_json::to_string(&paginated_response)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -784,10 +748,10 @@ pub unsafe extern "C" fn funding_get_timeline(payload_json: *const c_char, resul
 // Document Integration
 // ---------------------------------------------------------------------------
 
-/// Upload a single document for funding
+/// Upload a single document for activity
 /// Expected JSON payload:
 /// {
-///   "funding_id": "uuid",
+///   "activity_id": "uuid",
 ///   "file_data": "base64_encoded_file_data",
 ///   "original_filename": "string",
 ///   "title": "optional_string",
@@ -798,7 +762,7 @@ pub unsafe extern "C" fn funding_get_timeline(payload_json: *const c_char, resul
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_upload_document(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_upload_document(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -807,7 +771,7 @@ pub unsafe extern "C" fn funding_upload_document(payload_json: *const c_char, re
         
         #[derive(Deserialize)]
         struct Payload {
-            funding_id: String,
+            activity_id: String,
             file_data: String, // base64 encoded
             original_filename: String,
             title: Option<String>,
@@ -824,8 +788,8 @@ pub unsafe extern "C" fn funding_upload_document(payload_json: *const c_char, re
         let file_data = base64::decode(&p.file_data)
             .map_err(|_| FFIError::invalid_argument("invalid base64 file data"))?;
         
-        let funding_id = Uuid::parse_str(&p.funding_id)
-            .map_err(|_| FFIError::invalid_argument("invalid funding_id"))?;
+        let activity_id = Uuid::parse_str(&p.activity_id)
+            .map_err(|_| FFIError::invalid_argument("invalid activity_id"))?;
         let document_type_id = Uuid::parse_str(&p.document_type_id)
             .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
         
@@ -837,10 +801,10 @@ pub unsafe extern "C" fn funding_upload_document(payload_json: *const c_char, re
             .map_err(|_| FFIError::invalid_argument("invalid compression_priority"))?;
         
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
+        let svc = globals::get_activity_service()?;
         
-        let document = block_on_async(svc.upload_document_for_funding(
-            funding_id,
+        let document = block_on_async(svc.upload_document_for_activity(
+            activity_id,
             file_data,
             p.original_filename,
             p.title,
@@ -859,10 +823,10 @@ pub unsafe extern "C" fn funding_upload_document(payload_json: *const c_char, re
     })
 }
 
-/// Upload multiple documents for an existing funding record
+/// Upload multiple documents for an existing activity record
 /// Expected JSON payload:
 /// {
-///   "funding_id": "uuid",
+///   "activity_id": "uuid",
 ///   "documents": [
 ///     {
 ///       "file_data": "base64_encoded_file_data",
@@ -879,7 +843,7 @@ pub unsafe extern "C" fn funding_upload_document(payload_json: *const c_char, re
 /// Note: All documents will share the same title, document_type, sync_priority, and compression_priority.
 /// For individual metadata per document, use the single upload method multiple times.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_upload_documents_bulk(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_upload_documents_bulk(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -894,7 +858,7 @@ pub unsafe extern "C" fn funding_upload_documents_bulk(payload_json: *const c_ch
         
         #[derive(Deserialize)]
         struct Payload {
-            funding_id: String,
+            activity_id: String,
             documents: Vec<DocumentData>,
             title: Option<String>,
             document_type_id: String,
@@ -905,8 +869,8 @@ pub unsafe extern "C" fn funding_upload_documents_bulk(payload_json: *const c_ch
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
         
-        let funding_id = Uuid::parse_str(&p.funding_id)
-            .map_err(|_| FFIError::invalid_argument("invalid funding_id"))?;
+        let activity_id = Uuid::parse_str(&p.activity_id)
+            .map_err(|_| FFIError::invalid_argument("invalid activity_id"))?;
         let document_type_id = Uuid::parse_str(&p.document_type_id)
             .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
         
@@ -918,7 +882,7 @@ pub unsafe extern "C" fn funding_upload_documents_bulk(payload_json: *const c_ch
             .map_err(|_| FFIError::invalid_argument("invalid compression_priority"))?;
         
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_funding_service()?;
+        let svc = globals::get_activity_service()?;
         
         // Decode all documents first
         let mut files = Vec::new();
@@ -931,8 +895,8 @@ pub unsafe extern "C" fn funding_upload_documents_bulk(payload_json: *const c_ch
         }
         
         // Use the bulk upload method from the service
-        let doc_results = block_on_async(svc.bulk_upload_documents_for_funding(
-            funding_id,
+        let doc_results = block_on_async(svc.bulk_upload_documents_for_activity(
+            activity_id,
             files,
             p.title, // title applied to all documents
             document_type_id,
@@ -943,7 +907,7 @@ pub unsafe extern "C" fn funding_upload_documents_bulk(payload_json: *const c_ch
         
         #[derive(Serialize)]
         struct BulkUploadResponse {
-            funding_id: Uuid,
+            activity_id: Uuid,
             document_results: Vec<crate::domains::document::types::MediaDocumentResponse>,
             total_documents: usize,
             successful_uploads: usize,
@@ -954,7 +918,7 @@ pub unsafe extern "C" fn funding_upload_documents_bulk(payload_json: *const c_ch
         let failed_uploads = total_documents - successful_uploads;
         
         let response = BulkUploadResponse {
-            funding_id,
+            activity_id,
             document_results: doc_results,
             total_documents,
             successful_uploads,
@@ -974,9 +938,9 @@ pub unsafe extern "C" fn funding_upload_documents_bulk(payload_json: *const c_ch
 // ---------------------------------------------------------------------------
 
 /// Free memory allocated by Rust for C strings
-/// MUST be called by Swift for every *mut c_char returned by funding functions
+/// MUST be called by Swift for every *mut c_char returned by activity functions
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn funding_free(ptr: *mut c_char) {
+pub unsafe extern "C" fn activity_free(ptr: *mut c_char) {
     if !ptr.is_null() {
         unsafe {
             let _ = CString::from_raw(ptr);

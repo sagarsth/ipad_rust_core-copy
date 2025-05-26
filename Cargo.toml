@@ -1,7 +1,11 @@
 [package]
 name = "ipad_rust_core"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+
+[lib]
+name = "ipad_rust_core"
+crate-type = ["staticlib"]
 
 [dependencies]
 
@@ -83,3 +87,6 @@ paste = "1"
 [features]
 default = []
 webp = ["dep:webp"]
+
+[profile.release]
+lto = false

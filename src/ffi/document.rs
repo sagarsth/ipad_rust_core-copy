@@ -39,7 +39,7 @@ use std::os::raw::{c_char, c_int};
 use std::str::FromStr;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Runtime;
+use chrono::{DateTime, Utc};
 
 // ---------------------------------------------------------------------------
 // Helper utilities
@@ -50,8 +50,7 @@ fn block_on_async<F, T, E>(future: F) -> Result<T, E>
 where
     F: std::future::Future<Output = Result<T, E>>,
 {
-    let rt = Runtime::new().expect("failed to create tokio runtime");
-    rt.block_on(future)
+    crate::ffi::block_on_async(future)
 }
 
 /// Ensure pointer is not null
@@ -872,6 +871,273 @@ pub unsafe extern "C" fn document_unregister_in_use(payload_json: *const c_char)
 }
 
 // ---------------------------------------------------------------------------
+// Additional Document Browser and Analytics Functions
+// ---------------------------------------------------------------------------
+
+/// Find document type by name
+/// Expected JSON payload:
+/// {
+///   "name": "string",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn document_type_find_by_name(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            name: String,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let _auth: AuthContext = p.auth.try_into()?;
+        let repo = globals::get_document_type_repo()?;
+        
+        let doc_type = block_on_async(repo.find_by_name(&p.name))
+            .map_err(FFIError::from)?;
+        
+        let json_resp = serde_json::to_string(&doc_type)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Find documents by date range
+/// Expected JSON payload:
+/// {
+///   "start_date": "2023-01-01T00:00:00Z",
+///   "end_date": "2023-12-31T23:59:59Z",
+///   "pagination": { PaginationDto },
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn document_find_by_date_range(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            start_date: String,
+            end_date: String,
+            pagination: Option<PaginationDto>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let start_date = chrono::DateTime::parse_from_rfc3339(&p.start_date)
+            .map_err(|_| FFIError::invalid_argument("invalid start_date format"))?
+            .with_timezone(&chrono::Utc);
+        let end_date = chrono::DateTime::parse_from_rfc3339(&p.end_date)
+            .map_err(|_| FFIError::invalid_argument("invalid end_date format"))?
+            .with_timezone(&chrono::Utc);
+        let params = p.pagination.map(|p| p.into()).unwrap_or_default();
+        let _auth: AuthContext = p.auth.try_into()?;
+        let repo = globals::get_media_document_repo()?;
+        
+        let documents = block_on_async(repo.find_by_date_range(start_date, end_date, params))
+            .map_err(FFIError::from)?;
+        
+        let json_resp = serde_json::to_string(&documents)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get document counts by related entity IDs (for analytics)
+/// Expected JSON payload:
+/// {
+///   "related_entity_ids": ["uuid1", "uuid2", ...],
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn document_get_counts_by_entities(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            related_entity_ids: Vec<String>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let entity_ids: Result<Vec<Uuid>, _> = p.related_entity_ids.iter()
+            .map(|s| Uuid::parse_str(s))
+            .collect();
+        let entity_ids = entity_ids.map_err(|_| FFIError::invalid_argument("invalid entity IDs"))?;
+        let _auth: AuthContext = p.auth.try_into()?;
+        let repo = globals::get_media_document_repo()?;
+        
+        let counts = block_on_async(repo.get_document_counts_by_related_entity(&entity_ids))
+            .map_err(FFIError::from)?;
+        
+        // Convert HashMap<Uuid, i64> to a more JSON-friendly format
+        #[derive(Serialize)]
+        struct CountResponse {
+            entity_id: String,
+            document_count: i64,
+        }
+        
+        let response: Vec<CountResponse> = counts.into_iter()
+            .map(|(id, count)| CountResponse {
+                entity_id: id.to_string(),
+                document_count: count,
+            })
+            .collect();
+        
+        let json_resp = serde_json::to_string(&response)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Update sync priority for multiple documents (bulk operation)
+/// Expected JSON payload:
+/// {
+///   "document_ids": ["uuid1", "uuid2", ...],
+///   "priority": "HIGH|NORMAL|LOW",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn document_bulk_update_sync_priority(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            document_ids: Vec<String>,
+            priority: String,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let document_ids: Result<Vec<Uuid>, _> = p.document_ids.iter()
+            .map(|s| Uuid::parse_str(s))
+            .collect();
+        let document_ids = document_ids.map_err(|_| FFIError::invalid_argument("invalid document IDs"))?;
+        let priority = SyncPriority::from_str(&p.priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync priority"))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let repo = globals::get_media_document_repo()?;
+        
+        let updated_count = block_on_async(repo.update_sync_priority(&document_ids, priority, &auth))
+            .map_err(FFIError::from)?;
+        
+        #[derive(Serialize)]
+        struct UpdateResponse {
+            updated_count: u64,
+        }
+        
+        let response = UpdateResponse { updated_count };
+        
+        let json_resp = serde_json::to_string(&response)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get document versions for a document
+/// Expected JSON payload:
+/// {
+///   "document_id": "uuid",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn document_get_versions(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            document_id: String,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let document_id = Uuid::parse_str(&p.document_id).map_err(|_| FFIError::invalid_argument("uuid"))?;
+        let _auth: AuthContext = p.auth.try_into()?;
+        
+        // Access the document version repository through globals
+        let doc_ver_repo = globals::get_document_version_repo()?;
+        
+        let versions = block_on_async(doc_ver_repo.find_by_document_id(document_id))
+            .map_err(FFIError::from)?;
+        
+        let json_resp = serde_json::to_string(&versions)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get document access logs for a document
+/// Expected JSON payload:
+/// {
+///   "document_id": "uuid",
+///   "pagination": { PaginationDto },
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn document_get_access_logs(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            document_id: String,
+            pagination: Option<PaginationDto>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let document_id = Uuid::parse_str(&p.document_id).map_err(|_| FFIError::invalid_argument("uuid"))?;
+        let params = p.pagination.map(|p| p.into()).unwrap_or_default();
+        let _auth: AuthContext = p.auth.try_into()?;
+        
+        // Access the document access log repository through globals
+        let doc_log_repo = globals::get_document_access_log_repo()?;
+        
+        let logs = block_on_async(doc_log_repo.find_by_document_id(document_id, params))
+            .map_err(FFIError::from)?;
+        
+        let json_resp = serde_json::to_string(&logs)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Memory Management
 // ---------------------------------------------------------------------------
 
@@ -880,6 +1146,8 @@ pub unsafe extern "C" fn document_unregister_in_use(payload_json: *const c_char)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn document_free(ptr: *mut c_char) {
     if !ptr.is_null() {
-        let _ = CString::from_raw(ptr);
+        unsafe {
+            let _ = CString::from_raw(ptr);
+        }
     }
 }

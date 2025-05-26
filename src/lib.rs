@@ -13,22 +13,24 @@ pub mod validation;
 mod db_migration;
 mod utils;
 
+use crate::ffi::error::FFIResult;
+
 // Entry point for initialization
 /// Initialize the library with the given database path, device ID, offline mode, and JWT secret.
 /// This function must be called before any other function in the library.
-pub fn initialize(
+pub async fn initialize(
     db_path: &str, 
     device_id: &str, 
     offline_mode: bool, 
     jwt_secret: &str
-) -> ffi::FFIResult<()> {
+) -> FFIResult<()> {
     // Initialize global services, passing the secret
-    globals::initialize(db_path, device_id, offline_mode, jwt_secret)?;
+    globals::initialize(db_path, device_id, offline_mode, jwt_secret).await?;
     
-    // Initialize database with migrations
-    db_migration::initialize_database()?;
+    // Initialize database with migrations (now async)
+    db_migration::initialize_database().await?;
     
-    Ok(())
+    Ok(())  
 }
 
 /// Set offline mode status
@@ -37,7 +39,7 @@ pub fn set_offline_mode(offline_mode: bool) {
 }
 
 /// Get the current device ID
-pub fn get_device_id() -> ffi::FFIResult<String> {
+pub fn get_device_id() -> FFIResult<String> {
     globals::get_device_id()
 }
 
