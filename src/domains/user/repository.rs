@@ -640,8 +640,17 @@ impl UserRepository for SqliteUserRepository {
         let now_str = now.to_rfc3339();
         let password_hash = user_data.password.clone();
 
-        let created_by_user_id_str = user_data.created_by_user_id.map(|id| id.to_string());
-        let auth_user_id_str = auth.user_id.to_string();
+        // Handle system context properly - convert nil UUID to None
+        let created_by_user_id = user_data.created_by_user_id
+            .filter(|id| !id.is_nil()) // Filter out nil UUIDs
+            .or_else(|| auth.get_user_id_for_db()); // Use auth context if available and not system
+        
+        let updated_by_user_id = created_by_user_id; // Same as created_by for new records
+        
+        // Convert UUIDs to strings only if they exist (for NULL handling)
+        let created_by_user_id_str = created_by_user_id.map(|id| id.to_string());
+        let updated_by_user_id_str = updated_by_user_id.map(|id| id.to_string());
+        
         let device_uuid_opt = Self::parse_device_id(&auth.device_id);
         let device_id_str_opt = device_uuid_opt.map(|id| id.to_string());
 
@@ -666,19 +675,19 @@ impl UserRepository for SqliteUserRepository {
         .bind(if user_data.active { 1 } else { 0 })
         .bind(&now_str) // created_at
         .bind(&now_str) // updated_at
-        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // created_by_user_id
-        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // updated_by_user_id
+        .bind(created_by_user_id_str.as_deref()) // created_by_user_id - NULL for system
+        .bind(updated_by_user_id_str.as_deref()) // updated_by_user_id - NULL for system
         .bind(&now_str) // email_updated_at
-        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // email_updated_by
+        .bind(created_by_user_id_str.as_deref()) // email_updated_by - NULL for system
         .bind(device_id_str_opt.as_deref()) // email_updated_by_device_id
         .bind(&now_str) // name_updated_at
-        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // name_updated_by
+        .bind(created_by_user_id_str.as_deref()) // name_updated_by - NULL for system
         .bind(device_id_str_opt.as_deref()) // name_updated_by_device_id
         .bind(&now_str) // role_updated_at
-        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // role_updated_by
+        .bind(created_by_user_id_str.as_deref()) // role_updated_by - NULL for system
         .bind(device_id_str_opt.as_deref()) // role_updated_by_device_id
         .bind(&now_str) // active_updated_at
-        .bind(created_by_user_id_str.as_ref().unwrap_or(&auth_user_id_str)) // active_updated_by
+        .bind(created_by_user_id_str.as_deref()) // active_updated_by - NULL for system
         .bind(device_id_str_opt.as_deref()) // active_updated_by_device_id
         .bind(device_id_str_opt.as_deref()) // created_by_device_id
         .bind(device_id_str_opt.as_deref()) // updated_by_device_id
@@ -703,16 +712,16 @@ impl UserRepository for SqliteUserRepository {
             last_login: None,
             created_at: now,
             updated_at: now,
-            created_by_user_id: user_data.created_by_user_id.or(Some(auth.user_id)),
-            updated_by_user_id: user_data.created_by_user_id.or(Some(auth.user_id)),
+            created_by_user_id,
+            updated_by_user_id,
             email_updated_at: Some(now),
-            email_updated_by: user_data.created_by_user_id.or(Some(auth.user_id)),
+            email_updated_by: created_by_user_id,
             name_updated_at: Some(now),
-            name_updated_by: user_data.created_by_user_id.or(Some(auth.user_id)),
+            name_updated_by: created_by_user_id,
             role_updated_at: Some(now),
-            role_updated_by: user_data.created_by_user_id.or(Some(auth.user_id)),
+            role_updated_by: created_by_user_id,
             active_updated_at: Some(now),
-            active_updated_by: user_data.created_by_user_id.or(Some(auth.user_id)),
+            active_updated_by: created_by_user_id,
             deleted_at: None,
             deleted_by_user_id: None,
             created_by_device_id: device_uuid_opt,
@@ -755,6 +764,7 @@ impl UserRepository for SqliteUserRepository {
         let serialized_state = serde_json::to_string(&user_state)
             .map_err(|e| DomainError::Internal(format!("Failed to serialize user state: {}", e)))?;
 
+        // For system context, use None for user_id in change log to avoid FK violations
         let log_entry = ChangeLogEntry {
             operation_id: Uuid::new_v4(),
             entity_table: Self::ENTITY_TABLE.to_string(),
@@ -765,7 +775,7 @@ impl UserRepository for SqliteUserRepository {
             new_value: Some(serialized_state),
             document_metadata: None,
             timestamp: now,
-            user_id: auth.user_id,
+            user_id: created_by_user_id.unwrap_or(Uuid::nil()), // Use nil for system, will be handled in change log
             device_id: device_uuid_opt,
             sync_batch_id: None,
             processed_at: None,

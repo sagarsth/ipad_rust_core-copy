@@ -217,15 +217,45 @@ async fn initialize_internal(
     offline_mode_flag: bool,
     jwt_secret: &str
 ) -> FFIResult<()> {
+    println!("🚀 [GLOBALS] Starting internal initialization...");
+    println!("🔗 [GLOBALS] Database URL: {}", db_url);
+    println!("📱 [GLOBALS] Device ID: {}", device_id_str);
+    println!("📴 [GLOBALS] Offline mode: {}", offline_mode_flag);
+    
     // Initialize JWT
+    println!("🔑 [GLOBALS] Initializing JWT...");
     crate::auth::jwt::initialize(jwt_secret);
+    println!("✅ [GLOBALS] JWT initialized");
 
     // Create async database connection
+    println!("🗄️ [GLOBALS] Creating database connection...");
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(5)
         .connect(db_url)
         .await
-        .map_err(|e| FFIError::internal(format!("Database connection failed: {}", e)))?;
+        .map_err(|e| {
+            println!("❌ [GLOBALS] Database connection failed: {}", e);
+            FFIError::internal(format!("Database connection failed: {}", e))
+        })?;
+
+    println!("✅ [GLOBALS] Database connection established");
+
+    // Store the pool first
+    println!("💾 [GLOBALS] Storing database pool...");
+    *DB_POOL.lock().map_err(|_| {
+        println!("❌ [GLOBALS] DB_POOL lock poisoned");
+        FFIError::internal("DB_POOL lock poisoned".to_string())
+    })? = Some(pool.clone());
+    println!("✅ [GLOBALS] Database pool stored");
+
+    // Run database migrations BEFORE creating services
+    println!("🔄 [GLOBALS] Running database migrations...");
+    crate::db_migration::initialize_database().await
+        .map_err(|e| {
+            println!("❌ [GLOBALS] Database migration failed: {}", e);
+            e
+        })?;
+    println!("✅ [GLOBALS] Database migrations completed");
 
     // Store device ID and offline mode
     *DEVICE_ID.lock().map_err(|_| FFIError::internal("DEVICE_ID lock poisoned".to_string()))? = Some(device_id_str.to_string());
@@ -241,8 +271,16 @@ async fn initialize_internal(
         device_id_str.to_string(),
         offline_mode_flag,
     ));
+    // For iOS, use a proper storage path
+    let storage_path = if cfg!(target_os = "ios") {
+        // This will be replaced by the iOS app with the actual documents directory
+        std::env::var("IOS_DOCUMENTS_DIR").unwrap_or_else(|_| "./storage".to_string())
+    } else {
+        "./storage".to_string()
+    };
+
     let file_storage_service: Arc<dyn FileStorageService> = Arc::new(
-        LocalFileStorageService::new("./storage").map_err(|e| FFIError::internal(format!("File storage init failed: {}", e)))?
+        LocalFileStorageService::new(&storage_path).map_err(|e| FFIError::internal(format!("File storage init failed: {}", e)))?
     );
     let compression_repo: Arc<dyn CompressionRepository> = Arc::new(SqliteCompressionRepository::new(pool.clone()));
 
@@ -778,8 +816,7 @@ async fn initialize_internal(
         deletion_manager.clone(),
     ));
 
-    // Store all components
-    *DB_POOL.lock().map_err(|_| FFIError::internal("DB_POOL lock poisoned".to_string()))? = Some(pool.clone());
+    // Store all components (DB_POOL already stored above after connection)
     *CHANGE_LOG_REPO.lock().map_err(|_| FFIError::internal("CHANGE_LOG_REPO lock poisoned".to_string()))? = Some(change_log_repo.clone());
     *TOMBSTONE_REPO.lock().map_err(|_| FFIError::internal("TOMBSTONE_REPO lock poisoned".to_string()))? = Some(tombstone_repo.clone());
     *DEPENDENCY_CHECKER.lock().map_err(|_| FFIError::internal("DEPENDENCY_CHECKER lock poisoned".to_string()))? = Some(dependency_checker.clone());

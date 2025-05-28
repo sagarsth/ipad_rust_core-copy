@@ -124,4 +124,22 @@ pub unsafe extern "C" fn get_library_version() -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_last_error() -> *mut c_char {
     crate::ffi::error::get_last_error_message()
+}
+
+/// Set the iOS documents directory path for file storage
+/// This should be called before initialize_library() on iOS
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn set_ios_storage_path(path: *const c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        if path.is_null() {
+            return Err(FFIError::invalid_argument("Null path pointer provided"));
+        }
+        
+        let path_str = CStr::from_ptr(path)
+            .to_str()
+            .map_err(|_| FFIError::invalid_argument("Invalid UTF-8 in storage path"))?;
+        
+        std::env::set_var("IOS_DOCUMENTS_DIR", path_str);
+        Ok(())
+    })
 } 

@@ -38,9 +38,13 @@ where
     F: FnOnce() -> FFIResult<()>,
 {
     match func() {
-        Ok(_) => 0, // Success
+        Ok(_) => {
+            crate::ffi::error::clear_last_error();
+            0 // Success
+        }
         Err(e) => {
             eprintln!("Auth FFI error: {:?}", e);
+            crate::ffi::error::store_last_error(&e);
             e.code as c_int
         }
     }
@@ -90,20 +94,51 @@ pub unsafe extern "C" fn auth_login(
     result: *mut *mut c_char,
 ) -> c_int {
     handle_result(|| unsafe {
+        println!("🔐 [AUTH_LOGIN] Starting login process...");
+        
         if credentials_json.is_null() || result.is_null() {
+            println!("❌ [AUTH_LOGIN] Null pointer(s) provided");
             return Err(FFIError::invalid_argument("Null pointer(s) provided"));
         }
         
         let json_str = CStr::from_ptr(credentials_json).to_str()
-            .map_err(|_| FFIError::invalid_argument("Invalid credentials JSON string"))?;
+            .map_err(|_| {
+                println!("❌ [AUTH_LOGIN] Invalid credentials JSON string encoding");
+                FFIError::invalid_argument("Invalid credentials JSON string")
+            })?;
         
-        let credentials: Credentials = parse_json_payload(json_str)?;
+        println!("📝 [AUTH_LOGIN] Parsing credentials JSON...");
+        let credentials: Credentials = parse_json_payload(json_str)
+            .map_err(|e| {
+                println!("❌ [AUTH_LOGIN] Failed to parse credentials JSON: {}", e);
+                e
+            })?;
+        
+        println!("✅ [AUTH_LOGIN] Credentials parsed - Email: {}", credentials.email);
+        
+        println!("🔍 [AUTH_LOGIN] Validating credentials...");
         credentials.validate()
-            .map_err(|e| FFIError::invalid_argument(&format!("Validation failed: {}", e)))?;
+            .map_err(|e| {
+                println!("❌ [AUTH_LOGIN] Credential validation failed: {}", e);
+                FFIError::invalid_argument(&format!("Validation failed: {}", e))
+            })?;
         
-        let auth_service = crate::globals::get_auth_service()?;
+        println!("🔧 [AUTH_LOGIN] Getting auth service...");
+        let auth_service = crate::globals::get_auth_service()
+            .map_err(|e| {
+                println!("❌ [AUTH_LOGIN] Failed to get auth service: {}", e);
+                e
+            })?;
+        
+        println!("🔐 [AUTH_LOGIN] Attempting login for email: {}", credentials.email);
         let login_result = block_on_async(auth_service.login(&credentials.email, &credentials.password))
-            .map_err(|e| FFIError::internal(format!("Login failed: {}", e)))?;
+            .map_err(|e| {
+                println!("❌ [AUTH_LOGIN] Login failed: {}", e);
+                FFIError::internal(format!("Login failed: {}", e))
+            })?;
+        
+        println!("✅ [AUTH_LOGIN] Login successful - User ID: {}, Role: {:?}", 
+                login_result.user_id, login_result.role);
         
         let response = json!({
             "access_token": login_result.access_token,
@@ -114,7 +149,14 @@ pub unsafe extern "C" fn auth_login(
             "role": login_result.role.as_str(),
         });
         
-        *result = create_json_response(response)?;
+        println!("📤 [AUTH_LOGIN] Creating JSON response...");
+        *result = create_json_response(response)
+            .map_err(|e| {
+                println!("❌ [AUTH_LOGIN] Failed to create JSON response: {}", e);
+                e
+            })?;
+        
+        println!("🎉 [AUTH_LOGIN] Login process completed successfully");
         Ok(())
     })
 }
@@ -673,26 +715,148 @@ pub unsafe extern "C" fn auth_is_email_unique(
 /// Initialize default accounts (admin setup)
 /// 
 /// # Arguments
-/// * `token` - Access token for authentication
+/// * `token` - Access token for authentication (can be dummy for initial setup)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn auth_initialize_default_accounts(
     token: *const c_char,
 ) -> c_int {
     handle_result(|| unsafe {
+        println!("🔧 [AUTH] Starting default account initialization...");
+        
         if token.is_null() {
+            println!("❌ [AUTH] Null token provided");
             return Err(FFIError::invalid_argument("Null token provided"));
         }
         
         let token_str = CStr::from_ptr(token).to_str()
-            .map_err(|_| FFIError::invalid_argument("Invalid token string"))?;
+            .map_err(|_| {
+                println!("❌ [AUTH] Invalid token string encoding");
+                FFIError::invalid_argument("Invalid token string")
+            })?;
         
-        let auth_context = create_auth_context_from_token(token_str)?;
+        println!("🔑 [AUTH] Token received: {}", if token_str == "init_setup" { "init_setup (dummy)" } else { "real token" });
         
-        let user_service = crate::globals::get_user_service()?;
-        block_on_async(user_service.initialize_default_accounts(&auth_context))
-            .map_err(|e| FFIError::internal(format!("Default accounts initialization failed: {}", e)))?;
+        // For initial setup, create a dummy admin context
+        let auth_context = if token_str == "init_setup" {
+            println!("🔧 [AUTH] Creating dummy admin context for initial setup");
+            // Create dummy context for initial setup
+            AuthContext {
+                user_id: uuid::Uuid::nil(),
+                role: crate::types::UserRole::Admin,
+                device_id: crate::globals::get_device_id().unwrap_or_else(|_| {
+                    println!("⚠️ [AUTH] Failed to get device ID, using 'unknown'");
+                    "unknown".to_string()
+                }),
+                offline_mode: true,
+            }
+        } else {
+            println!("🔧 [AUTH] Creating auth context from real token");
+            create_auth_context_from_token(token_str)?
+        };
         
-        Ok(())
+        println!("👤 [AUTH] Auth context created - User ID: {}, Role: {:?}, Device: {}", 
+                auth_context.user_id, auth_context.role, auth_context.device_id);
+        
+        println!("🔧 [AUTH] Getting user service...");
+        let user_service = crate::globals::get_user_service()
+            .map_err(|e| {
+                println!("❌ [AUTH] Failed to get user service: {}", e);
+                e
+            })?;
+        
+        println!("✅ [AUTH] User service obtained, calling initialize_default_accounts...");
+        
+        // Try to initialize accounts, ignore if they already exist
+        match block_on_async(user_service.initialize_default_accounts(&auth_context)) {
+            Ok(_) => {
+                println!("✅ [AUTH] Default accounts initialized successfully");
+                Ok(())
+            },
+            Err(e) => {
+                let error_msg = e.to_string();
+                println!("⚠️ [AUTH] Account initialization error: {}", error_msg);
+                
+                // Check if it's a duplicate email error
+                if error_msg.contains("UNIQUE constraint failed") || 
+                   error_msg.contains("duplicate key") ||
+                   error_msg.contains("already exists") {
+                    println!("ℹ️ [AUTH] Accounts already exist, this is fine");
+                    Ok(())
+                } else {
+                    println!("❌ [AUTH] Failed to initialize accounts: {}", error_msg);
+                    Err(FFIError::internal(format!("Failed to initialize accounts: {}", error_msg)))
+                }
+            }
+        }
+    })
+}
+
+/// Initialize comprehensive test data across multiple tables
+/// 
+/// # Arguments
+/// * `token` - Access token for authentication (can be dummy for initial setup)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn auth_initialize_test_data(
+    token: *const c_char,
+) -> c_int {
+    handle_result(|| unsafe {
+        println!("🧪 [AUTH] Starting comprehensive test data initialization...");
+        
+        if token.is_null() {
+            println!("❌ [AUTH] Null token provided");
+            return Err(FFIError::invalid_argument("Null token provided"));
+        }
+        
+        let token_str = CStr::from_ptr(token).to_str()
+            .map_err(|_| {
+                println!("❌ [AUTH] Invalid token string encoding");
+                FFIError::invalid_argument("Invalid token string")
+            })?;
+        
+        println!("🔑 [AUTH] Token received for test data: {}", if token_str == "init_setup" { "init_setup (dummy)" } else { "real token" });
+        
+        // For initial setup, create a dummy admin context
+        let auth_context = if token_str == "init_setup" {
+            println!("🔧 [AUTH] Creating dummy admin context for test data");
+            // Create dummy context for initial setup
+            AuthContext {
+                user_id: uuid::Uuid::nil(),
+                role: crate::types::UserRole::Admin,
+                device_id: crate::globals::get_device_id().unwrap_or_else(|_| {
+                    println!("⚠️ [AUTH] Failed to get device ID, using 'unknown'");
+                    "unknown".to_string()
+                }),
+                offline_mode: true,
+            }
+        } else {
+            println!("🔧 [AUTH] Creating auth context from real token for test data");
+            create_auth_context_from_token(token_str)?
+        };
+        
+        println!("👤 [AUTH] Auth context created for test data - User ID: {}, Role: {:?}, Device: {}", 
+                auth_context.user_id, auth_context.role, auth_context.device_id);
+        
+        println!("🔧 [AUTH] Getting user service for test data...");
+        let user_service = crate::globals::get_user_service()
+            .map_err(|e| {
+                println!("❌ [AUTH] Failed to get user service for test data: {}", e);
+                e
+            })?;
+        
+        println!("✅ [AUTH] User service obtained, calling initialize_test_data...");
+        
+        // Initialize comprehensive test data
+        match block_on_async(user_service.initialize_test_data(&auth_context)) {
+            Ok(_) => {
+                println!("✅ [AUTH] Test data initialized successfully");
+                Ok(())
+            },
+            Err(e) => {
+                let error_msg = e.to_string();
+                println!("❌ [AUTH] Test data initialization error: {}", error_msg);
+                Err(FFIError::internal(format!("Failed to initialize test data: {}", error_msg)))
+            }
+        }
     })
 }
 

@@ -30,12 +30,27 @@ impl AuthContext {
     }
     
     /// Create a new authentication context for internal system operations
+    /// Uses nil UUID to indicate system context, which should be filtered out in repositories
     pub fn internal_system_context() -> Self {
         Self {
-            user_id: Uuid::nil(), // Or a specific system UUID
+            user_id: Uuid::nil(), // Nil UUID indicates system context - will be converted to NULL in DB
             role: UserRole::Admin, // System operations usually have admin privileges
             device_id: "system".to_string(),
             offline_mode: false, // System operations are typically not in offline mode
+        }
+    }
+    
+    /// Check if this is a system context (nil user ID)
+    pub fn is_system_context(&self) -> bool {
+        self.user_id.is_nil()
+    }
+    
+    /// Get user ID for database operations, returning None for system context
+    pub fn get_user_id_for_db(&self) -> Option<Uuid> {
+        if self.is_system_context() {
+            None
+        } else {
+            Some(self.user_id)
         }
     }
     

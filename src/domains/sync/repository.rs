@@ -1012,7 +1012,14 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
         let entity_id_str = entry.entity_id.to_string();
         let operation_type_str = entry.operation_type.as_str();
         let timestamp_str = entry.timestamp.to_rfc3339();
-        let user_id_str = entry.user_id.to_string();
+        
+        // Handle nil UUID for system context - convert to None for NULL in DB
+        let user_id_str = if entry.user_id.is_nil() {
+            None
+        } else {
+            Some(entry.user_id.to_string())
+        };
+        
         let device_id_str = entry.device_id.map(|id| id.to_string());
         let processed_at_str = entry.processed_at.map(|dt| dt.to_rfc3339());
         let priority_value = match entry.operation_type { 
@@ -1039,7 +1046,7 @@ impl ChangeLogRepository for SqliteChangeLogRepository {
             entry.new_value,
             entry.document_metadata,
             timestamp_str,
-            user_id_str,
+            user_id_str, // Will be NULL for system context
             device_id_str,
             entry.sync_batch_id,
             processed_at_str,
@@ -1204,7 +1211,14 @@ impl TombstoneRepository for SqliteTombstoneRepository {
     async fn create_tombstone_with_tx<'t>(&self, tombstone: &Tombstone, tx: &mut Transaction<'t, Sqlite>) -> DomainResult<()> {
         let id_str = tombstone.id.to_string();
         let entity_id_str = tombstone.entity_id.to_string();
-        let deleted_by_str = tombstone.deleted_by.to_string();
+        
+        // Handle nil UUID for system context - convert to None for NULL in DB
+        let deleted_by_str = if tombstone.deleted_by.is_nil() {
+            None
+        } else {
+            Some(tombstone.deleted_by.to_string())
+        };
+        
         let deleted_at_str = tombstone.deleted_at.to_rfc3339();
         let operation_id_str = tombstone.operation_id.to_string();
         let deleted_by_device_id_str = tombstone.deleted_by_device_id.map(|id| id.to_string());
@@ -1217,7 +1231,7 @@ impl TombstoneRepository for SqliteTombstoneRepository {
             id_str,
             entity_id_str,
             tombstone.entity_type,
-            deleted_by_str,
+            deleted_by_str, // Will be NULL for system context
             deleted_by_device_id_str,
             deleted_at_str,
             operation_id_str,

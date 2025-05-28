@@ -64,22 +64,29 @@ impl AuthRepository for SqliteAuthRepository {
         let log_id = Uuid::new_v4();
         let now = Utc::now().to_rfc3339();
         let action = if success { "login_success" } else { "login_fail" };
-        let user_id_str = user_id.map(|id| id.to_string());
         
-        // Use sqlx::query for INSERT
-        sqlx::query(
-            "INSERT INTO audit_logs (id, user_id, action, entity_table, entity_id, details, timestamp, device_id) 
-             VALUES (?, ?, ?, 'users', ?, ?, ?, ?)")
-            .bind(log_id.to_string())
-            .bind(user_id_str.as_deref())
-            .bind(action)
-            .bind(user_id_str.as_deref())
-            .bind(format!("{{\"email\":\"{}\"}}", email))
-            .bind(now)
-            .bind(device_id)
-            .execute(&self.pool)
-            .await
-            .map_err(DbError::from)?;
+        if success {
+            // For successful logins, we have a valid user_id
+            if let Some(user_id) = user_id {
+                sqlx::query(
+                    "INSERT INTO audit_logs (id, user_id, action, entity_table, entity_id, details, timestamp, device_id) 
+                     VALUES (?, ?, ?, 'users', ?, ?, ?, ?)")
+                    .bind(log_id.to_string())
+                    .bind(user_id.to_string())
+                    .bind(action)
+                    .bind(user_id.to_string())
+                    .bind(format!("{{\"email\":\"{}\"}}", email))
+                    .bind(now)
+                    .bind(device_id)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(DbError::from)?;
+            }
+        } else {
+            // For failed logins, we don't have a valid user_id, so we skip audit logging
+            // or we could use a system user ID if one exists
+            println!("⚠️ [AUTH] Skipping audit log for failed login attempt for email: {}", email);
+        }
             
         Ok(())
     }

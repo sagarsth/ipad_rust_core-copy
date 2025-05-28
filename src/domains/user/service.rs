@@ -238,7 +238,11 @@ impl UserService {
     
     /// Initialize default admin, team lead, and officer accounts
     pub async fn initialize_default_accounts(&self, auth_context: &AuthContext) -> ServiceResult<()> {
+        println!("👥 [USER_SERVICE] Starting default account initialization");
+        println!("👤 [USER_SERVICE] Auth context - User: {}, Role: {:?}", auth_context.user_id, auth_context.role);
+        
         // Create admin directly through repository to bypass permission checks
+        println!("🔧 [USER_SERVICE] Creating admin account...");
         let admin = NewUser {
             email: "admin@example.com".to_string(),
             password: "Admin123!".to_string(),
@@ -247,46 +251,119 @@ impl UserService {
             active: true,
             created_by_user_id: None, // System created, not tied to context user
         };
-        let admin_password_hash = self.auth_service.hash_password(&admin.password)?;
+        
+        println!("🔐 [USER_SERVICE] Hashing admin password...");
+        let admin_password_hash = self.auth_service.hash_password(&admin.password)
+            .map_err(|e| {
+                println!("❌ [USER_SERVICE] Failed to hash admin password: {}", e);
+                e
+            })?;
+        
         let mut admin_with_hash = admin;
         admin_with_hash.password = admin_password_hash;
-        self.user_repo.create(admin_with_hash, auth_context)
-            .await
-            .map_err(ServiceError::Domain)?;
+        
+        println!("💾 [USER_SERVICE] Creating admin user in repository...");
+        match self.user_repo.create(admin_with_hash, auth_context).await {
+            Ok(user) => {
+                println!("✅ [USER_SERVICE] Admin user created successfully: {}", user.email);
+            },
+            Err(e) => {
+                println!("❌ [USER_SERVICE] Failed to create admin user: {}", e);
+                return Err(ServiceError::Domain(e));
+            }
+        }
         
         // Create default Team Lead account
+        println!("🔧 [USER_SERVICE] Creating team lead account...");
         let team_lead = NewUser {
             email: "lead@example.com".to_string(),
             password: "Lead123!".to_string(), // Should be changed on first login
             name: "Field Team Lead".to_string(),
-            role: "field_team_lead".to_string(),
+            role: "field_tl".to_string(),
             active: true,
             created_by_user_id: None, // System created
         };
-        let tl_password_hash = self.auth_service.hash_password(&team_lead.password)?;
+        
+        println!("🔐 [USER_SERVICE] Hashing team lead password...");
+        let tl_password_hash = self.auth_service.hash_password(&team_lead.password)
+            .map_err(|e| {
+                println!("❌ [USER_SERVICE] Failed to hash team lead password: {}", e);
+                e
+            })?;
+        
         let mut tl_with_hash = team_lead;
         tl_with_hash.password = tl_password_hash;
-        self.user_repo.create(tl_with_hash, auth_context)
-            .await
-            .map_err(ServiceError::Domain)?;
+        
+        println!("💾 [USER_SERVICE] Creating team lead user in repository...");
+        match self.user_repo.create(tl_with_hash, auth_context).await {
+            Ok(user) => {
+                println!("✅ [USER_SERVICE] Team lead user created successfully: {}", user.email);
+            },
+            Err(e) => {
+                println!("❌ [USER_SERVICE] Failed to create team lead user: {}", e);
+                return Err(ServiceError::Domain(e));
+            }
+        }
 
         // Create default Officer account
+        println!("🔧 [USER_SERVICE] Creating officer account...");
         let officer = NewUser {
             email: "officer@example.com".to_string(),
             password: "Officer123!".to_string(), // Should be changed on first login
             name: "Field Officer".to_string(),
-            role: "field_officer".to_string(),
+            role: "field".to_string(),
             active: true,
             created_by_user_id: None, // System created
         };
-        let officer_password_hash = self.auth_service.hash_password(&officer.password)?;
+        
+        println!("🔐 [USER_SERVICE] Hashing officer password...");
+        let officer_password_hash = self.auth_service.hash_password(&officer.password)
+            .map_err(|e| {
+                println!("❌ [USER_SERVICE] Failed to hash officer password: {}", e);
+                e
+            })?;
+        
         let mut officer_with_hash = officer;
         officer_with_hash.password = officer_password_hash;
-        self.user_repo.create(officer_with_hash, auth_context)
-            .await
-            .map_err(ServiceError::Domain)?;
+        
+        println!("💾 [USER_SERVICE] Creating officer user in repository...");
+        match self.user_repo.create(officer_with_hash, auth_context).await {
+            Ok(user) => {
+                println!("✅ [USER_SERVICE] Officer user created successfully: {}", user.email);
+            },
+            Err(e) => {
+                println!("❌ [USER_SERVICE] Failed to create officer user: {}", e);
+                return Err(ServiceError::Domain(e));
+            }
+        }
 
+        println!("🎉 [USER_SERVICE] All default accounts initialized successfully!");
         log::info!("Initialized default admin, team lead, and officer accounts.");
+        Ok(())
+    }
+
+    /// Initialize basic test data for user domain only
+    pub async fn initialize_test_data(&self, auth_context: &AuthContext) -> ServiceResult<()> {
+        println!("🧪 [USER_SERVICE] Starting user domain test data initialization...");
+        
+        // Only check user-related data (this is appropriate for user service)
+        let pool = crate::globals::get_db_pool()
+            .map_err(|e| ServiceError::Domain(crate::errors::DomainError::Internal(format!("Failed to get DB pool: {}", e))))?;
+        
+        let user_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| ServiceError::Domain(crate::errors::DomainError::Internal(format!("Failed to count users: {}", e))))?;
+        
+        println!("👤 [USER_SERVICE] Current user count: {}", user_count);
+        
+        // Could add user-specific test data here if needed
+        // For example: create test user accounts, user preferences, etc.
+        
+        println!("✅ [USER_SERVICE] User domain test data initialization completed!");
+        println!("ℹ️ [USER_SERVICE] Note: Each domain should implement its own test data initialization");
+        println!("💡 [USER_SERVICE] Suggestion: Create domain-specific test data services or use Swift-side data population");
+        
         Ok(())
     }
 }

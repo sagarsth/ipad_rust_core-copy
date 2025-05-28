@@ -35,7 +35,7 @@ int32_t activity_upload_documents_bulk(const char*, char**);
 void activity_free(char*);
 
 // ============================================================================
-// AUTH FUNCTIONS (22 functions)
+// AUTH FUNCTIONS (23 functions)
 // ============================================================================
 
 int32_t auth_login(const char*, char**);
@@ -53,6 +53,7 @@ int32_t auth_update_current_user(const char*, const char*, char**);
 int32_t auth_change_password(const char*, const char*);
 int32_t auth_is_email_unique(const char*, char**);
 int32_t auth_initialize_default_accounts(const char*);
+int32_t auth_initialize_test_data(const char*);
 void auth_free(char*);
 int32_t login(const char*, const char*, char**);
 int32_t verify_token(const char*, char**);
@@ -77,7 +78,7 @@ int32_t compression_is_document_in_use(const char*, char**);
 void compression_free(char*);
 
 // ============================================================================
-// CORE FUNCTIONS (6 functions)
+// CORE FUNCTIONS (7 functions)
 // ============================================================================
 
 int32_t initialize_library(const char*, const char*, bool, const char*);
@@ -86,6 +87,7 @@ int32_t get_device_id(char**);
 bool is_offline_mode(void);
 char* get_library_version(void);
 char* get_last_error(void);
+int32_t set_ios_storage_path(const char*);
 
 // ============================================================================
 // DOCUMENT FUNCTIONS (24 functions)

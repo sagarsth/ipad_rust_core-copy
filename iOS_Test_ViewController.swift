@@ -1,14 +1,14 @@
-import UIKit
 
-// Import the C functions directly
-// You'll need to add the header file to your bridging header
-// or create a module.modulemap
+import UIKit
+import iPadRustCore
 
 class iPadRustCoreTestViewController: UIViewController {
     
     @IBOutlet weak var statusLabel: UILabel!
     @IBOutlet weak var testButton: UIButton!
     @IBOutlet weak var resultTextView: UITextView!
+    
+    private let core = iPadRustCore.shared
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -20,10 +20,6 @@ class iPadRustCoreTestViewController: UIViewController {
         statusLabel.text = "Ready to test"
         resultTextView.isEditable = false
         resultTextView.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        resultTextView.backgroundColor = UIColor.systemBackground
-        resultTextView.layer.borderColor = UIColor.systemGray4.cgColor
-        resultTextView.layer.borderWidth = 1
-        resultTextView.layer.cornerRadius = 8
     }
     
     @IBAction func runTests(_ sender: UIButton) {
@@ -42,32 +38,20 @@ class iPadRustCoreTestViewController: UIViewController {
     }
     
     private func runProductionReadyTests() async {
-        appendResult("🚀 Starting iPad Rust Core Production Tests")
+        appendResult("🚀 Starting iPad Rust Core Production Tests\n")
         
         // Test 1: Library version
-        appendResult("\n📋 Testing library version...")
-        var versionResult: UnsafeMutablePointer<CChar>?
-        let versionCode = get_library_version(&versionResult)
-        
-        if versionCode == 0, let versionStr = versionResult {
-            let version = String(cString: versionStr)
-            appendResult("✅ Library version: \(version)")
-            free_string(versionStr)
+        appendResult("📋 Testing library version...")
+        if let version = core.getLibraryVersion() {
+            appendResult("✅ Library version: \(version)\n")
         } else {
-            appendResult("❌ Failed to get library version")
+            appendResult("❌ Failed to get library version\n")
         }
         
         // Test 2: Database initialization with proper iOS path
-        appendResult("\n📋 Testing database initialization...")
-        
-        // Get iOS Documents directory
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, 
-                                                   in: .userDomainMask).first!
-        let dbURL = documentsPath.appendingPathComponent("test_ipad_rust_core.sqlite")
-        let dbPath = "sqlite://" + dbURL.path
-        
-        // Get device ID
-        let deviceId = UIDevice.current.identifierForVendor?.uuidString ?? "unknown-device"
+        appendResult("📋 Testing database initialization...")
+        let dbPath = core.getDatabaseURL(filename: "test_ipad_rust_core.sqlite")
+        let deviceId = core.getDeviceId()
         let jwtSecret = "test-jwt-secret-for-ios"
         
         appendResult("Database path: \(dbPath)")
@@ -75,23 +59,17 @@ class iPadRustCoreTestViewController: UIViewController {
         
         let initResult = initialize_library(dbPath, deviceId, false, jwtSecret)
         if initResult == 0 {
-            appendResult("✅ Library initialized successfully")
+            appendResult("✅ Library initialized successfully\n")
         } else {
-            appendResult("❌ Library initialization failed with code: \(initResult)")
-            
-            // Get last error
-            var errorResult: UnsafeMutablePointer<CChar>?
-            let errorCode = get_last_error(&errorResult)
-            if errorCode == 0, let errorStr = errorResult {
-                let error = String(cString: errorStr)
-                appendResult("   Error: \(error)")
-                free_string(errorStr)
+            appendResult("❌ Library initialization failed with code: \(initResult)\n")
+            if let error = core.getLastError() {
+                appendResult("   Error: \(error)\n")
             }
             return
         }
         
         // Test 3: Authentication workflow
-        appendResult("\n📋 Testing authentication...")
+        appendResult("📋 Testing authentication...")
         
         let createUserJson = """
         {
@@ -107,10 +85,11 @@ class iPadRustCoreTestViewController: UIViewController {
         let createUserCode = user_create(createUserJson, &createUserResult)
         
         if createUserCode == 0, let userResultStr = createUserResult {
-            appendResult("✅ Test user created")
+            let userResponse = String(cString: userResultStr)
+            appendResult("✅ Test user created\n")
             user_free(userResultStr)
         } else {
-            appendResult("⚠️ User creation failed (may already exist)")
+            appendResult("⚠️ User creation failed (may already exist)\n")
         }
         
         // Test login
@@ -126,35 +105,41 @@ class iPadRustCoreTestViewController: UIViewController {
         
         if loginCode == 0, let loginResultStr = loginResult {
             let loginResponse = String(cString: loginResultStr)
-            appendResult("✅ Login successful")
+            appendResult("✅ Login successful\n")
             
             // Parse tokens
             if let data = loginResponse.data(using: .utf8),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let accessToken = json["access_token"] as? String {
                 
-                appendResult("   Access token received: \(accessToken.prefix(20))...")
-                
                 // Test authenticated operations
-                appendResult("\n📋 Testing authenticated operations...")
+                appendResult("📋 Testing authenticated operations...")
                 
                 var userListResult: UnsafeMutablePointer<CChar>?
                 let userListCode = auth_get_all_users(accessToken, &userListResult)
                 
                 if userListCode == 0, let userListStr = userListResult {
-                    appendResult("✅ User list retrieved with authentication")
+                    appendResult("✅ User list retrieved with authentication\n")
                     auth_free(userListStr)
                 } else {
-                    appendResult("❌ Authenticated user list failed")
+                    appendResult("❌ Authenticated user list failed\n")
                 }
             }
             
             auth_free(loginResultStr)
         } else {
-            appendResult("❌ Login failed")
+            appendResult("❌ Login failed\n")
         }
         
-        appendResult("\n🎉 iOS Production tests completed!")
+        // Test offline mode
+        appendResult("📋 Testing offline mode...")
+        appendResult("Initial offline mode: \(core.isOfflineMode())")
+        core.setOfflineMode(true)
+        appendResult("After setting to true: \(core.isOfflineMode())")
+        core.setOfflineMode(false)
+        appendResult("After setting to false: \(core.isOfflineMode())\n")
+        
+        appendResult("🎉 iOS Production tests completed!\n")
         appendResult("✅ Database: iOS Documents directory")
         appendResult("✅ Authentication: JWT tokens working")
         appendResult("✅ Device ID: iOS UIDevice integration")
