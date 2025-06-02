@@ -16,16 +16,16 @@ mod utils;
 use crate::ffi::error::FFIResult;
 
 // Entry point for initialization
-/// Initialize the library with the given database path, device ID, offline mode, and JWT secret.
+/// Initialize the library with the given database URL, device ID, offline mode, and JWT secret.
 /// This function must be called before any other function in the library.
 pub async fn initialize(
-    db_path: &str, 
+    db_url: &str, 
     device_id: &str, 
     offline_mode: bool, 
     jwt_secret: &str
 ) -> FFIResult<()> {
     // Initialize global services, passing the secret
-    globals::initialize(db_path, device_id, offline_mode, jwt_secret).await?;
+    globals::initialize(db_url, device_id, offline_mode, jwt_secret).await?;
     
     // Initialize database with migrations (now async)
     db_migration::initialize_database().await?;

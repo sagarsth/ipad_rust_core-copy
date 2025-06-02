@@ -8,6 +8,8 @@
 #ifndef ActionAidSwiftUI_Bridging_Header_h
 #define ActionAidSwiftUI_Bridging_Header_h
 
+#ifdef __OBJC__
 #import "ipad_rust_core.h"
+#endif
 
 #endif /* ActionAidSwiftUI_Bridging_Header_h */

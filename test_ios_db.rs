@@ -28,13 +28,13 @@ fn main() {
     
     // Test 2: Initialize database
     println!("\n2️⃣ Initializing database...");
-    let db_path = CString::new("/tmp/test_ios_actionaid.sqlite").unwrap();
-    let device_id = CString::new("test-device-12345").unwrap();
-    let jwt_secret = CString::new("test_jwt_secret_for_ios_testing_12345").unwrap();
+    let db_url = CString::new("sqlite:///tmp/test_ios_actionaid.sqlite?mode=rwc").unwrap();
+    let device_id = CString::new("test-device-ios").unwrap();
+    let jwt_secret = CString::new("test_secret_key_for_ios_development").unwrap();
     
     let init_result = unsafe { 
         initialize_library(
-            db_path.as_ptr(),
+            db_url.as_ptr(),
             device_id.as_ptr(), 
             false,
             jwt_secret.as_ptr()

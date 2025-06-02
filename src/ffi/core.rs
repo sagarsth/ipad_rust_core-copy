@@ -7,24 +7,31 @@ use crate::ffi::{handle_status_result, error::FFIError};
 use std::ffi::{c_char, CStr, CString};
 use std::os::raw::c_int;
 
-/// Initialize the library with database path, device ID, offline mode, and JWT secret
+/// Initialize the library with database URL, device ID, offline mode, and JWT secret
 /// Returns 0 on success, non-zero on error
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn initialize_library(
-    db_path: *const c_char,
+    db_url: *const c_char,
     device_id: *const c_char,
     offline_mode: bool,
     jwt_secret: *const c_char,
 ) -> c_int {
     let result = std::panic::catch_unwind(|| {
-        if db_path.is_null() || device_id.is_null() || jwt_secret.is_null() {
+        if db_url.is_null() || device_id.is_null() || jwt_secret.is_null() {
             return Err(FFIError::invalid_argument("Null pointer(s) provided for initialization"));
         }
 
-        let db_path_str = match CStr::from_ptr(db_path).to_str() {
+        let db_url_str = match CStr::from_ptr(db_url).to_str() {
             Ok(s) => s.to_string(),
-            Err(_) => return Err(FFIError::invalid_argument("Invalid db_path string")),
+            Err(_) => return Err(FFIError::invalid_argument("Invalid db_url string")),
         };
+        
+        // Validate that we received a proper SQLite URL, not a file path
+        if !db_url_str.starts_with("sqlite://") {
+            return Err(FFIError::invalid_argument(
+                "db_url must be a SQLite URL starting with 'sqlite://', not a file path"
+            ));
+        }
         
         let device_id_str = match CStr::from_ptr(device_id).to_str() {
             Ok(s) => s.to_string(),
@@ -38,7 +45,7 @@ pub unsafe extern "C" fn initialize_library(
 
         // Use the centralized runtime to avoid conflicts
         crate::ffi::block_on_async(async {
-            crate::initialize(&db_path_str, &device_id_str, offline_mode, &jwt_secret_str).await
+            crate::initialize(&db_url_str, &device_id_str, offline_mode, &jwt_secret_str).await
         })
     });
 
@@ -139,7 +146,14 @@ pub unsafe extern "C" fn set_ios_storage_path(path: *const c_char) -> c_int {
             .to_str()
             .map_err(|_| FFIError::invalid_argument("Invalid UTF-8 in storage path"))?;
         
+        println!("🔧 [FFI] Setting iOS storage path: '{}'", path_str);
+        
         std::env::set_var("IOS_DOCUMENTS_DIR", path_str);
+        
+        // Verify it was set
+        let verification = std::env::var("IOS_DOCUMENTS_DIR").unwrap_or_else(|_| "NOT SET".to_string());
+        println!("🔧 [FFI] Environment variable now: '{}'", verification);
+        
         Ok(())
     })
 } 

@@ -112,6 +112,13 @@ impl FileStorageService for LocalFileStorageService {
         entity_or_temp_id: &str,
         suggested_filename: &str,
     ) -> FileStorageResult<(String, u64)> {
+        println!("🗂️ [FILE_STORAGE] Attempting to save file:");
+        println!("   📁 Base path: {:?}", self.base_path);
+        println!("   🏷️ Entity type: {}", entity_type);
+        println!("   🆔 Entity ID: {}", entity_or_temp_id);
+        println!("   📄 Filename: {}", suggested_filename);
+        println!("   📊 Size: {} bytes", data.len());
+        
         let sanitized_entity_type = Self::sanitize_component(entity_type)?;
         let sanitized_id = Self::sanitize_component(entity_or_temp_id)?;
         let unique_filename = Self::generate_unique_filename(suggested_filename);
@@ -125,18 +132,36 @@ impl FileStorageService for LocalFileStorageService {
         // Correctly get the relative path as a string slice for get_absolute_path
         let relative_path_str = relative_path.to_str().ok_or_else(|| FileStorageError::Other("Failed to convert relative path to string".to_string()))?;
         let absolute_path = self.get_absolute_path(relative_path_str);
+        
+        println!("   🔗 Relative path: {}", relative_path_str);
+        println!("   🎯 Absolute path: {:?}", absolute_path);
 
         let parent_dir = absolute_path.parent().ok_or_else(|| FileStorageError::Other("Invalid path generated, no parent directory".to_string()))?;
+        
+        println!("   📂 Parent directory: {:?}", parent_dir);
 
         // Ensure the parent directory exists
-        fs::create_dir_all(parent_dir).await?;
+        match fs::create_dir_all(parent_dir).await {
+            Ok(_) => println!("   ✅ Directory structure created/verified"),
+            Err(e) => {
+                println!("   ❌ Failed to create directory structure: {}", e);
+                return Err(FileStorageError::Io(e));
+            }
+        }
 
         let file_size = data.len() as u64;
 
         // Write the file asynchronously
-        fs::write(&absolute_path, data).await?;
-
-        Ok((relative_path_str.to_string(), file_size))
+        match fs::write(&absolute_path, data).await {
+            Ok(_) => {
+                println!("   ✅ File saved successfully: {} bytes", file_size);
+                Ok((relative_path_str.to_string(), file_size))
+            },
+            Err(e) => {
+                println!("   ❌ Failed to write file: {}", e);
+                Err(FileStorageError::Io(e))
+            }
+        }
     }
 
     async fn delete_file(&self, relative_path: &str) -> FileStorageResult<()> {

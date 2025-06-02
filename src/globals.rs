@@ -8,6 +8,7 @@ use sqlx::SqlitePool;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
+use chrono;
 use crate::domains::core::dependency_checker::{DependencyChecker, SqliteDependencyChecker};
 use crate::domains::core::delete_service::{DeleteService, BaseDeleteService, PendingDeletionManager};
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
@@ -185,6 +186,254 @@ lazy_static! {
 
 }
 
+// --- Getter Functions (moved before initialization to avoid ordering issues) ---
+
+pub fn get_db_pool() -> FFIResult<SqlitePool> {
+    DB_POOL.lock().map_err(|_| FFIError::internal("DB_POOL lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Database pool not initialized".to_string()))
+}
+pub fn get_device_id() -> FFIResult<String> {
+    DEVICE_ID.lock().map_err(|_| FFIError::internal("DEVICE_ID lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Device ID not initialized".to_string()))
+}
+pub fn is_offline_mode() -> bool { OFFLINE_MODE.lock().map(|guard| *guard).unwrap_or(false) }
+pub fn set_offline_mode(offline: bool) { if let Ok(mut guard) = OFFLINE_MODE.lock() { *guard = offline; } }
+
+pub fn get_change_log_repo() -> FFIResult<Arc<dyn ChangeLogRepository>> {
+    CHANGE_LOG_REPO.lock().map_err(|_| FFIError::internal("CHANGE_LOG_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ChangeLogRepository not initialized".to_string()))
+}
+pub fn get_tombstone_repo() -> FFIResult<Arc<dyn TombstoneRepository>> {
+    TOMBSTONE_REPO.lock().map_err(|_| FFIError::internal("TOMBSTONE_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("TombstoneRepository not initialized".to_string()))
+}
+pub fn get_dependency_checker() -> FFIResult<Arc<dyn DependencyChecker>> {
+    DEPENDENCY_CHECKER.lock().map_err(|_| FFIError::internal("DEPENDENCY_CHECKER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DependencyChecker not initialized".to_string()))
+}
+pub fn get_deletion_manager() -> FFIResult<Arc<PendingDeletionManager>> {
+    DELETION_MANAGER.lock().map_err(|_| FFIError::internal("DELETION_MANAGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("PendingDeletionManager not initialized".to_string()))
+}
+pub fn get_auth_service() -> FFIResult<Arc<AuthService>> {
+    AUTH_SERVICE.lock().map_err(|_| FFIError::internal("AUTH_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("AuthService not initialized".to_string()))
+}
+pub fn get_file_storage_service() -> FFIResult<Arc<dyn FileStorageService>> {
+    FILE_STORAGE_SERVICE.lock().map_err(|_| FFIError::internal("FILE_STORAGE_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("FileStorageService not initialized".to_string()))
+}
+pub fn get_compression_repo() -> FFIResult<Arc<dyn CompressionRepository>> {
+    COMPRESSION_REPO.lock().map_err(|_| FFIError::internal("COMPRESSION_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CompressionRepository not initialized".to_string()))
+}
+pub fn get_compression_service() -> FFIResult<Arc<dyn CompressionService>> {
+    COMPRESSION_SERVICE.lock().map_err(|_| FFIError::internal("COMPRESSION_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CompressionService not initialized".to_string()))
+}
+pub fn get_compression_manager() -> FFIResult<Arc<dyn CompressionManager>> {
+    COMPRESSION_MANAGER.lock().map_err(|_| FFIError::internal("COMPRESSION_MANAGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CompressionManager not initialized".to_string()))
+}
+
+// User
+pub fn get_user_repo() -> FFIResult<Arc<dyn UserRepository>> {
+    USER_REPO.lock().map_err(|_| FFIError::internal("USER_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("UserRepository not initialized".to_string()))
+}
+pub fn get_user_service() -> FFIResult<Arc<UserService>> {
+    USER_SERVICE.lock().map_err(|_| FFIError::internal("USER_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("UserService not initialized".to_string()))
+}
+pub fn get_user_delete_service() -> FFIResult<Arc<dyn DeleteService<User>>> {
+    DELETE_SERVICE_USER.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_USER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("User DeleteService not initialized".to_string()))
+}
+pub fn get_user_entity_merger() -> FFIResult<Arc<UserEntityMerger>> {
+    USER_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("USER_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("UserEntityMerger not initialized".to_string()))
+}
+
+// Donor
+pub fn get_donor_repo() -> FFIResult<Arc<dyn DonorRepository>> {
+    DONOR_REPO.lock().map_err(|_| FFIError::internal("DONOR_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DonorRepository not initialized".to_string()))
+}
+pub fn get_donor_delete_service() -> FFIResult<Arc<dyn DeleteService<Donor>>> {
+    DELETE_SERVICE_DONOR.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_DONOR lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Donor DeleteService not initialized".to_string()))
+}
+pub fn get_donor_entity_merger() -> FFIResult<Arc<DonorEntityMerger>> {
+    DONOR_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("DONOR_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DonorEntityMerger not initialized".to_string()))
+}
+
+// Document
+pub fn get_media_document_repo() -> FFIResult<Arc<dyn MediaDocumentRepository>> {
+    MEDIA_DOCUMENT_REPO.lock().map_err(|_| FFIError::internal("MEDIA_DOCUMENT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("MediaDocumentRepository not initialized".to_string()))
+}
+pub fn get_media_document_delete_service() -> FFIResult<Arc<dyn DeleteService<MediaDocument>>> {
+    DELETE_SERVICE_MEDIA_DOCUMENT.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_MEDIA_DOCUMENT lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("MediaDocument DeleteService not initialized".to_string()))
+}
+pub fn get_media_document_entity_merger() -> FFIResult<Arc<DocumentEntityMerger>> {
+    MEDIA_DOCUMENT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("MEDIA_DOCUMENT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("MediaDocumentEntityMerger not initialized".to_string()))
+}
+pub fn get_document_type_repo() -> FFIResult<Arc<dyn DocumentTypeRepository>> {
+    DOCUMENT_TYPE_REPO.lock().map_err(|_| FFIError::internal("DOCUMENT_TYPE_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentTypeRepository not initialized".to_string()))
+}
+pub fn get_document_type_delete_service() -> FFIResult<Arc<dyn DeleteService<DocumentType>>> {
+    DELETE_SERVICE_DOCUMENT_TYPE.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_DOCUMENT_TYPE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentType DeleteService not initialized".to_string()))
+}
+pub fn get_document_type_entity_merger() -> FFIResult<Arc<DocumentTypeEntityMerger>> {
+    DOCUMENT_TYPE_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("DOCUMENT_TYPE_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentTypeEntityMerger not initialized".to_string()))
+}
+
+// Document Version Repository
+pub fn get_document_version_repo() -> FFIResult<Arc<dyn DocumentVersionRepository>> {
+    DOCUMENT_VERSION_REPO.lock().map_err(|_| FFIError::internal("DOCUMENT_VERSION_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentVersionRepository not initialized".to_string()))
+}
+
+// Document Access Log Repository  
+pub fn get_document_access_log_repo() -> FFIResult<Arc<dyn DocumentAccessLogRepository>> {
+    DOCUMENT_ACCESS_LOG_REPO.lock().map_err(|_| FFIError::internal("DOCUMENT_ACCESS_LOG_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentAccessLogRepository not initialized".to_string()))
+}
+
+// Project
+pub fn get_project_repo() -> FFIResult<Arc<dyn ProjectRepository>> {
+    PROJECT_REPO.lock().map_err(|_| FFIError::internal("PROJECT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectRepository not initialized".to_string()))
+}
+pub fn get_project_delete_service() -> FFIResult<Arc<dyn DeleteService<Project>>> {
+    DELETE_SERVICE_PROJECT.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_PROJECT lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Project DeleteService not initialized".to_string()))
+}
+pub fn get_project_entity_merger() -> FFIResult<Arc<ProjectEntityMerger>> {
+    PROJECT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("PROJECT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectEntityMerger not initialized".to_string()))
+}
+
+// Activity
+pub fn get_activity_repo() -> FFIResult<Arc<dyn ActivityRepository>> {
+    ACTIVITY_REPO.lock().map_err(|_| FFIError::internal("ACTIVITY_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ActivityRepository not initialized".to_string()))
+}
+pub fn get_activity_delete_service() -> FFIResult<Arc<dyn DeleteService<Activity>>> {
+    DELETE_SERVICE_ACTIVITY.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_ACTIVITY lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Activity DeleteService not initialized".to_string()))
+}
+pub fn get_activity_entity_merger() -> FFIResult<Arc<ActivityEntityMerger>> {
+    ACTIVITY_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("ACTIVITY_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ActivityEntityMerger not initialized".to_string()))
+}
+
+// ProjectFunding
+pub fn get_project_funding_repo() -> FFIResult<Arc<dyn ProjectFundingRepository>> {
+    PROJECT_FUNDING_REPO.lock().map_err(|_| FFIError::internal("PROJECT_FUNDING_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFundingRepository not initialized".to_string()))
+}
+pub fn get_project_funding_delete_service() -> FFIResult<Arc<dyn DeleteService<ProjectFunding>>> {
+    DELETE_SERVICE_PROJECT_FUNDING.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_PROJECT_FUNDING lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFunding DeleteService not initialized".to_string()))
+}
+pub fn get_project_funding_entity_merger() -> FFIResult<Arc<FundingEntityMerger>> {
+    PROJECT_FUNDING_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("PROJECT_FUNDING_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFundingEntityMerger not initialized".to_string()))
+}
+
+// Workshop
+pub fn get_workshop_repo() -> FFIResult<Arc<dyn WorkshopRepository>> {
+    WORKSHOP_REPO.lock().map_err(|_| FFIError::internal("WORKSHOP_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopRepository not initialized".to_string()))
+}
+pub fn get_workshop_delete_service() -> FFIResult<Arc<dyn DeleteService<Workshop>>> {
+    DELETE_SERVICE_WORKSHOP.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_WORKSHOP lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Workshop DeleteService not initialized".to_string()))
+}
+pub fn get_workshop_entity_merger() -> FFIResult<Arc<WorkshopEntityMerger>> {
+    WORKSHOP_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("WORKSHOP_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopEntityMerger not initialized".to_string()))
+}
+
+// Livelihood
+pub fn get_livelihood_repo() -> FFIResult<Arc<dyn LivehoodRepository>> {
+    LIVELIHOOD_REPO.lock().map_err(|_| FFIError::internal("LIVELIHOOD_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("LivelihoodRepository not initialized".to_string()))
+}
+pub fn get_livelihood_delete_service() -> FFIResult<Arc<dyn DeleteService<Livelihood>>> {
+    DELETE_SERVICE_LIVELIHOOD.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_LIVELIHOOD lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Livelihood DeleteService not initialized".to_string()))
+}
+pub fn get_livelihood_entity_merger() -> FFIResult<Arc<LivelihoodEntityMerger>> {
+    LIVELIHOOD_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("LIVELIHOOD_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("LivelihoodEntityMerger not initialized".to_string()))
+}
+
+// SubsequentGrant
+pub fn get_subsequent_grant_repo() -> FFIResult<Arc<dyn SubsequentGrantRepository>> {
+    SUBSEQUENT_GRANT_REPO.lock().map_err(|_| FFIError::internal("SUBSEQUENT_GRANT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SubsequentGrantRepository not initialized".to_string()))
+}
+pub fn get_subsequent_grant_delete_service() -> FFIResult<Arc<dyn DeleteService<SubsequentGrant>>> {
+    DELETE_SERVICE_SUBSEQUENT_GRANT.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_SUBSEQUENT_GRANT lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SubsequentGrant DeleteService not initialized".to_string()))
+}
+pub fn get_subsequent_grant_entity_merger() -> FFIResult<Arc<SubsequentGrantEntityMerger>> {
+    SUBSEQUENT_GRANT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("SUBSEQUENT_GRANT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SubsequentGrantEntityMerger not initialized".to_string()))
+}
+
+// Participant
+pub fn get_participant_repo() -> FFIResult<Arc<dyn ParticipantRepository>> {
+    PARTICIPANT_REPO.lock().map_err(|_| FFIError::internal("PARTICIPANT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ParticipantRepository not initialized".to_string()))
+}
+pub fn get_participant_delete_service() -> FFIResult<Arc<dyn DeleteService<Participant>>> {
+    DELETE_SERVICE_PARTICIPANT.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_PARTICIPANT lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Participant DeleteService not initialized".to_string()))
+}
+pub fn get_participant_entity_merger() -> FFIResult<Arc<ParticipantEntityMerger>> {
+    PARTICIPANT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("PARTICIPANT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ParticipantEntityMerger not initialized".to_string()))
+}
+
+// StrategicGoal
+pub fn get_strategic_goal_repo() -> FFIResult<Arc<dyn StrategicGoalRepository>> {
+    STRATEGIC_GOAL_REPO.lock().map_err(|_| FFIError::internal("STRATEGIC_GOAL_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("StrategicGoalRepository not initialized".to_string()))
+}
+pub fn get_strategic_goal_delete_service() -> FFIResult<Arc<dyn DeleteService<StrategicGoal>>> {
+    DELETE_SERVICE_STRATEGIC_GOAL.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_STRATEGIC_GOAL lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("StrategicGoal DeleteService not initialized".to_string()))
+}
+pub fn get_strategic_goal_entity_merger() -> FFIResult<Arc<StrategicGoalEntityMerger>> {
+    STRATEGIC_GOAL_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("STRATEGIC_GOAL_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("StrategicGoalEntityMerger not initialized".to_string()))
+}
+
+// WorkshopParticipant
+pub fn get_workshop_participant_repo() -> FFIResult<Arc<dyn WorkshopParticipantRepository>> {
+    WORKSHOP_PARTICIPANT_REPO.lock().map_err(|_| FFIError::internal("WORKSHOP_PARTICIPANT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopParticipantRepository not initialized".to_string()))
+}
+pub fn get_workshop_participant_entity_merger() -> FFIResult<Arc<WorkshopParticipantEntityMerger>> {
+    WORKSHOP_PARTICIPANT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("WORKSHOP_PARTICIPANT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopParticipantEntityMerger not initialized".to_string()))
+}
+
+// Cloud storage
+pub fn get_cloud_storage_service() -> FFIResult<Arc<dyn CloudStorageService>> {
+    CLOUD_STORAGE_SERVICE.lock().map_err(|_| FFIError::internal("CLOUD_STORAGE_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CloudStorageService not initialized".to_string()))
+}
+
+// Services
+pub fn get_document_service() -> FFIResult<Arc<dyn DocumentService>> {
+    DOCUMENT_SERVICE.lock().map_err(|_| FFIError::internal("DOCUMENT_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentService not initialized".to_string()))
+}
+
+pub fn get_project_service() -> FFIResult<Arc<dyn ProjectService>> {
+    PROJECT_SERVICE.lock().map_err(|_| FFIError::internal("PROJECT_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectService not initialized".to_string()))
+}
+
+pub fn get_activity_service() -> FFIResult<Arc<dyn ActivityService>> {
+    ACTIVITY_SERVICE.lock().map_err(|_| FFIError::internal("ACTIVITY_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ActivityService not initialized".to_string()))
+}
+
+pub fn get_donor_service() -> FFIResult<Arc<dyn DonorService>> {
+    DONOR_SERVICE.lock().map_err(|_| FFIError::internal("DONOR_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DonorService not initialized".to_string()))
+}
+
+pub fn get_project_funding_service() -> FFIResult<Arc<dyn ProjectFundingService>> {
+    PROJECT_FUNDING_SERVICE.lock().map_err(|_| FFIError::internal("PROJECT_FUNDING_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFundingService not initialized".to_string()))
+}
+
+pub fn get_participant_service() -> FFIResult<Arc<dyn ParticipantService>> {
+    PARTICIPANT_SERVICE.lock().map_err(|_| FFIError::internal("PARTICIPANT_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ParticipantService not initialized".to_string()))
+}
+
+pub fn get_workshop_service() -> FFIResult<Arc<dyn WorkshopService>> {
+    WORKSHOP_SERVICE.lock().map_err(|_| FFIError::internal("WORKSHOP_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopService not initialized".to_string()))
+}
+
+pub fn get_livelihood_service() -> FFIResult<Arc<dyn LivehoodService>> {
+    LIVELIHOOD_SERVICE.lock().map_err(|_| FFIError::internal("LIVELIHOOD_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("LivelihoodService not initialized".to_string()))
+}
+
+pub fn get_strategic_goal_service() -> FFIResult<Arc<dyn StrategicGoalService>> {
+    STRATEGIC_GOAL_SERVICE.lock().map_err(|_| FFIError::internal("STRATEGIC_GOAL_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("StrategicGoalService not initialized".to_string()))
+}
+
+pub fn get_funding_service() -> FFIResult<Arc<dyn ProjectFundingService>> {
+    FUNDING_SERVICE.lock().map_err(|_| FFIError::internal("FUNDING_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("FundingService not initialized".to_string()))
+}
+
+pub fn get_sync_repo() -> FFIResult<Arc<dyn SyncRepository>> {
+    SYNC_REPO.lock().map_err(|_| FFIError::internal("SYNC_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SyncRepository not initialized".to_string()))
+}
+
+pub fn get_entity_merger() -> FFIResult<Arc<EntityMerger>> {
+    ENTITY_MERGER_GLOBAL.lock().map_err(|_| FFIError::internal("ENTITY_MERGER_GLOBAL lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("EntityMerger not initialized".to_string()))
+}
+
+pub fn get_sync_service() -> FFIResult<Arc<dyn SyncService>> {
+    SYNC_SERVICE_GLOBAL.lock().map_err(|_| FFIError::internal("SYNC_SERVICE_GLOBAL lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SyncService not initialized".to_string()))
+}
+
 /// Initialize global services
 pub async fn initialize(
     db_url: &str,
@@ -257,6 +506,15 @@ async fn initialize_internal(
         })?;
     println!("✅ [GLOBALS] Database migrations completed");
 
+    // Ensure critical lookup data exists
+    println!("🔧 [GLOBALS] Ensuring critical lookup data...");
+    ensure_status_types_initialized(&pool).await
+        .map_err(|e| {
+            println!("❌ [GLOBALS] Status types initialization failed: {}", e);
+            e
+        })?;
+    println!("✅ [GLOBALS] Critical lookup data verified");
+
     // Store device ID and offline mode
     *DEVICE_ID.lock().map_err(|_| FFIError::internal("DEVICE_ID lock poisoned".to_string()))? = Some(device_id_str.to_string());
     *OFFLINE_MODE.lock().map_err(|_| FFIError::internal("OFFLINE_MODE lock poisoned".to_string()))? = offline_mode_flag;
@@ -273,11 +531,34 @@ async fn initialize_internal(
     ));
     // For iOS, use a proper storage path
     let storage_path = if cfg!(target_os = "ios") {
+        println!("🔍 [GLOBALS] Detected iOS target, checking IOS_DOCUMENTS_DIR...");
         // This will be replaced by the iOS app with the actual documents directory
-        std::env::var("IOS_DOCUMENTS_DIR").unwrap_or_else(|_| "./storage".to_string())
+        match std::env::var("IOS_DOCUMENTS_DIR") {
+            Ok(path) => {
+                println!("✅ [GLOBALS] IOS_DOCUMENTS_DIR found: '{}'", path);
+                path
+            },
+            Err(e) => {
+                println!("❌ [GLOBALS] IOS_DOCUMENTS_DIR not found: {:?}, using fallback", e);
+                "./storage".to_string()
+            }
+        }
     } else {
-        "./storage".to_string()
+        println!("🔍 [GLOBALS] Not iOS target, but checking IOS_DOCUMENTS_DIR anyway...");
+        // Even if not iOS target, check if IOS_DOCUMENTS_DIR is set (for simulator builds)
+        match std::env::var("IOS_DOCUMENTS_DIR") {
+            Ok(path) => {
+                println!("✅ [GLOBALS] IOS_DOCUMENTS_DIR found even on non-iOS target: '{}'", path);
+                path
+            },
+            Err(_) => {
+                println!("📁 [GLOBALS] Using default ./storage");
+                "./storage".to_string()
+            }
+        }
     };
+    
+    println!("🗂️ [GLOBALS] Initializing file storage with path: '{}'", storage_path);
 
     let file_storage_service: Arc<dyn FileStorageService> = Arc::new(
         LocalFileStorageService::new(&storage_path).map_err(|e| FFIError::internal(format!("File storage init failed: {}", e)))?
@@ -934,252 +1215,69 @@ async fn initialize_internal(
     Ok(())
 }
 
-// --- Getter Functions ---
-
-pub fn get_db_pool() -> FFIResult<SqlitePool> {
-    DB_POOL.lock().map_err(|_| FFIError::internal("DB_POOL lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Database pool not initialized".to_string()))
-}
-pub fn get_device_id() -> FFIResult<String> {
-    DEVICE_ID.lock().map_err(|_| FFIError::internal("DEVICE_ID lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Device ID not initialized".to_string()))
-}
-pub fn is_offline_mode() -> bool { OFFLINE_MODE.lock().map(|guard| *guard).unwrap_or(false) }
-pub fn set_offline_mode(offline: bool) { if let Ok(mut guard) = OFFLINE_MODE.lock() { *guard = offline; } }
-
-pub fn get_change_log_repo() -> FFIResult<Arc<dyn ChangeLogRepository>> {
-    CHANGE_LOG_REPO.lock().map_err(|_| FFIError::internal("CHANGE_LOG_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ChangeLogRepository not initialized".to_string()))
-}
-pub fn get_tombstone_repo() -> FFIResult<Arc<dyn TombstoneRepository>> {
-    TOMBSTONE_REPO.lock().map_err(|_| FFIError::internal("TOMBSTONE_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("TombstoneRepository not initialized".to_string()))
-}
-pub fn get_dependency_checker() -> FFIResult<Arc<dyn DependencyChecker>> {
-    DEPENDENCY_CHECKER.lock().map_err(|_| FFIError::internal("DEPENDENCY_CHECKER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DependencyChecker not initialized".to_string()))
-}
-pub fn get_deletion_manager() -> FFIResult<Arc<PendingDeletionManager>> {
-    DELETION_MANAGER.lock().map_err(|_| FFIError::internal("DELETION_MANAGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("PendingDeletionManager not initialized".to_string()))
-}
-pub fn get_auth_service() -> FFIResult<Arc<AuthService>> {
-    AUTH_SERVICE.lock().map_err(|_| FFIError::internal("AUTH_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("AuthService not initialized".to_string()))
-}
-pub fn get_file_storage_service() -> FFIResult<Arc<dyn FileStorageService>> {
-    FILE_STORAGE_SERVICE.lock().map_err(|_| FFIError::internal("FILE_STORAGE_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("FileStorageService not initialized".to_string()))
-}
-pub fn get_compression_repo() -> FFIResult<Arc<dyn CompressionRepository>> {
-    COMPRESSION_REPO.lock().map_err(|_| FFIError::internal("COMPRESSION_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CompressionRepository not initialized".to_string()))
-}
-pub fn get_compression_service() -> FFIResult<Arc<dyn CompressionService>> {
-    COMPRESSION_SERVICE.lock().map_err(|_| FFIError::internal("COMPRESSION_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CompressionService not initialized".to_string()))
-}
-pub fn get_compression_manager() -> FFIResult<Arc<dyn CompressionManager>> {
-    COMPRESSION_MANAGER.lock().map_err(|_| FFIError::internal("COMPRESSION_MANAGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CompressionManager not initialized".to_string()))
-}
 
 
-// User
-pub fn get_user_repo() -> FFIResult<Arc<dyn UserRepository>> {
-    USER_REPO.lock().map_err(|_| FFIError::internal("USER_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("UserRepository not initialized".to_string()))
-}
-pub fn get_user_service() -> FFIResult<Arc<UserService>> {
-    USER_SERVICE.lock().map_err(|_| FFIError::internal("USER_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("UserService not initialized".to_string()))
-}
-pub fn get_user_delete_service() -> FFIResult<Arc<dyn DeleteService<User>>> {
-    DELETE_SERVICE_USER.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_USER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("User DeleteService not initialized".to_string()))
-}
-pub fn get_user_entity_merger() -> FFIResult<Arc<UserEntityMerger>> {
-    USER_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("USER_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("UserEntityMerger not initialized".to_string()))
-}
+/// Ensure status types lookup table is properly initialized
+async fn ensure_status_types_initialized(pool: &SqlitePool) -> FFIResult<()> {
 
-// Donor
-pub fn get_donor_repo() -> FFIResult<Arc<dyn DonorRepository>> {
-    DONOR_REPO.lock().map_err(|_| FFIError::internal("DONOR_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DonorRepository not initialized".to_string()))
-}
-pub fn get_donor_delete_service() -> FFIResult<Arc<dyn DeleteService<Donor>>> {
-    DELETE_SERVICE_DONOR.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_DONOR lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Donor DeleteService not initialized".to_string()))
-}
-pub fn get_donor_entity_merger() -> FFIResult<Arc<DonorEntityMerger>> {
-    DONOR_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("DONOR_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DonorEntityMerger not initialized".to_string()))
-}
-
-// Document
-pub fn get_media_document_repo() -> FFIResult<Arc<dyn MediaDocumentRepository>> {
-    MEDIA_DOCUMENT_REPO.lock().map_err(|_| FFIError::internal("MEDIA_DOCUMENT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("MediaDocumentRepository not initialized".to_string()))
-}
-pub fn get_media_document_delete_service() -> FFIResult<Arc<dyn DeleteService<MediaDocument>>> {
-    DELETE_SERVICE_MEDIA_DOCUMENT.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_MEDIA_DOCUMENT lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("MediaDocument DeleteService not initialized".to_string()))
-}
-pub fn get_media_document_entity_merger() -> FFIResult<Arc<DocumentEntityMerger>> {
-    MEDIA_DOCUMENT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("MEDIA_DOCUMENT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("MediaDocumentEntityMerger not initialized".to_string()))
-}
-pub fn get_document_type_repo() -> FFIResult<Arc<dyn DocumentTypeRepository>> {
-    DOCUMENT_TYPE_REPO.lock().map_err(|_| FFIError::internal("DOCUMENT_TYPE_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentTypeRepository not initialized".to_string()))
-}
-pub fn get_document_type_delete_service() -> FFIResult<Arc<dyn DeleteService<DocumentType>>> {
-    DELETE_SERVICE_DOCUMENT_TYPE.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_DOCUMENT_TYPE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentType DeleteService not initialized".to_string()))
-}
-pub fn get_document_type_entity_merger() -> FFIResult<Arc<DocumentTypeEntityMerger>> {
-    DOCUMENT_TYPE_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("DOCUMENT_TYPE_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentTypeEntityMerger not initialized".to_string()))
-}
-
-// Document Version Repository
-pub fn get_document_version_repo() -> FFIResult<Arc<dyn DocumentVersionRepository>> {
-    DOCUMENT_VERSION_REPO.lock().map_err(|_| FFIError::internal("DOCUMENT_VERSION_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentVersionRepository not initialized".to_string()))
-}
-
-// Document Access Log Repository  
-pub fn get_document_access_log_repo() -> FFIResult<Arc<dyn DocumentAccessLogRepository>> {
-    DOCUMENT_ACCESS_LOG_REPO.lock().map_err(|_| FFIError::internal("DOCUMENT_ACCESS_LOG_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentAccessLogRepository not initialized".to_string()))
-}
-
-
-// Project
-pub fn get_project_repo() -> FFIResult<Arc<dyn ProjectRepository>> {
-    PROJECT_REPO.lock().map_err(|_| FFIError::internal("PROJECT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectRepository not initialized".to_string()))
-}
-pub fn get_project_delete_service() -> FFIResult<Arc<dyn DeleteService<Project>>> {
-    DELETE_SERVICE_PROJECT.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_PROJECT lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Project DeleteService not initialized".to_string()))
-}
-pub fn get_project_entity_merger() -> FFIResult<Arc<ProjectEntityMerger>> {
-    PROJECT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("PROJECT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectEntityMerger not initialized".to_string()))
-}
-
-// Activity
-pub fn get_activity_repo() -> FFIResult<Arc<dyn ActivityRepository>> {
-    ACTIVITY_REPO.lock().map_err(|_| FFIError::internal("ACTIVITY_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ActivityRepository not initialized".to_string()))
-}
-pub fn get_activity_delete_service() -> FFIResult<Arc<dyn DeleteService<Activity>>> {
-    DELETE_SERVICE_ACTIVITY.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_ACTIVITY lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Activity DeleteService not initialized".to_string()))
-}
-pub fn get_activity_entity_merger() -> FFIResult<Arc<ActivityEntityMerger>> {
-    ACTIVITY_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("ACTIVITY_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ActivityEntityMerger not initialized".to_string()))
-}
-
-// ProjectFunding
-pub fn get_project_funding_repo() -> FFIResult<Arc<dyn ProjectFundingRepository>> {
-    PROJECT_FUNDING_REPO.lock().map_err(|_| FFIError::internal("PROJECT_FUNDING_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFundingRepository not initialized".to_string()))
-}
-pub fn get_project_funding_delete_service() -> FFIResult<Arc<dyn DeleteService<ProjectFunding>>> {
-    DELETE_SERVICE_PROJECT_FUNDING.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_PROJECT_FUNDING lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFunding DeleteService not initialized".to_string()))
-}
-pub fn get_project_funding_entity_merger() -> FFIResult<Arc<FundingEntityMerger>> {
-    PROJECT_FUNDING_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("PROJECT_FUNDING_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFundingEntityMerger not initialized".to_string()))
-}
-
-// Workshop
-pub fn get_workshop_repo() -> FFIResult<Arc<dyn WorkshopRepository>> {
-    WORKSHOP_REPO.lock().map_err(|_| FFIError::internal("WORKSHOP_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopRepository not initialized".to_string()))
-}
-pub fn get_workshop_delete_service() -> FFIResult<Arc<dyn DeleteService<Workshop>>> {
-    DELETE_SERVICE_WORKSHOP.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_WORKSHOP lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Workshop DeleteService not initialized".to_string()))
-}
-pub fn get_workshop_entity_merger() -> FFIResult<Arc<WorkshopEntityMerger>> {
-    WORKSHOP_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("WORKSHOP_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopEntityMerger not initialized".to_string()))
-}
-
-// Livelihood
-pub fn get_livelihood_repo() -> FFIResult<Arc<dyn LivehoodRepository>> {
-    LIVELIHOOD_REPO.lock().map_err(|_| FFIError::internal("LIVELIHOOD_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("LivelihoodRepository not initialized".to_string()))
-}
-pub fn get_livelihood_delete_service() -> FFIResult<Arc<dyn DeleteService<Livelihood>>> {
-    DELETE_SERVICE_LIVELIHOOD.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_LIVELIHOOD lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Livelihood DeleteService not initialized".to_string()))
-}
-pub fn get_livelihood_entity_merger() -> FFIResult<Arc<LivelihoodEntityMerger>> {
-    LIVELIHOOD_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("LIVELIHOOD_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("LivelihoodEntityMerger not initialized".to_string()))
-}
-
-// SubsequentGrant
-pub fn get_subsequent_grant_repo() -> FFIResult<Arc<dyn SubsequentGrantRepository>> {
-    SUBSEQUENT_GRANT_REPO.lock().map_err(|_| FFIError::internal("SUBSEQUENT_GRANT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SubsequentGrantRepository not initialized".to_string()))
-}
-pub fn get_subsequent_grant_delete_service() -> FFIResult<Arc<dyn DeleteService<SubsequentGrant>>> {
-    DELETE_SERVICE_SUBSEQUENT_GRANT.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_SUBSEQUENT_GRANT lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SubsequentGrant DeleteService not initialized".to_string()))
-}
-pub fn get_subsequent_grant_entity_merger() -> FFIResult<Arc<SubsequentGrantEntityMerger>> {
-    SUBSEQUENT_GRANT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("SUBSEQUENT_GRANT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SubsequentGrantEntityMerger not initialized".to_string()))
-}
-
-// Participant
-pub fn get_participant_repo() -> FFIResult<Arc<dyn ParticipantRepository>> {
-    PARTICIPANT_REPO.lock().map_err(|_| FFIError::internal("PARTICIPANT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ParticipantRepository not initialized".to_string()))
-}
-pub fn get_participant_delete_service() -> FFIResult<Arc<dyn DeleteService<Participant>>> {
-    DELETE_SERVICE_PARTICIPANT.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_PARTICIPANT lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("Participant DeleteService not initialized".to_string()))
-}
-pub fn get_participant_entity_merger() -> FFIResult<Arc<ParticipantEntityMerger>> {
-    PARTICIPANT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("PARTICIPANT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ParticipantEntityMerger not initialized".to_string()))
-}
-
-// StrategicGoal
-pub fn get_strategic_goal_repo() -> FFIResult<Arc<dyn StrategicGoalRepository>> {
-    STRATEGIC_GOAL_REPO.lock().map_err(|_| FFIError::internal("STRATEGIC_GOAL_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("StrategicGoalRepository not initialized".to_string()))
-}
-pub fn get_strategic_goal_delete_service() -> FFIResult<Arc<dyn DeleteService<StrategicGoal>>> {
-    DELETE_SERVICE_STRATEGIC_GOAL.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_STRATEGIC_GOAL lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("StrategicGoal DeleteService not initialized".to_string()))
-}
-pub fn get_strategic_goal_entity_merger() -> FFIResult<Arc<StrategicGoalEntityMerger>> {
-    STRATEGIC_GOAL_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("STRATEGIC_GOAL_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("StrategicGoalEntityMerger not initialized".to_string()))
-}
-
-// WorkshopParticipant
-pub fn get_workshop_participant_repo() -> FFIResult<Arc<dyn WorkshopParticipantRepository>> {
-    WORKSHOP_PARTICIPANT_REPO.lock().map_err(|_| FFIError::internal("WORKSHOP_PARTICIPANT_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopParticipantRepository not initialized".to_string()))
-}
-pub fn get_workshop_participant_entity_merger() -> FFIResult<Arc<WorkshopParticipantEntityMerger>> {
-    WORKSHOP_PARTICIPANT_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("WORKSHOP_PARTICIPANT_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopParticipantEntityMerger not initialized".to_string()))
-}
-
-// Cloud storage
-pub fn get_cloud_storage_service() -> FFIResult<Arc<dyn CloudStorageService>> {
-    CLOUD_STORAGE_SERVICE.lock().map_err(|_| FFIError::internal("CLOUD_STORAGE_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CloudStorageService not initialized".to_string()))
-}
-
-// ... after compression_manager getter functions, add new getters ...
-pub fn get_document_service() -> FFIResult<Arc<dyn DocumentService>> {
-    DOCUMENT_SERVICE.lock().map_err(|_| FFIError::internal("DOCUMENT_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DocumentService not initialized".to_string()))
-}
-
-pub fn get_project_service() -> FFIResult<Arc<dyn ProjectService>> {
-    PROJECT_SERVICE.lock().map_err(|_| FFIError::internal("PROJECT_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectService not initialized".to_string()))
-}
-
-pub fn get_activity_service() -> FFIResult<Arc<dyn ActivityService>> {
-    ACTIVITY_SERVICE.lock().map_err(|_| FFIError::internal("ACTIVITY_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ActivityService not initialized".to_string()))
-}
-
-pub fn get_donor_service() -> FFIResult<Arc<dyn DonorService>> {
-    DONOR_SERVICE.lock().map_err(|_| FFIError::internal("DONOR_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("DonorService not initialized".to_string()))
-}
-
-pub fn get_project_funding_service() -> FFIResult<Arc<dyn ProjectFundingService>> {
-    PROJECT_FUNDING_SERVICE.lock().map_err(|_| FFIError::internal("PROJECT_FUNDING_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFundingService not initialized".to_string()))
-}
-
-pub fn get_participant_service() -> FFIResult<Arc<dyn ParticipantService>> {
-    PARTICIPANT_SERVICE.lock().map_err(|_| FFIError::internal("PARTICIPANT_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ParticipantService not initialized".to_string()))
-}
-
-pub fn get_workshop_service() -> FFIResult<Arc<dyn WorkshopService>> {
-    WORKSHOP_SERVICE.lock().map_err(|_| FFIError::internal("WORKSHOP_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("WorkshopService not initialized".to_string()))
-}
-
-pub fn get_livelihood_service() -> FFIResult<Arc<dyn LivehoodService>> {
-    LIVELIHOOD_SERVICE.lock().map_err(|_| FFIError::internal("LIVELIHOOD_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("LivelihoodService not initialized".to_string()))
-}
-
-pub fn get_strategic_goal_service() -> FFIResult<Arc<dyn StrategicGoalService>> {
-    STRATEGIC_GOAL_SERVICE.lock().map_err(|_| FFIError::internal("STRATEGIC_GOAL_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("StrategicGoalService not initialized".to_string()))
-}
-
-pub fn get_funding_service() -> FFIResult<Arc<dyn ProjectFundingService>> {
-    FUNDING_SERVICE.lock().map_err(|_| FFIError::internal("FUNDING_SERVICE lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("FundingService not initialized".to_string()))
-}
-
-pub fn get_sync_repo() -> FFIResult<Arc<dyn SyncRepository>> {
-    SYNC_REPO.lock().map_err(|_| FFIError::internal("SYNC_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SyncRepository not initialized".to_string()))
-}
-
-pub fn get_entity_merger() -> FFIResult<Arc<EntityMerger>> {
-    ENTITY_MERGER_GLOBAL.lock().map_err(|_| FFIError::internal("ENTITY_MERGER_GLOBAL lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("EntityMerger not initialized".to_string()))
-}
-
-pub fn get_sync_service() -> FFIResult<Arc<dyn SyncService>> {
-    SYNC_SERVICE_GLOBAL.lock().map_err(|_| FFIError::internal("SYNC_SERVICE_GLOBAL lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("SyncService not initialized".to_string()))
+    println!("🔍 [GLOBALS] Checking status_types table...");
+    
+    // Check if status_types table exists and has data
+    let count_result = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM status_types")
+        .fetch_one(pool)
+        .await;
+    
+    match count_result {
+        Ok(count) => {
+            if count >= 4 {
+                println!("✅ [GLOBALS] Status types table has {} entries, looks good", count);
+                return Ok(());
+            } else {
+                println!("⚠️ [GLOBALS] Status types table only has {} entries, re-seeding...", count);
+            }
+        },
+        Err(e) => {
+            println!("❌ [GLOBALS] Error checking status_types table: {}", e);
+            return Err(FFIError::internal(format!("Failed to check status_types: {}", e)));
+        }
+    }
+    
+    // Re-seed the status types (using INSERT OR IGNORE to avoid conflicts)
+    println!("🌱 [GLOBALS] Seeding status types...");
+    let now = chrono::Utc::now().to_rfc3339();
+    
+    let seed_queries = [
+        ("INSERT OR IGNORE INTO status_types (id, value, created_at, updated_at) VALUES (1, 'On Track', ?, ?)", "On Track"),
+        ("INSERT OR IGNORE INTO status_types (id, value, created_at, updated_at) VALUES (2, 'At Risk', ?, ?)", "At Risk"),
+        ("INSERT OR IGNORE INTO status_types (id, value, created_at, updated_at) VALUES (3, 'Delayed', ?, ?)", "Delayed"),
+        ("INSERT OR IGNORE INTO status_types (id, value, created_at, updated_at) VALUES (4, 'Completed', ?, ?)", "Completed"),
+    ];
+    
+    for (query, status_name) in &seed_queries {
+        match sqlx::query(query)
+            .bind(&now)
+            .bind(&now)
+            .execute(pool)
+            .await
+        {
+            Ok(_) => println!("✅ [GLOBALS] Seeded status type: {}", status_name),
+            Err(e) => {
+                println!("⚠️ [GLOBALS] Warning seeding {}: {}", status_name, e);
+                // Don't fail on individual seed errors, might already exist
+            }
+        }
+    }
+    
+    // Verify the seeding worked
+    let final_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM status_types")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| FFIError::internal(format!("Failed to verify status_types after seeding: {}", e)))?;
+    
+    if final_count >= 4 {
+        println!("✅ [GLOBALS] Status types successfully verified: {} entries", final_count);
+        Ok(())
+    } else {
+        Err(FFIError::internal(format!("Status types seeding failed: only {} entries after seeding", final_count)))
+    }
 }
