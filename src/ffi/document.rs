@@ -898,11 +898,20 @@ pub unsafe extern "C" fn document_type_find_by_name(payload_json: *const c_char,
         let _auth: AuthContext = p.auth.try_into()?;
         let repo = globals::get_document_type_repo()?;
         
-        let doc_type = block_on_async(repo.find_by_name(&p.name))
+        let doc_type_option = block_on_async(repo.find_by_name(&p.name))
             .map_err(FFIError::from)?;
         
-        let json_resp = serde_json::to_string(&doc_type)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let json_resp = match doc_type_option {
+            Some(doc_type) => {
+                serde_json::to_string(&doc_type)
+                    .map_err(|e| FFIError::internal(format!("ser {e}")))?
+            }
+            None => {
+                // Return null string to indicate not found
+                "null".to_string()
+            }
+        };
+        
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
         Ok(())
@@ -1151,3 +1160,4 @@ pub unsafe extern "C" fn document_free(ptr: *mut c_char) {
         }
     }
 }
+

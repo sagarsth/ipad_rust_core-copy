@@ -63,7 +63,7 @@ int32_t hash_password(const char*, char**);
 void free_string(char*);
 
 // ============================================================================
-// COMPRESSION FUNCTIONS (10 functions)
+// COMPRESSION FUNCTIONS (18 functions)
 // ============================================================================
 
 int32_t compression_compress_document(const char*, char**);
@@ -76,6 +76,14 @@ int32_t compression_update_priority(const char*, char**);
 int32_t compression_bulk_update_priority(const char*, char**);
 int32_t compression_is_document_in_use(const char*, char**);
 void compression_free(char*);
+int32_t compression_get_queue_entries(const char*, char**);
+int32_t compression_get_default_config(char**);
+int32_t compression_validate_config(const char*, char**);
+int32_t compression_retry_failed(const char*, char**);
+int32_t compression_retry_all_failed(char**);
+int32_t compression_process_queue_now(void);
+int32_t compression_get_supported_methods(const char*, char**);
+int32_t compression_get_document_history(const char*, char**);
 
 // ============================================================================
 // CORE FUNCTIONS (7 functions)

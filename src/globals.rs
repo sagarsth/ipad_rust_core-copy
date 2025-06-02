@@ -553,7 +553,7 @@ async fn initialize_internal(
             },
             Err(_) => {
                 println!("📁 [GLOBALS] Using default ./storage");
-                "./storage".to_string()
+        "./storage".to_string()
             }
         }
     };
