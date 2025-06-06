@@ -531,13 +531,25 @@ impl CompressionService for CompressionServiceImpl {
         document_id: Uuid,
         priority: CompressionPriority,
     ) -> ServiceResult<()> {
+        println!("🗜️ [COMPRESSION] Starting queue_document_for_compression for {}", document_id);
+        
         // Get document to make sure it exists
         let document = FindById::<MediaDocument>::find_by_id(&*self.media_doc_repo, document_id).await
-            .map_err(|e| ServiceError::Domain(e))?;
+            .map_err(|e| {
+                println!("❌ [COMPRESSION] Failed to find document {}: {:?}", document_id, e);
+                ServiceError::Domain(e)
+            })?;
+
+        println!("✅ [COMPRESSION] Found document: {}", document.original_filename);
+        println!("📊 [COMPRESSION] Document details:");
+        println!("   - Source of change: {:?}", document.source_of_change);
+        println!("   - Compression status: {}", document.compression_status);
+        println!("   - Has error: {:?}", document.has_error);
+        println!("   - Size: {} bytes", document.size_bytes);
 
         // Do not queue documents that came from sync
         if document.source_of_change == SourceOfChange::Sync {
-            log::info!("Skipping queueing for compression for synced document: {}", document_id);
+            println!("⏭️ [COMPRESSION] Skipping compression for synced document: {}", document_id);
             // Update compression_status to SKIPPED to prevent reprocessing
             self.media_doc_repo.update_compression_status(
                 document_id, 
@@ -550,20 +562,28 @@ impl CompressionService for CompressionServiceImpl {
             
         // Don't queue if already compressed or has error
         if document.has_error.unwrap_or(0) == 1 {
+            println!("⚠️ [COMPRESSION] Document has error, not queuing: {}", document_id);
             return Ok(());  // Silently ignore error documents
         }
         
         if document.compression_status == CompressionStatus::Completed.as_str() || 
            document.compression_status == CompressionStatus::Skipped.as_str() {
+            println!("⏭️ [COMPRESSION] Document already processed ({}), skipping: {}", document.compression_status, document_id);
             return Ok(());  // Already processed
         }
+        
+        println!("🔄 [COMPRESSION] Queuing document for compression with priority: {:?}", priority);
         
         // Queue the document
         self.compression_repo
             .queue_document(document_id, priority.into())
             .await
-            .map_err(|e| ServiceError::Domain(e))?;
+            .map_err(|e| {
+                println!("❌ [COMPRESSION] Failed to queue document {}: {:?}", document_id, e);
+                ServiceError::Domain(e)
+            })?;
             
+        println!("✅ [COMPRESSION] Successfully queued document {} for compression", document_id);
         Ok(())
     }
     

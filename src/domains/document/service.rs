@@ -18,6 +18,7 @@ use crate::domains::document::types::{
     DocumentAccessLog, CompressionStatus, BlobSyncStatus, DocumentAccessType,
     DocumentSummary,
     DocumentFileInfo,
+    SourceOfChange,
 };
 use crate::domains::compression::service::CompressionService;
 use crate::domains::compression::types::CompressionPriority;
@@ -699,6 +700,8 @@ impl DocumentService for DocumentServiceImpl {
         compression_priority: Option<CompressionPriority>,
         temp_related_id: Option<Uuid>,
     ) -> ServiceResult<MediaDocumentResponse> {
+        println!("🎯 [DOC_SERVICE] *** UPLOAD_DOCUMENT CALLED *** - File: {}", original_filename);
+        
         println!("📄 [DOC_SERVICE] Starting upload_document");
         println!("   📄 Filename: {}", original_filename);
         println!("   📊 File size: {} bytes", file_data.len());
@@ -752,6 +755,7 @@ impl DocumentService for DocumentServiceImpl {
                     blob_key: None,
                     compressed_file_path: None,
                     compressed_size_bytes: None,
+                    source_of_change: SourceOfChange::Local,
                 };
                 
                 println!("📄 [DOC_SERVICE] About to create document record:");
@@ -766,11 +770,19 @@ impl DocumentService for DocumentServiceImpl {
                 let final_compression_priority = compression_priority
                     .or_else(|| CompressionPriority::from_str(&doc_type.default_priority).ok())
                     .unwrap_or(CompressionPriority::Normal);
+                
+                println!("📄 [DOC_SERVICE] About to queue for compression:");
+                println!("   🔄 Final compression priority: {:?}", final_compression_priority);
+                println!("   📄 Document ID: {}", created_doc.id);
+                
                 if let Err(e) = self.compression_service
                     .queue_document_for_compression(created_doc.id, final_compression_priority)
                     .await
                 {
+                    println!("❌ [DOC_SERVICE] Failed to queue document {} for compression: {:?}", created_doc.id, e);
                     eprintln!("Failed to queue document {} for compression: {:?}", created_doc.id, e);
+                } else {
+                    println!("✅ [DOC_SERVICE] Successfully queued document {} for compression", created_doc.id);
                 }
                 let mut response = MediaDocumentResponse::from_doc(&created_doc, Some(doc_type.name));
                 response = self.enrich_response(response, None).await?;

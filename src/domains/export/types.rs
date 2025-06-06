@@ -45,6 +45,8 @@ pub struct ExportSummary {
 pub enum EntityFilter {
     /// Export all strategic goals. Optionally restrict by `status_id`.
     StrategicGoals { status_id: Option<i64> },
+    /// Export strategic goals by specific IDs
+    StrategicGoalsByIds { ids: Vec<Uuid> },
     /// Export strategic goals within date range
     StrategicGoalsByDateRange { 
         start_date: DateTime<Utc>, 
@@ -53,6 +55,8 @@ pub enum EntityFilter {
     },
     /// Export all projects.
     ProjectsAll,
+    /// Export projects by specific IDs
+    ProjectsByIds { ids: Vec<Uuid> },
     /// Export projects within date range
     ProjectsByDateRange { 
         start_date: DateTime<Utc>, 
@@ -60,6 +64,8 @@ pub enum EntityFilter {
     },
     /// Export all activities.
     ActivitiesAll,
+    /// Export activities by specific IDs
+    ActivitiesByIds { ids: Vec<Uuid> },
     /// Export activities within date range
     ActivitiesByDateRange { 
         start_date: DateTime<Utc>, 
@@ -67,6 +73,8 @@ pub enum EntityFilter {
     },
     /// Export all donors.
     DonorsAll,
+    /// Export donors by specific IDs
+    DonorsByIds { ids: Vec<Uuid> },
     /// Export donors within date range
     DonorsByDateRange { 
         start_date: DateTime<Utc>, 
@@ -74,6 +82,8 @@ pub enum EntityFilter {
     },
     /// Export all project funding records.
     FundingAll,
+    /// Export funding by specific IDs
+    FundingByIds { ids: Vec<Uuid> },
     /// Export funding within date range
     FundingByDateRange { 
         start_date: DateTime<Utc>, 
@@ -81,20 +91,31 @@ pub enum EntityFilter {
     },
     /// Export all livelihoods.
     LivelihoodsAll,
+    /// Export livelihoods by specific IDs
+    LivelihoodsByIds { ids: Vec<Uuid> },
     /// Export livelihoods within date range
     LivelihoodsByDateRange { 
         start_date: DateTime<Utc>, 
         end_date: DateTime<Utc> 
     },
-    /// Export all workshops.
-    WorkshopsAll,
+    /// Export all workshops
+    WorkshopsAll { include_participants: bool },
+    /// Export workshops by specific IDs
+    WorkshopsByIds { ids: Vec<Uuid>, include_participants: bool },
     /// Export workshops within date range
     WorkshopsByDateRange { 
         start_date: DateTime<Utc>, 
-        end_date: DateTime<Utc> 
+        end_date: DateTime<Utc>,
+        include_participants: bool 
     },
+    /// Export all workshop participants
+    WorkshopParticipantsAll,
+    /// Export workshop participants by specific IDs
+    WorkshopParticipantsByIds { ids: Vec<Uuid> },
     /// Export media docs for a single related entity.
     MediaDocumentsByRelatedEntity { related_table: String, related_id: Uuid },
+    /// Export media documents by specific IDs
+    MediaDocumentsByIds { ids: Vec<Uuid> },
     /// Export media documents within date range
     MediaDocumentsByDateRange { 
         start_date: DateTime<Utc>, 

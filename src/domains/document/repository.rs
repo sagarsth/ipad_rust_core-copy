@@ -809,7 +809,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
                     temp_related_id,
                     created_at, updated_at, created_by_user_id, updated_by_user_id,
                     deleted_at, deleted_by_user_id,
-                    file_path
+                    file_path, source_of_change
                 ) VALUES (
                     ?, ?, ?, ?, -- id, related_table, related_id, type_id
                     ?, NULL, NULL, -- original_filename, compressed_file_path, compressed_size_bytes
@@ -818,7 +818,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
                     ?, -- temp_related_id
                     ?, ?, ?, ?, -- created_at, updated_at, created_by_user_id, updated_by_user_id
                     NULL, NULL, -- deleted_at, deleted_by_user_id
-                    ? -- file_path - bind actual value
+                    ?, ? -- file_path, source_of_change
                 )"#
             )
             .bind(new_doc.id.to_string())
@@ -842,6 +842,7 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             .bind(&now).bind(&now)
             .bind(user_id_str_bind.as_deref()).bind(user_id_str_bind.as_deref()) // Use Option<String> binding for both
             .bind(&new_doc.file_path) // Bind the actual file_path from DTO
+            .bind(new_doc.source_of_change.as_str()) // Bind source_of_change
             .execute(&mut *tx)
             .await
             .map_err(|e| {

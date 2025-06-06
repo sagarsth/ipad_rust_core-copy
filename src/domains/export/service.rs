@@ -20,6 +20,7 @@ use super::types::{ExportRequest, ExportSummary, ExportJob, ExportStatus};
 use crate::globals;
 use crate::types::PaginationParams;
 use std::path::{PathBuf, Path};
+use crate::domains::document::repository::MediaDocumentRepository;
 
 #[async_trait]
 pub trait ExportService: Send + Sync {
@@ -108,7 +109,7 @@ async fn perform_export_job(
     include_blobs: bool,
     target_path: Option<PathBuf>,
 ) {
-    let mut total_entities: i64 = 0;
+    let total_entities: i64 = 0;
     let mut total_bytes: i64 = 0;
 
     // Wrap entire operation in its own error scope
@@ -128,29 +129,65 @@ async fn perform_export_job(
                         export_strategic_goals(&temp_dir_path, status_id).await?;
                         // FIXME: we don't yet get per-entity count accurately; leave 0 for now.
                     }
+                    EntityFilter::StrategicGoalsByIds { ids } => {
+                        export_strategic_goals_by_ids(&temp_dir_path, &ids).await?;
+                    }
                     EntityFilter::ProjectsAll => {
                         export_projects(&temp_dir_path).await?;
+                    }
+                    EntityFilter::ProjectsByIds { ids } => {
+                        export_projects_by_ids(&temp_dir_path, &ids).await?;
                     }
                     EntityFilter::ActivitiesAll => {
                         export_activities(&temp_dir_path).await?;
                     }
+                    EntityFilter::ActivitiesByIds { ids } => {
+                        export_activities_by_ids(&temp_dir_path, &ids).await?;
+                    }
                     EntityFilter::DonorsAll => {
                         export_donors(&temp_dir_path).await?;
+                    }
+                    EntityFilter::DonorsByIds { ids } => {
+                        export_donors_by_ids(&temp_dir_path, &ids).await?;
                     }
                     EntityFilter::FundingAll => {
                         export_fundings(&temp_dir_path).await?;
                     }
+                    EntityFilter::FundingByIds { ids } => {
+                        export_fundings_by_ids(&temp_dir_path, &ids).await?;
+                    }
                     EntityFilter::LivelihoodsAll => {
                         export_livelihoods(&temp_dir_path).await?;
                     }
-                    EntityFilter::WorkshopsAll => {
-                        export_workshops(&temp_dir_path).await?;
+                    EntityFilter::LivelihoodsByIds { ids } => {
+                        export_livelihoods_by_ids(&temp_dir_path, &ids).await?;
+                    }
+                    EntityFilter::WorkshopsAll { include_participants } => {
+                        export_workshops(&temp_dir_path, include_participants).await?;
+                    }
+                    EntityFilter::WorkshopsByIds { ids, include_participants } => {
+                        export_workshops_by_ids(&temp_dir_path, &ids, include_participants).await?;
+                    }
+                    EntityFilter::WorkshopParticipantsAll => {
+                        export_workshop_participants(&temp_dir_path).await?;
+                    }
+                    EntityFilter::WorkshopParticipantsByIds { ids } => {
+                        export_workshop_participants_by_ids(&temp_dir_path, &ids).await?;
                     }
                     EntityFilter::MediaDocumentsByRelatedEntity { related_table, related_id } => {
                         export_media_documents(
                             &temp_dir_path,
                             &related_table,
                             related_id,
+                            include_blobs,
+                            &file_storage_clone2,
+                        )
+                        .await?;
+                    }
+                    EntityFilter::MediaDocumentsByIds { ids } => {
+                        export_media_documents_by_ids(
+                            &temp_dir_path,
+                            &ids,
                             include_blobs,
                             &file_storage_clone2,
                         )
@@ -176,8 +213,8 @@ async fn perform_export_job(
                     EntityFilter::LivelihoodsByDateRange { start_date, end_date } => {
                         export_livelihoods_by_date_range(&temp_dir_path, start_date, end_date).await?;
                     }
-                    EntityFilter::WorkshopsByDateRange { start_date, end_date } => {
-                        export_workshops_by_date_range(&temp_dir_path, start_date, end_date).await?;
+                    EntityFilter::WorkshopsByDateRange { start_date, end_date, include_participants } => {
+                        export_workshops_by_date_range(&temp_dir_path, start_date, end_date, include_participants).await?;
                     }
                     EntityFilter::MediaDocumentsByDateRange { start_date, end_date } => {
                         export_media_documents_by_date_range(
@@ -390,22 +427,41 @@ async fn export_livelihoods(dest_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-async fn export_workshops(dest_dir: &Path) -> Result<(), String> {
-    let repo = globals::get_workshop_repo().map_err(|e| e.to_string())?;
+async fn export_workshops(dest_dir: &Path, include_participants: bool) -> Result<(), String> {
+    let workshop_repo = globals::get_workshop_repo().map_err(|e| e.to_string())?;
     let file_path = dest_dir.join("workshops.jsonl");
     let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    
+    let mut all_workshops = Vec::new();
     let mut page = 1u32;
     let per_page = 200;
     loop {
         let params = PaginationParams { page, per_page };
-        let page_result = repo.find_all(params, None).await.map_err(|e| e.to_string())?;
-        for entity in page_result.items {
+        let page_result = workshop_repo.find_all(params, None).await.map_err(|e| e.to_string())?;
+        for entity in &page_result.items {
             let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
             writeln!(file, "{}", json).map_err(|e| e.to_string())?;
         }
+        all_workshops.extend(page_result.items);
         if page >= page_result.total_pages { break; }
         page += 1;
     }
+
+    // Export associated workshop participants only if requested
+    if include_participants {
+        let workshop_participant_repo = globals::get_workshop_participant_repo().map_err(|e| e.to_string())?;
+        let participants_file_path = dest_dir.join("workshop_participants.jsonl");
+        let mut participants_file = std::fs::File::create(&participants_file_path).map_err(|e| e.to_string())?;
+
+        for workshop in all_workshops {
+            let participants = workshop_participant_repo.find_participants_for_workshop(workshop.id).await.map_err(|e| e.to_string())?;
+            for participant in participants {
+                let json = serde_json::to_string(&participant).map_err(|e| e.to_string())?;
+                writeln!(participants_file, "{}", json).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -779,22 +835,41 @@ async fn export_livelihoods_by_date_range(dest_dir: &Path, start: DateTime<Utc>,
     Ok(())
 }
 
-async fn export_workshops_by_date_range(dest_dir: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<(), String> {
-    let repo = globals::get_workshop_repo().map_err(|e| e.to_string())?;
+async fn export_workshops_by_date_range(dest_dir: &Path, start: DateTime<Utc>, end: DateTime<Utc>, include_participants: bool) -> Result<(), String> {
+    let workshop_repo = globals::get_workshop_repo().map_err(|e| e.to_string())?;
     let file_path = dest_dir.join("workshops.jsonl");
     let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    
+    let mut all_workshops = Vec::new();
     let mut page = 1u32;
     let per_page = 200;
     loop {
         let params = PaginationParams { page, per_page };
-        let page_result = repo.find_by_date_range(start, end, params).await.map_err(|e| e.to_string())?;
-        for entity in page_result.items {
+        let page_result = workshop_repo.find_by_date_range(start, end, params).await.map_err(|e| e.to_string())?;
+        for entity in &page_result.items {
             let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
             writeln!(file, "{}", json).map_err(|e| e.to_string())?;
         }
+        all_workshops.extend(page_result.items);
         if page >= page_result.total_pages { break; }
         page += 1;
     }
+
+    // Export associated workshop participants only if requested
+    if include_participants {
+        let workshop_participant_repo = globals::get_workshop_participant_repo().map_err(|e| e.to_string())?;
+        let participants_file_path = dest_dir.join("workshop_participants.jsonl");
+        let mut participants_file = std::fs::File::create(&participants_file_path).map_err(|e| e.to_string())?;
+
+        for workshop in all_workshops {
+            let participants = workshop_participant_repo.find_participants_for_workshop(workshop.id).await.map_err(|e| e.to_string())?;
+            for participant in participants {
+                let json = serde_json::to_string(&participant).map_err(|e| e.to_string())?;
+                writeln!(participants_file, "{}", json).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -861,6 +936,257 @@ async fn export_media_documents_by_date_range(
             break;
         }
         page += 1;
+    }
+    Ok(())
+}
+
+// === ID-based Export Functions ===
+
+async fn export_strategic_goals_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let repo = globals::get_strategic_goal_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("strategic_goals.jsonl");
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    let result = repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    for entity in result.items {
+        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+        writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+async fn export_projects_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let repo = globals::get_project_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("projects.jsonl");
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    let result = repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    for entity in result.items {
+        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+        writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+async fn export_activities_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let repo = globals::get_activity_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("activities.jsonl");
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    let result = repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    for entity in result.items {
+        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+        writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+async fn export_donors_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let repo = globals::get_donor_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("donors.jsonl");
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    let result = repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    for entity in result.items {
+        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+        writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+async fn export_fundings_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let repo = globals::get_project_funding_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("project_funding.jsonl");
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    let result = repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    for entity in result.items {
+        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+        writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+async fn export_livelihoods_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let livelihood_repo = globals::get_livelihood_repo().map_err(|e| e.to_string())?;
+    let subsequent_grant_repo = globals::get_subsequent_grant_repo().map_err(|e| e.to_string())?;
+    
+    // Export livelihoods
+    let livelihoods_file_path = dest_dir.join("livelihoods.jsonl");
+    let mut livelihoods_file = std::fs::File::create(&livelihoods_file_path).map_err(|e| e.to_string())?;
+
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    let result = livelihood_repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    for entity in &result.items {
+        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+        writeln!(livelihoods_file, "{}", json).map_err(|e| e.to_string())?;
+    }
+
+    // Export associated subsequent grants for these livelihoods
+    let grants_file_path = dest_dir.join("subsequent_grants.jsonl");
+    let mut grants_file = std::fs::File::create(&grants_file_path).map_err(|e| e.to_string())?;
+
+    for livelihood in &result.items {
+        let grants = subsequent_grant_repo.find_by_livelihood_id(livelihood.id).await.map_err(|e| e.to_string())?;
+        for grant in grants {
+            let json = serde_json::to_string(&grant).map_err(|e| e.to_string())?;
+            writeln!(grants_file, "{}", json).map_err(|e| e.to_string())?;
+        }
+    }
+    
+    Ok(())
+}
+
+async fn export_workshops_by_ids(dest_dir: &Path, ids: &[Uuid], include_participants: bool) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let workshop_repo = globals::get_workshop_repo().map_err(|e| e.to_string())?;
+    let workshop_participant_repo = globals::get_workshop_participant_repo().map_err(|e| e.to_string())?;
+    
+    // Export workshops
+    let workshops_file_path = dest_dir.join("workshops.jsonl");
+    let mut workshops_file = std::fs::File::create(&workshops_file_path).map_err(|e| e.to_string())?;
+
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    let result = workshop_repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    for entity in &result.items {
+        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+        writeln!(workshops_file, "{}", json).map_err(|e| e.to_string())?;
+    }
+
+    // Export associated workshop participants only if requested
+    if include_participants {
+        let participants_file_path = dest_dir.join("workshop_participants.jsonl");
+        let mut participants_file = std::fs::File::create(&participants_file_path).map_err(|e| e.to_string())?;
+
+        for workshop in &result.items {
+            let participants = workshop_participant_repo.find_participants_for_workshop(workshop.id).await.map_err(|e| e.to_string())?;
+            for participant in participants {
+                let json = serde_json::to_string(&participant).map_err(|e| e.to_string())?;
+                writeln!(participants_file, "{}", json).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+async fn export_media_documents_by_ids(
+    dest_dir: &Path,
+    ids: &[Uuid],
+    include_blobs: bool,
+    file_storage: &Arc<dyn FileStorageService>,
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let repo = globals::get_media_document_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("media_documents.jsonl");
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+
+    for id in ids {
+        let entity = match MediaDocumentRepository::find_by_id(repo.as_ref(), *id).await {
+            Ok(doc) => doc,
+            Err(_) => continue, // Skip missing documents
+        };
+
+        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+        writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+
+        // Handle blob export if requested and entity has file_path
+        if include_blobs {
+            let rel_path = &entity.file_path;
+            let abs_path = file_storage.get_absolute_path(rel_path);
+            if abs_path.exists() {
+                let blobs_dir = dest_dir.join("blobs");
+                std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
+                if let Some(filename) = abs_path.file_name() {
+                    std::fs::copy(&abs_path, blobs_dir.join(filename)).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn export_workshop_participants(dest_dir: &Path) -> Result<(), String> {
+    let repo = globals::get_workshop_participant_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("workshop_participants.jsonl");
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+
+    let mut page = 1;
+    loop {
+        let params = PaginationParams { page, per_page: 200 };
+        let result = repo.find_all(params).await.map_err(|e| e.to_string())?;
+
+        if result.items.is_empty() {
+            break;
+        }
+
+        for entity in result.items {
+            let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+            writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+        }
+
+        page += 1;
+    }
+    Ok(())
+}
+
+async fn export_workshop_participants_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let repo = globals::get_workshop_participant_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("workshop_participants.jsonl");
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    let result = repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    for entity in result.items {
+        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+        writeln!(file, "{}", json).map_err(|e| e.to_string())?;
     }
     Ok(())
 } 

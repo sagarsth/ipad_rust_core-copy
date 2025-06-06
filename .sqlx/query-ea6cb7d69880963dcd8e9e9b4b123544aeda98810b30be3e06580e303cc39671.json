@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                SELECT \n                    compression_status,\n                    compressed_file_path,\n                    compressed_size_bytes,\n                    size_bytes as original_size,\n                    updated_at\n                FROM media_documents\n                WHERE id = ?\n                ",
+  "describe": {
+    "columns": [
+      {
+        "name": "compression_status",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "compressed_file_path",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "compressed_size_bytes",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "original_size",
+        "ordinal": 3,
+        "type_info": "Integer"
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "ea6cb7d69880963dcd8e9e9b4b123544aeda98810b30be3e06580e303cc39671"
+}

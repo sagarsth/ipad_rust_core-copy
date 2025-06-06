@@ -462,6 +462,7 @@ pub struct NewMediaDocument {
     pub compressed_file_path: Option<String>, // Default None
     pub compressed_size_bytes: Option<i64>, // Default None
     pub blob_key: Option<String>, // Default None
+    pub source_of_change: SourceOfChange, // Added missing field
 }
 
 impl Validate for NewMediaDocument {

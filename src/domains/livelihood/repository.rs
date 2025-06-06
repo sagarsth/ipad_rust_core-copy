@@ -127,6 +127,13 @@ pub trait LivehoodRepository:
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Livelihood>>;
 
+    /// Find livelihoods by specific IDs
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>>;
+
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
@@ -1202,6 +1209,68 @@ impl LivehoodRepository for SqliteLivelihoodRepository {
         Ok(PaginatedResult::new(entities, total as u64, params))
     }
 
+    /// Find livelihoods by specific IDs
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Livelihood>> {
+        if ids.is_empty() {
+            return Ok(PaginatedResult::new(Vec::new(), 0, params));
+        }
+
+        let offset = (params.page - 1) * params.per_page;
+
+        // Build COUNT query with dynamic placeholders
+        let count_placeholders = vec!["?"; ids.len()].join(", ");
+        let count_query = format!(
+            "SELECT COUNT(*) FROM livelihoods WHERE id IN ({}) AND deleted_at IS NULL",
+            count_placeholders
+        );
+
+        let mut count_builder = QueryBuilder::new(&count_query);
+        for id in ids {
+            count_builder.push_bind(id.to_string());
+        }
+
+        let total: i64 = count_builder
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        // Build SELECT query with dynamic placeholders
+        let select_placeholders = vec!["?"; ids.len()].join(", ");
+        let select_query = format!(
+            "SELECT * FROM livelihoods WHERE id IN ({}) AND deleted_at IS NULL ORDER BY created_at ASC LIMIT ? OFFSET ?",
+            select_placeholders
+        );
+
+        let mut select_builder = QueryBuilder::new(&select_query);
+        for id in ids {
+            select_builder.push_bind(id.to_string());
+        }
+        select_builder.push_bind(params.per_page as i64);
+        select_builder.push_bind(offset as i64);
+
+        let rows = select_builder
+            .build_query_as::<LivelihoodRow>()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Livelihood>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
@@ -1843,9 +1912,9 @@ impl SubsequentGrantRepository for SqliteSubsequentGrantRepository {
         .bind(start_date.to_rfc3339()) // Convert to string
         .bind(end_date.to_rfc3339())   // Convert to string
         .bind(end_date.to_rfc3339())   // Convert to string
-        .fetch_all(&self.pool)
-        .await
-        .map_err(DbError::from)?;
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
 
         let entities = rows
             .into_iter()

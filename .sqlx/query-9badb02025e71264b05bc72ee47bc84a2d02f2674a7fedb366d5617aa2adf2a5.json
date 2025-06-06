@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n                UPDATE compression_queue \n                SET status = 'pending', \n                    attempts = 0,\n                    error_message = NULL,\n                    updated_at = ?\n                WHERE status = 'failed'\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "9badb02025e71264b05bc72ee47bc84a2d02f2674a7fedb366d5617aa2adf2a5"
+}

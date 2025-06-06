@@ -86,6 +86,13 @@ pub trait DonorRepository:
 
     async fn find_all(&self, params: PaginationParams) -> DomainResult<PaginatedResult<Donor>>;
 
+    /// Find donors by specific IDs
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>>;
+
     // Add new method signatures here
     /// Count donors by type
     async fn count_by_type(&self) -> DomainResult<Vec<(Option<String>, i64)>>;
@@ -873,6 +880,68 @@ impl DonorRepository for SqliteDonorRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Donor>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    /// Find donors by specific IDs
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Donor>> {
+        if ids.is_empty() {
+            return Ok(PaginatedResult::new(Vec::new(), 0, params));
+        }
+
+        let offset = (params.page - 1) * params.per_page;
+
+        // Build COUNT query with dynamic placeholders
+        let count_placeholders = vec!["?"; ids.len()].join(", ");
+        let count_query = format!(
+            "SELECT COUNT(*) FROM donors WHERE id IN ({}) AND deleted_at IS NULL",
+            count_placeholders
+        );
+
+        let mut count_builder = QueryBuilder::new(&count_query);
+        for id in ids {
+            count_builder.push_bind(id.to_string());
+        }
+
+        let total: i64 = count_builder
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        // Build SELECT query with dynamic placeholders
+        let select_placeholders = vec!["?"; ids.len()].join(", ");
+        let select_query = format!(
+            "SELECT id, name, name_updated_at, name_updated_by, name_updated_by_device_id, type_ AS type, type_updated_at, type_updated_by, type_updated_by_device_id, contact_person, contact_person_updated_at, contact_person_updated_by, contact_person_updated_by_device_id, email, email_updated_at, email_updated_by, email_updated_by_device_id, phone, phone_updated_at, phone_updated_by, phone_updated_by_device_id, country, country_updated_at, country_updated_by, country_updated_by_device_id, first_donation_date, first_donation_date_updated_at, first_donation_date_updated_by, first_donation_date_updated_by_device_id, notes, notes_updated_at, notes_updated_by, notes_updated_by_device_id, created_at, updated_at, created_by_user_id, created_by_device_id, updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id FROM donors WHERE id IN ({}) AND deleted_at IS NULL ORDER BY name ASC LIMIT ? OFFSET ?",
+            select_placeholders
+        );
+
+        let mut select_builder = QueryBuilder::new(&select_query);
+        for id in ids {
+            select_builder.push_bind(id.to_string());
+        }
+        select_builder.push_bind(params.per_page as i64);
+        select_builder.push_bind(offset as i64);
+
+        let rows = select_builder
+            .build_query_as::<DonorRow>()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
 
         let entities = rows
             .into_iter()

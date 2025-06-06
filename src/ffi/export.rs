@@ -38,7 +38,7 @@ fn block_on_async<F, T, E>(future: F) -> Result<T, E>
 where 
     F: std::future::Future<Output = Result<T, E>>,
 {
-    crate::ffi::block_on_async(future)
+            crate::ffi::block_on_async(future)
 }
 
 /// Helper to create auth context from token
@@ -515,7 +515,7 @@ pub unsafe extern "C" fn export_workshops_all(
         let target_path = options["target_path"].as_str().map(PathBuf::from);
         
         let export_request = ExportRequest {
-            filters: vec![EntityFilter::WorkshopsAll],
+            filters: vec![EntityFilter::WorkshopsAll { include_participants: true }],
             include_blobs,
             target_path,
         };
@@ -925,7 +925,7 @@ pub unsafe extern "C" fn export_workshops_by_date_range(
         let target_path = options["target_path"].as_str().map(PathBuf::from);
         
         let export_request = ExportRequest {
-            filters: vec![EntityFilter::WorkshopsByDateRange { start_date, end_date }],
+            filters: vec![EntityFilter::WorkshopsByDateRange { start_date, end_date, include_participants: true }],
             include_blobs,
             target_path,
         };

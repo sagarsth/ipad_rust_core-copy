@@ -16,6 +16,7 @@ use std::sync::Arc;
 use log::{debug, error, warn};
 use crate::domains::user::repository::MergeableEntityRepository;
 use crate::domains::sync::types::MergeOutcome;
+use sqlx::QueryBuilder;
 
 /// Trait defining workshop-participant relationship repository operations
 #[async_trait]
@@ -107,6 +108,19 @@ pub trait WorkshopParticipantRepository: Send + Sync + MergeableEntityRepository
     
     /// Find a workshop-participant link by its own unique ID
     async fn find_by_id(&self, id: Uuid) -> DomainResult<WorkshopParticipant>;
+
+    /// Find all workshop participants with pagination
+    async fn find_all(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<WorkshopParticipant>>;
+
+    /// Find workshop participants by specific IDs
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<WorkshopParticipant>>;
 
     /// Hard delete a workshop-participant link by its own unique ID within a transaction
     async fn hard_delete_link_by_id_with_tx<'t>(
@@ -987,6 +1001,103 @@ impl WorkshopParticipantRepository for SqliteWorkshopParticipantRepository {
         .map_err(DbError::from)?
         .ok_or_else(|| DomainError::EntityNotFound("WorkshopParticipant".to_string(), id))?;
         Self::map_row_to_entity(row)
+    }
+
+    async fn find_all(
+        &self,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<WorkshopParticipant>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM workshop_participants WHERE deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, WorkshopParticipantRow>(
+            "SELECT * FROM workshop_participants WHERE deleted_at IS NULL ORDER BY created_at ASC LIMIT ? OFFSET ?"
+        )
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<WorkshopParticipant>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<WorkshopParticipant>> {
+        if ids.is_empty() {
+            return Ok(PaginatedResult::new(Vec::new(), 0, params));
+        }
+
+        let offset = (params.page - 1) * params.per_page;
+
+        // Build COUNT query with dynamic placeholders
+        let count_placeholders = vec!["?"; ids.len()].join(", ");
+        let count_query = format!(
+            "SELECT COUNT(*) FROM workshop_participants WHERE id IN ({}) AND deleted_at IS NULL",
+            count_placeholders
+        );
+
+        let mut count_builder = QueryBuilder::new(&count_query);
+        for id in ids {
+            count_builder.push_bind(id.to_string());
+        }
+
+        let total: i64 = count_builder
+            .build_query_scalar()
+            .fetch_one(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        // Build SELECT query with dynamic placeholders
+        let select_placeholders = vec!["?"; ids.len()].join(", ");
+        let select_query = format!(
+            "SELECT * FROM workshop_participants WHERE id IN ({}) AND deleted_at IS NULL ORDER BY created_at ASC LIMIT ? OFFSET ?",
+            select_placeholders
+        );
+
+        let mut select_builder = QueryBuilder::new(&select_query);
+        for id in ids {
+            select_builder.push_bind(id.to_string());
+        }
+        select_builder.push_bind(params.per_page as i64);
+        select_builder.push_bind(offset as i64);
+
+        let rows = select_builder
+            .build_query_as::<WorkshopParticipantRow>()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<WorkshopParticipant>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
     }
 
     async fn hard_delete_link_by_id_with_tx<'t>(
