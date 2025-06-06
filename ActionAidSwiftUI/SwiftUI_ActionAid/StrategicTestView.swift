@@ -212,6 +212,29 @@ struct StrategicTestView: View {
                     .testButtonStyle(.red)
                     .disabled(adminGoalId == nil)
                     
+                    Button("🔍 Debug Compression System") {
+                        Task { await debugCompressionSystem() }
+                    }
+                    .testButtonStyle(.purple)
+                    .disabled(uploadedDocuments.isEmpty)
+                    
+                    Button("🔄 Retry Failed Compressions") {
+                        Task { await retryFailedCompressions() }
+                    }
+                    .testButtonStyle(.orange)
+                    
+                    Button("🔧 Manual Compression Test") {
+                        Task { await manuallyTriggerCompression() }
+                    }
+                    .testButtonStyle(.cyan)
+                    .disabled(uploadedDocuments.isEmpty)
+                    
+                    Button("📋 Get Document Status Details") {
+                        Task { await getDetailedDocumentStatus() }
+                    }
+                    .testButtonStyle(.indigo)
+                    .disabled(uploadedDocuments.isEmpty)
+                    
                     Button("🔄 Reset Test") {
                         resetTest()
                     }
@@ -1082,6 +1105,250 @@ struct StrategicTestView: View {
             offline_mode: false
         )
     }
+    
+    private func getLastError() -> String {
+        if let errorPtr = get_last_error() {
+            if let errorStr = String(cString: errorPtr, encoding: .utf8) {
+                let result = errorStr.isEmpty ? "No error" : errorStr
+                free_string(errorPtr)
+                return result
+            }
+            free_string(errorPtr)
+        }
+        return "Unknown error"
+    }
+
+    // MARK: - Debug Functions for Compression Issues
+    
+    func debugCompressionSystem() async {
+        updateResults("\n--- 🔍 DEBUG: Compression System Analysis ---")
+        
+        // Check each document individually
+        for doc in uploadedDocuments {
+            await debugIndividualDocument(doc)
+        }
+        
+        // Check what's in the queue at database level
+        await debugCompressionQueue()
+        
+        // Check for stuck processing jobs
+        await debugStuckJobs()
+    }
+    
+    func debugIndividualDocument(_ doc: DocumentInfo) async {
+        updateResults("\n🔍 Debugging document: \(doc.filename) (ID: \(doc.id.prefix(8))...)")
+        
+        // Check compression status from FFI
+        let payload = """
+        {"document_id": "\(doc.id)"}
+        """
+        
+        var result: UnsafeMutablePointer<CChar>?
+        let status = compression_get_document_status(payload, &result)
+        
+        if let resultStr = result {
+            defer { compression_free(resultStr) }
+            
+            if status == 0 {
+                let response = String(cString: resultStr)
+                updateResults("   📄 FFI Status Response: \(response)")
+            } else {
+                updateResults("   ❌ FFI Error getting status (code: \(status))")
+            }
+        }
+        
+        // Check if document is in use
+        let inUsePayload = """
+        {"document_id": "\(doc.id)"}
+        """
+        
+        var inUseResult: UnsafeMutablePointer<CChar>?
+        let inUseStatus = compression_is_document_in_use(inUsePayload, &inUseResult)
+        
+        if let resultStr = inUseResult {
+            defer { compression_free(resultStr) }
+            
+            if inUseStatus == 0 {
+                let response = String(cString: resultStr)
+                updateResults("   👤 In Use Status: \(response)")
+            }
+        }
+    }
+    
+    func debugCompressionQueue() async {
+        updateResults("\n🔍 Checking compression queue entries...")
+        
+        // Try to get detailed queue entries (this might not work if not implemented)
+        let payload = """
+        {"status": "processing", "limit": 100, "offset": 0}
+        """
+        
+        var result: UnsafeMutablePointer<CChar>?
+        let status = compression_get_queue_entries(payload, &result)
+        
+        if let resultStr = result {
+            defer { compression_free(resultStr) }
+            
+            if status == 0 {
+                let response = String(cString: resultStr)
+                updateResults("   📋 Queue Entries: \(response)")
+            } else {
+                updateResults("   ⚠️ Queue entries function not fully implemented")
+            }
+        }
+    }
+    
+    func debugStuckJobs() async {
+        updateResults("\n🔍 Checking for potential stuck jobs...")
+        
+        // Get current queue status
+        await checkCompressionStatus()
+        
+        // If we have processing jobs but no completed jobs after some time, that indicates stuck jobs
+        if let queueStatus = compressionQueueStatus {
+            if queueStatus.processing_count > 0 && queueStatus.completed_count == 0 {
+                updateResults("   ⚠️ WARNING: \(queueStatus.processing_count) jobs stuck in processing")
+                updateResults("   💡 This suggests the CompressionWorker may not be running properly")
+                
+                // Try to manually trigger queue processing
+                updateResults("   🔄 Attempting to manually trigger queue processing...")
+                let manualStatus = compression_process_queue_now()
+                if manualStatus == 0 {
+                    updateResults("   ✅ Manual queue trigger sent")
+                } else {
+                    updateResults("   ❌ Manual queue trigger failed")
+                }
+            }
+        }
+    }
+    
+    func retryFailedCompressions() async {
+        updateResults("\n--- 🔄 Retrying Failed Compressions ---")
+        
+        var result: UnsafeMutablePointer<CChar>?
+        let status = compression_retry_all_failed(&result)
+        
+        if let resultStr = result {
+            defer { compression_free(resultStr) }
+            
+            if status == 0 {
+                let response = String(cString: resultStr)
+                updateResults("✅ Retry response: \(response)")
+            } else {
+                updateResults("❌ Failed to retry compressions")
+            }
+        }
+    }
+
+    func manuallyTriggerCompression() async {
+        updateResults("\n--- 🔧 Manual Compression Trigger ---")
+        
+        if let firstDoc = uploadedDocuments.first {
+            updateResults("🔧 Manually triggering compression for: \(firstDoc.filename)")
+            
+            let payload = """
+            {
+                "document_id": "\(firstDoc.id)",
+                "config": {
+                    "method": "Lossless",
+                    "quality_level": 75,
+                    "min_size_bytes": 1024
+                }
+            }
+            """
+            
+            var result: UnsafeMutablePointer<CChar>?
+            let status = compression_compress_document(payload, &result)
+            
+            if let resultStr = result {
+                defer { compression_free(resultStr) }
+                
+                if status == 0 {
+                    let response = String(cString: resultStr)
+                    updateResults("✅ Manual compression response: \(response)")
+                    
+                    // Try to parse the response to see compression details
+                    if let data = response.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        
+                        if let originalSize = json["original_size"] as? Int64,
+                           let compressedSize = json["compressed_size"] as? Int64,
+                           let percentage = json["space_saved_percentage"] as? Double {
+                            
+                            updateResults("📊 Compression Details:")
+                            updateResults("   Original: \(formatFileSize(Int(originalSize)))")
+                            updateResults("   Compressed: \(formatFileSize(Int(compressedSize)))")
+                            updateResults("   Space Saved: \(String(format: "%.1f", percentage))%")
+                            
+                            if compressedSize >= originalSize {
+                                updateResults("⚠️ WARNING: Compressed size >= original size!")
+                                updateResults("   This suggests compression is not effective for this file type")
+                            }
+                        }
+                    }
+                } else {
+                    let error = getLastError()
+                    updateResults("❌ Manual compression failed: \(error)")
+                }
+            } else {
+                updateResults("❌ Manual compression returned null")
+            }
+        } else {
+            updateResults("❌ No documents available for manual compression")
+        }
+        
+        // Check document status after manual compression
+        await checkCompressionStatus()
+    }
+    
+    func getDetailedDocumentStatus() async {
+        updateResults("\n--- 📋 Detailed Document Status ---")
+        
+        for doc in uploadedDocuments {
+            updateResults("\n🔍 Document: \(doc.filename) (ID: \(doc.id.prefix(8))...)")
+            
+            // Get detailed document info from FFI
+            let documentPayload = """
+            {
+                "id": "\(doc.id)",
+                "auth": \(getAuthContextAsJSONString())
+            }
+            """
+            
+            var result: UnsafeMutablePointer<CChar>?
+            let status = document_get(documentPayload, &result)
+            
+            if let resultStr = result {
+                defer { document_free(resultStr) }
+                
+                if status == 0 {
+                    let response = String(cString: resultStr)
+                    
+                    if let data = response.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        
+                        updateResults("   📄 Document Status:")
+                        updateResults("      Compression Status: \(json["compression_status"] as? String ?? "unknown")")
+                        updateResults("      Has Error: \(json["has_error"] as? Bool ?? false)")
+                        updateResults("      Error Message: \(json["error_message"] as? String ?? "none")")
+                        updateResults("      Original Size: \(formatFileSize(json["size_bytes"] as? Int ?? 0))")
+                        updateResults("      Compressed Size: \(formatFileSize(json["compressed_size_bytes"] as? Int ?? 0))")
+                        updateResults("      Compressed Path: \(json["compressed_file_path"] as? String ?? "none")")
+                        
+                        // Check if compressed file actually exists
+                        if let compressedPath = json["compressed_file_path"] as? String,
+                           !compressedPath.isEmpty && compressedPath != "none" {
+                            updateResults("      Compressed File Exists: checking...")
+                            // We can't easily check file existence from Swift, but we can note the path
+                        }
+                    }
+                } else {
+                    let error = getLastError()
+                    updateResults("   ❌ Failed to get document details: \(error)")
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Enhanced Document Row
@@ -1483,6 +1750,15 @@ func compression_compress_document(_ payload: UnsafePointer<CChar>, _ result: Un
 @_silgen_name("compression_free")
 func compression_free(_ ptr: UnsafeMutablePointer<CChar>)
 
+@_silgen_name("compression_get_queue_entries")
+func compression_get_queue_entries(_ payload: UnsafePointer<CChar>, _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32
+
+@_silgen_name("compression_process_queue_now")
+func compression_process_queue_now() -> Int32
+
+@_silgen_name("compression_retry_all_failed")
+func compression_retry_all_failed(_ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32
+
 // Add missing FFI declaration
 @_silgen_name("document_type_list")
 func document_type_list(_ payload: UnsafePointer<CChar>, _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32
@@ -1501,6 +1777,12 @@ func strategic_goal_free(_ ptr: UnsafeMutablePointer<CChar>)
 
 @_silgen_name("document_unregister_in_use")
 func document_unregister_in_use(_ payload: UnsafePointer<CChar>) -> Int32
+
+@_silgen_name("document_get")
+func document_get(_ payload: UnsafePointer<CChar>, _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> Int32
+
+@_silgen_name("document_free")
+func document_free(_ ptr: UnsafeMutablePointer<CChar>)
 
 // Extension for button styling remains the same
 extension Button {

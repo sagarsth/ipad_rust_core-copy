@@ -31,22 +31,62 @@ impl Compressor for ImageCompressor {
         // Force quality_level into valid range
         let quality = quality_level.clamp(1, 100) as u8;
         
+        println!("🖼️ [IMAGE_COMPRESSOR] Starting image compression: {} bytes, method: {:?}, quality: {}", 
+                 data.len(), method, quality);
+        
         // Run image operations in a blocking task to avoid blocking the runtime
         task::spawn_blocking(move || -> DomainResult<Vec<u8>> {
+            println!("🖼️ [IMAGE_COMPRESSOR] Detecting image format...");
+            
             // Detect image format
             let format = image::guess_format(&data)
-                .map_err(|e| DomainError::Internal(format!("Failed to detect image format: {}", e)))?;
+                .map_err(|e| {
+                    println!("❌ [IMAGE_COMPRESSOR] Failed to detect image format: {}", e);
+                    DomainError::Internal(format!("Failed to detect image format: {}", e))
+                })?;
+            
+            println!("🖼️ [IMAGE_COMPRESSOR] Detected format: {:?}", format);
             
             // Load image
+            println!("🖼️ [IMAGE_COMPRESSOR] Loading image from memory...");
             let img = image::load_from_memory(&data)
-                .map_err(|e| DomainError::Internal(format!("Failed to load image: {}", e)))?;
+                .map_err(|e| {
+                    println!("❌ [IMAGE_COMPRESSOR] Failed to load image: {}", e);
+                    DomainError::Internal(format!("Failed to load image: {}", e))
+                })?;
             
-            match method {
-                CompressionMethod::Lossy => compress_lossy(img, format, quality),
-                CompressionMethod::Lossless => compress_lossless(img, format),
-                _ => compress_default(img, format, quality),
+            println!("🖼️ [IMAGE_COMPRESSOR] Image loaded successfully: {}x{}", img.width(), img.height());
+            
+            let result = match method {
+                CompressionMethod::Lossy => {
+                    println!("🖼️ [IMAGE_COMPRESSOR] Applying lossy compression...");
+                    compress_lossy(img, format, quality)
+                },
+                CompressionMethod::Lossless => {
+                    println!("🖼️ [IMAGE_COMPRESSOR] Applying lossless compression...");
+                    compress_lossless(img, format)
+                },
+                _ => {
+                    println!("🖼️ [IMAGE_COMPRESSOR] Applying default compression...");
+                    compress_default(img, format, quality)
+                },
+            };
+            
+            match result {
+                Ok(compressed_data) => {
+                    println!("✅ [IMAGE_COMPRESSOR] Compression successful: {} bytes -> {} bytes", 
+                             data.len(), compressed_data.len());
+                    Ok(compressed_data)
+                },
+                Err(e) => {
+                    println!("❌ [IMAGE_COMPRESSOR] Compression failed: {:?}", e);
+                    Err(e)
+                }
             }
-        }).await.map_err(|e| DomainError::Internal(format!("Task join error: {}", e)))?
+        }).await.map_err(|e| {
+            println!("❌ [IMAGE_COMPRESSOR] Task join error: {}", e);
+            DomainError::Internal(format!("Task join error: {}", e))
+        })?
     }
 }
 

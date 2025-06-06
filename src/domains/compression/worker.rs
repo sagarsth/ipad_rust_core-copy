@@ -71,11 +71,14 @@ impl CompressionWorker {
         // Create interval timer for polling
         let mut interval = tokio::time::interval(Duration::from_millis(self.interval_ms));
         
+        println!("🚀 [COMPRESSION_WORKER] Starting compression worker with {} max concurrent jobs, polling every {}ms", 
+                 self.max_concurrent_jobs, self.interval_ms);
+        
         loop {
             // First check if shutdown requested
             if let Some(ref mut signal) = self.shutdown_signal {
                 if signal.try_recv().is_ok() {
-                    println!("Shutdown signal received, stopping compression worker");
+                    println!("🛑 [COMPRESSION_WORKER] Shutdown signal received, stopping compression worker");
                     break;
                 }
             }
@@ -83,31 +86,48 @@ impl CompressionWorker {
             tokio::select! {
                 _ = interval.tick() => {
                     // Check and clean up completed jobs
+                    let initial_job_count = running_jobs.len();
                     running_jobs.retain(|handle| !handle.is_finished());
+                    let completed_jobs = initial_job_count - running_jobs.len();
+                    
+                    if completed_jobs > 0 {
+                        println!("✅ [COMPRESSION_WORKER] {} jobs completed, {} still running", completed_jobs, running_jobs.len());
+                    }
                     
                     // Only start new jobs if we're below max concurrent limit
                     if running_jobs.len() < self.max_concurrent_jobs {
                         // Get next document to process
                         match self.compression_repo.get_next_document_for_compression().await {
                             Ok(Some(queue_entry)) => {
+                                println!("📄 [COMPRESSION_WORKER] Got document to process: {} (attempts: {}, status: {})", 
+                                         queue_entry.document_id, queue_entry.attempts, queue_entry.status);
+                                
                                 // Check if document is in use
                                 let document_id = queue_entry.document_id;
                                 let is_in_use = match self.compression_service.is_document_in_use(document_id).await {
-                                    Ok(true) => true,
-                                    Ok(false) => false,
+                                    Ok(true) => {
+                                        println!("⏸️ [COMPRESSION_WORKER] Document {} is in use, skipping for now", document_id);
+                                        true
+                                    },
+                                    Ok(false) => {
+                                        println!("✅ [COMPRESSION_WORKER] Document {} not in use, proceeding with compression", document_id);
+                                        false
+                                    },
                                     Err(e) => {
-                                        eprintln!("Error checking if document is in use: {:?}", e);
+                                        println!("⚠️ [COMPRESSION_WORKER] Error checking if document {} is in use: {:?}", document_id, e);
                                         false
                                     }
                                 };
                                 
                                 if is_in_use {
                                     // Document is in use, requeue for later
-                                    let _ = self.compression_repo.update_queue_entry_status(
+                                    if let Err(e) = self.compression_repo.update_queue_entry_status(
                                         queue_entry.id,
                                         "pending", // Back to pending
                                         Some("Document is in use"),
-                                    ).await;
+                                    ).await {
+                                        println!("❌ [COMPRESSION_WORKER] Failed to requeue document {}: {:?}", document_id, e);
+                                    }
                                     continue;
                                 }
                                 
@@ -116,62 +136,93 @@ impl CompressionWorker {
                                 let repo = self.compression_repo.clone();
                                 let pool = self.pool.clone();
                                 
+                                println!("🚀 [COMPRESSION_WORKER] Starting compression job for document {}", document_id);
+                                
                                 let job_handle = tokio::spawn(async move {
+                                    println!("🔄 [COMPRESSION_JOB] Processing document {}", document_id);
+                                    
                                     // Process the document
+                                    let start_time = std::time::Instant::now();
                                     let result = service.compress_document(document_id, None).await;
+                                    let duration = start_time.elapsed();
                                     
                                     match result {
                                         Ok(compression_result) => {
                                             // Successfully compressed
+                                            println!("✅ [COMPRESSION_JOB] Document {} compressed successfully in {:?}", 
+                                                     document_id, duration);
+                                            println!("   📊 Original: {} bytes, Compressed: {} bytes, Saved: {:.1}%",
+                                                     compression_result.original_size,
+                                                     compression_result.compressed_size,
+                                                     compression_result.space_saved_percentage);
                                             
-                                            // If compression successful and we have a compressed file,
-                                            // queue the original file for eventual deletion
-                                            let compressed_path = compression_result.compressed_file_path;
-
                                             // Queue original file for deletion after grace period
-                                            queue_original_for_deletion(pool, document_id).await
-                                                .unwrap_or_else(|e| {
-                                                    eprintln!("Failed to queue original file for deletion: {:?}", e)
-                                                });
-                                            
+                                            if let Err(e) = queue_original_for_deletion(pool, document_id).await {
+                                                println!("⚠️ [COMPRESSION_JOB] Failed to queue original file for deletion: {:?}", e);
+                                            }
                                         },
                                         Err(e) => {
                                             // Compression failed - error already logged in service
-                                            eprintln!("Compression job failed for document {}: {:?}", document_id, e);
+                                            println!("❌ [COMPRESSION_JOB] Document {} compression failed after {:?}: {:?}", 
+                                                     document_id, duration, e);
                                         }
                                     }
+                                    
+                                    println!("🏁 [COMPRESSION_JOB] Job finished for document {}", document_id);
                                 });
                                 
                                 running_jobs.push(job_handle);
+                                println!("📈 [COMPRESSION_WORKER] Now running {} jobs (max: {})", running_jobs.len(), self.max_concurrent_jobs);
                             },
                             Ok(None) => {
-                                // No documents in queue, nothing to do
+                                // No documents in queue - only log this occasionally to avoid spam
+                                static mut LAST_NO_WORK_LOG: Option<std::time::Instant> = None;
+                                let now = std::time::Instant::now();
+                                unsafe {
+                                    if let Some(last) = LAST_NO_WORK_LOG {
+                                        if last.elapsed().as_secs() >= 30 {
+                                            println!("😴 [COMPRESSION_WORKER] No documents in queue, {} jobs running", running_jobs.len());
+                                            LAST_NO_WORK_LOG = Some(now);
+                                        }
+                                    } else {
+                                        println!("😴 [COMPRESSION_WORKER] No documents in queue, {} jobs running", running_jobs.len());
+                                        LAST_NO_WORK_LOG = Some(now);
+                                    }
+                                }
                             },
                             Err(e) => {
-                                eprintln!("Error getting next document for compression: {:?}", e);
+                                println!("❌ [COMPRESSION_WORKER] Error fetching next compression job: {:?}", e);
+                            }
+                        }
+                    } else {
+                        // At capacity - only log this occasionally
+                        static mut LAST_CAPACITY_LOG: Option<std::time::Instant> = None;
+                        let now = std::time::Instant::now();
+                        unsafe {
+                            if let Some(last) = LAST_CAPACITY_LOG {
+                                if last.elapsed().as_secs() >= 10 {
+                                    println!("🚦 [COMPRESSION_WORKER] At capacity: {} jobs running (max: {})", running_jobs.len(), self.max_concurrent_jobs);
+                                    LAST_CAPACITY_LOG = Some(now);
+                                }
+                            } else {
+                                println!("🚦 [COMPRESSION_WORKER] At capacity: {} jobs running (max: {})", running_jobs.len(), self.max_concurrent_jobs);
+                                LAST_CAPACITY_LOG = Some(now);
                             }
                         }
                     }
                 }
-                else => {
-                    // No other select arms, continue with the loop
-                }
             }
         }
         
-        // On shutdown, wait for running jobs to complete with a timeout
-        for handle in running_jobs {
-            match tokio::time::timeout(Duration::from_secs(30), handle).await {
-                Ok(_) => {
-                    // Job completed normally
-                },
-                Err(_) => {
-                    // Job did not complete within timeout, could abort if needed
-                    // handle.abort();
-                    println!("Compression job timed out during shutdown");
-                }
+        // Wait for all jobs to complete on shutdown
+        println!("🛑 [COMPRESSION_WORKER] Waiting for {} remaining jobs to complete...", running_jobs.len());
+        for job in running_jobs {
+            if let Err(e) = job.await {
+                println!("⚠️ [COMPRESSION_WORKER] Job failed to complete cleanly: {:?}", e);
             }
         }
+        
+        println!("✅ [COMPRESSION_WORKER] All compression jobs completed, worker shut down");
     }
 }
 

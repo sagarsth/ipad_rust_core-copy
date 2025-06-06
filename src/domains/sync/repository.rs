@@ -710,10 +710,13 @@ impl SyncRepository for SqliteSyncRepository {
         
         match row {
             Some(row) => {
-                let user_id = Uuid::parse_str(&row.user_id)
-                    .map_err(|_| DomainError::Validation(ValidationError::format(
-                        "user_id", &format!("Invalid UUID format: {}", row.user_id)
-                    )))?;
+                let user_id = match &row.user_id {
+                    Some(user_id_str) => Uuid::parse_str(user_id_str)
+                        .map_err(|_| DomainError::Validation(ValidationError::format(
+                            "user_id", &format!("Invalid UUID format: {}", user_id_str)
+                        )))?,
+                    None => return Err(DomainError::Validation(ValidationError::required("user_id")))
+                };
                 
                 let last_upload = match &row.last_upload_timestamp {
                     Some(ts) => Some(

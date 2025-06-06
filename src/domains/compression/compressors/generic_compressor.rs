@@ -26,8 +26,12 @@ impl Compressor for GenericCompressor {
         method: CompressionMethod,
         quality_level: i32,
     ) -> DomainResult<Vec<u8>> {
+        println!("🗜️ [GENERIC_COMPRESSOR] Starting generic compression: {} bytes, method: {:?}, quality: {}", 
+                 data.len(), method, quality_level);
+        
         // Don't try to compress if method is None
         if method == CompressionMethod::None {
+            println!("🗜️ [GENERIC_COMPRESSOR] Method is None, returning original data");
             return Ok(data);
         }
         
@@ -44,15 +48,34 @@ impl Compressor for GenericCompressor {
             _ => 9,
         };
         
+        println!("🗜️ [GENERIC_COMPRESSOR] Using compression level: {}", level);
+        
         // Run compression in a blocking task
         task::spawn_blocking(move || -> DomainResult<Vec<u8>> {
+            println!("🗜️ [GENERIC_COMPRESSOR] Creating gzip encoder...");
             let mut encoder = GzEncoder::new(Vec::new(), Compression::new(level));
             
+            println!("🗜️ [GENERIC_COMPRESSOR] Writing data to encoder...");
             encoder.write_all(&data)
-                .map_err(|e| DomainError::Internal(format!("Compression write error: {}", e)))?;
+                .map_err(|e| {
+                    println!("❌ [GENERIC_COMPRESSOR] Compression write error: {}", e);
+                    DomainError::Internal(format!("Compression write error: {}", e))
+                })?;
                 
-            encoder.finish()
-                .map_err(|e| DomainError::Internal(format!("Compression finish error: {}", e)))
-        }).await.map_err(|e| DomainError::Internal(format!("Task join error: {}", e)))?
+            println!("🗜️ [GENERIC_COMPRESSOR] Finishing compression...");
+            let compressed_data = encoder.finish()
+                .map_err(|e| {
+                    println!("❌ [GENERIC_COMPRESSOR] Compression finish error: {}", e);
+                    DomainError::Internal(format!("Compression finish error: {}", e))
+                })?;
+            
+            println!("✅ [GENERIC_COMPRESSOR] Compression successful: {} bytes -> {} bytes", 
+                     data.len(), compressed_data.len());
+            
+            Ok(compressed_data)
+        }).await.map_err(|e| {
+            println!("❌ [GENERIC_COMPRESSOR] Task join error: {}", e);
+            DomainError::Internal(format!("Task join error: {}", e))
+        })?
     }
 }

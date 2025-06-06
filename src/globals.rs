@@ -22,7 +22,7 @@ use crate::domains::document::repository::{MediaDocumentRepository, SqliteMediaD
 use crate::domains::document::types::{MediaDocument, DocumentType}; // Assuming MediaDocument type
 use crate::domains::compression::repository::{CompressionRepository, SqliteCompressionRepository};
 use crate::domains::compression::service::{CompressionService, CompressionServiceImpl};
-use crate::domains::compression::manager::{CompressionManager, CompressionManagerImpl};
+use crate::domains::compression::manager::{CompressionManager, CompressionManagerImpl, StubCompressionManager};
 use crate::domains::core::file_storage_service::{FileStorageService, LocalFileStorageService};
 use crate::domains::document::file_deletion_worker::FileDeletionWorker;
 use crate::domains::sync::cloud_storage::{CloudStorageService, ApiCloudStorageService};
@@ -498,13 +498,16 @@ async fn initialize_internal(
     println!("✅ [GLOBALS] Database pool stored");
 
     // Run database migrations BEFORE creating services
-    println!("🔄 [GLOBALS] Running database migrations...");
+    println!("🔄 [GLOBALS] Running database initialization with consolidated schema...");
+    // Since we now use a single consolidated schema, we call our custom initializer.
+    // This approach is not compatible with `cargo sqlx prepare` in the traditional sense,
+    // but it ensures the entire schema is applied from the single file.
     crate::db_migration::initialize_database().await
         .map_err(|e| {
-            println!("❌ [GLOBALS] Database migration failed: {}", e);
+            println!("❌ [GLOBALS] Database initialization failed: {}", e);
             e
         })?;
-    println!("✅ [GLOBALS] Database migrations completed");
+    println!("✅ [GLOBALS] Database initialization completed");
 
     // Ensure critical lookup data exists
     println!("🔧 [GLOBALS] Ensuring critical lookup data...");
@@ -945,13 +948,31 @@ async fn initialize_internal(
         media_document_repo.clone(),
         None, // ghostscript_path
     ));
-    let compression_manager: Arc<dyn CompressionManager> = Arc::new(CompressionManagerImpl::new(
+    
+    // Use CompressionWorker instead of the problematic CompressionManager
+    // This avoids the unsafe global pool access that was causing crashes
+    let comp_pool = pool.clone();
+    let comp_service = compression_service.clone();
+    let comp_repo = compression_repo.clone();
+    tokio::spawn(async move {
+        let worker = crate::domains::compression::worker::CompressionWorker::new(
+            comp_service,
+            comp_repo,
+            comp_pool,
+            Some(5_000), // poll interval ms
+            Some(2),     // max_concurrent_jobs
+        );
+        let (handle, _shutdown_tx) = worker.start();
+        if let Err(e) = handle.await {
+            log::error!("CompressionWorker exited: {:?}", e);
+        }
+    });
+    
+    // Create a stub manager for FFI compatibility
+    let compression_manager: Arc<dyn CompressionManager> = Arc::new(StubCompressionManager::new(
         compression_service.clone(),
         compression_repo.clone(),
-        2,        // max_concurrent_jobs
-        5_000,    // poll interval ms
     ));
-    let _ = compression_manager.start();
 
     // FileDeletionWorker
     let fd_pool = pool.clone();

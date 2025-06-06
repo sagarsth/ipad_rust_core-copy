@@ -1,0 +1,1677 @@
+-- ========================================================================================================
+-- CONSOLIDATED DATABASE MIGRATION - FINAL SCHEMA
+-- Description: Single migration representing the final database schema state
+-- Note: This migration assumes a fresh database with no existing data
+-- 
+-- Consolidates migrations from:
+--   - 20240320000000_basic.sql through 20250524000000_allow_null_user_ids.sql
+--   - Total of 24 migration files consolidated
+-- 
+-- Key features:
+--   - Last Write Wins (LWW) sync support with field-level tracking
+--   - Device ID tracking for multi-device sync
+--   - Document management with compression and error handling
+--   - Comprehensive audit and change logging
+--   - Sync infrastructure with conflict resolution
+--   - Proper foreign key constraints with appropriate cascade/restrict rules
+--   - All sync_priority fields use TEXT type ('high', 'normal', 'low', 'never')
+--   - Nullable user_id fields for system operations
+-- ========================================================================================================
+
+-- Disable foreign keys during schema creation
+PRAGMA foreign_keys = OFF;
+
+-- ========================================================================================================
+-- CORE TABLES
+-- ========================================================================================================
+
+-- Users Table with LWW and Device Tracking
+CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY, -- UUID
+    
+    -- Core fields
+    email TEXT NOT NULL UNIQUE,
+    email_updated_at TEXT,
+    email_updated_by TEXT,
+    email_updated_by_device_id TEXT,
+    
+    password_hash TEXT NOT NULL,
+    
+    name TEXT NOT NULL,
+    name_updated_at TEXT,
+    name_updated_by TEXT,
+    name_updated_by_device_id TEXT,
+    
+    role TEXT NOT NULL CHECK (role IN ('admin', 'field_tl', 'field')),
+    role_updated_at TEXT,
+    role_updated_by TEXT,
+    role_updated_by_device_id TEXT,
+    
+    last_login TEXT DEFAULT NULL,
+    
+    active INTEGER NOT NULL DEFAULT 1,
+    active_updated_at TEXT,
+    active_updated_by TEXT,
+    active_updated_by_device_id TEXT,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    -- Soft delete
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    -- Self-referential foreign keys
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (email_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (name_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (role_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (active_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Users indexes
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_updated_at ON users(updated_at);
+CREATE INDEX IF NOT EXISTS idx_users_deleted_at ON users(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_users_created_by ON users(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_users_updated_by ON users(updated_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_users_name ON users(name);
+CREATE INDEX IF NOT EXISTS idx_users_created_by_device_id ON users(created_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_users_updated_by_device_id ON users(updated_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_users_deleted_by_device_id ON users(deleted_by_device_id);
+
+-- ========================================================================================================
+-- LOOKUP TABLES
+-- ========================================================================================================
+
+-- Status Types Table
+CREATE TABLE IF NOT EXISTS status_types (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    
+    value TEXT NOT NULL UNIQUE,
+    value_updated_at TEXT,
+    value_updated_by TEXT,
+    value_updated_by_device_id TEXT,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (value_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Status types indexes
+CREATE INDEX IF NOT EXISTS idx_status_types_value ON status_types(value);
+CREATE INDEX IF NOT EXISTS idx_status_types_deleted_at ON status_types(deleted_at);
+
+-- Initial status types data
+INSERT OR IGNORE INTO status_types (id, value, created_at, updated_at) VALUES
+    (1, 'On Track', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    (2, 'At Risk', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    (3, 'Delayed', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    (4, 'Completed', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+
+-- ========================================================================================================
+-- MAIN ENTITY TABLES
+-- ========================================================================================================
+
+-- Strategic Goals Table
+CREATE TABLE IF NOT EXISTS strategic_goals (
+    id TEXT PRIMARY KEY,
+    
+    objective_code TEXT NOT NULL,
+    objective_code_updated_at TEXT,
+    objective_code_updated_by TEXT,
+    objective_code_updated_by_device_id TEXT,
+    
+    outcome TEXT,
+    outcome_updated_at TEXT,
+    outcome_updated_by TEXT,
+    outcome_updated_by_device_id TEXT,
+    
+    kpi TEXT,
+    kpi_updated_at TEXT,
+    kpi_updated_by TEXT,
+    kpi_updated_by_device_id TEXT,
+    
+    target_value REAL,
+    target_value_updated_at TEXT,
+    target_value_updated_by TEXT,
+    target_value_updated_by_device_id TEXT,
+    
+    actual_value REAL DEFAULT 0,
+    actual_value_updated_at TEXT,
+    actual_value_updated_by TEXT,
+    actual_value_updated_by_device_id TEXT,
+    
+    status_id INTEGER,
+    status_id_updated_at TEXT,
+    status_id_updated_by TEXT,
+    status_id_updated_by_device_id TEXT,
+    
+    responsible_team TEXT,
+    responsible_team_updated_at TEXT,
+    responsible_team_updated_by TEXT,
+    responsible_team_updated_by_device_id TEXT,
+    
+    sync_priority TEXT NOT NULL DEFAULT 'high' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    
+    -- Document references
+    supporting_documentation_ref TEXT NULL,
+    impact_assessment_ref TEXT NULL,
+    theory_of_change_ref TEXT NULL,
+    baseline_data_ref TEXT NULL,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (status_id) REFERENCES status_types(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (objective_code_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (outcome_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (kpi_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (target_value_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (actual_value_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (status_id_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (responsible_team_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Strategic goals indexes
+CREATE INDEX IF NOT EXISTS idx_strategic_goals_status ON strategic_goals(status_id);
+CREATE INDEX IF NOT EXISTS idx_strategic_goals_updated_at ON strategic_goals(updated_at);
+CREATE INDEX IF NOT EXISTS idx_strategic_goals_deleted_at ON strategic_goals(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_strategic_goals_created_by ON strategic_goals(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_strategic_goals_updated_by ON strategic_goals(updated_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_strategic_goals_objective_code ON strategic_goals(objective_code);
+CREATE INDEX IF NOT EXISTS idx_strategic_goals_sync_priority ON strategic_goals(sync_priority);
+CREATE INDEX IF NOT EXISTS idx_strategic_goals_created_by_device_id ON strategic_goals(created_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_strategic_goals_updated_by_device_id ON strategic_goals(updated_by_device_id);
+
+-- Projects Table
+CREATE TABLE IF NOT EXISTS projects (
+    id TEXT PRIMARY KEY,
+    strategic_goal_id TEXT NULL, -- Nullable
+    
+    name TEXT NOT NULL,
+    name_updated_at TEXT,
+    name_updated_by TEXT,
+    name_updated_by_device_id TEXT,
+    
+    objective TEXT,
+    objective_updated_at TEXT,
+    objective_updated_by TEXT,
+    objective_updated_by_device_id TEXT,
+    
+    outcome TEXT,
+    outcome_updated_at TEXT,
+    outcome_updated_by TEXT,
+    outcome_updated_by_device_id TEXT,
+    
+    status_id INTEGER,
+    status_id_updated_at TEXT,
+    status_id_updated_by TEXT,
+    status_id_updated_by_device_id TEXT,
+    
+    timeline TEXT,
+    timeline_updated_at TEXT,
+    timeline_updated_by TEXT,
+    timeline_updated_by_device_id TEXT,
+    
+    responsible_team TEXT,
+    responsible_team_updated_at TEXT,
+    responsible_team_updated_by TEXT,
+    responsible_team_updated_by_device_id TEXT,
+    
+    sync_priority TEXT NOT NULL DEFAULT 'high' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    
+    -- Document references
+    proposal_document_ref TEXT NULL,
+    budget_document_ref TEXT NULL,
+    logical_framework_ref TEXT NULL,
+    final_report_ref TEXT NULL,
+    monitoring_plan_ref TEXT NULL,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (strategic_goal_id) REFERENCES strategic_goals(id) ON DELETE SET NULL,
+    FOREIGN KEY (status_id) REFERENCES status_types(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (name_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (objective_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (outcome_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (status_id_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (timeline_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (responsible_team_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Projects indexes
+CREATE INDEX IF NOT EXISTS idx_projects_strategic_goal ON projects(strategic_goal_id);
+CREATE INDEX IF NOT EXISTS idx_projects_status ON projects(status_id);
+CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at);
+CREATE INDEX IF NOT EXISTS idx_projects_deleted_at ON projects(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_projects_created_by ON projects(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_projects_updated_by ON projects(updated_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(name);
+CREATE INDEX IF NOT EXISTS idx_projects_sync_priority ON projects(sync_priority);
+CREATE INDEX IF NOT EXISTS idx_projects_created_by_device_id ON projects(created_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_projects_updated_by_device_id ON projects(updated_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_projects_deleted_by_device_id ON projects(deleted_by_device_id);
+
+-- Activities Table
+CREATE TABLE IF NOT EXISTS activities (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NULL, -- Nullable
+    
+    description TEXT,
+    description_updated_at TEXT,
+    description_updated_by TEXT,
+    description_updated_by_device_id TEXT,
+    
+    kpi TEXT,
+    kpi_updated_at TEXT,
+    kpi_updated_by TEXT,
+    kpi_updated_by_device_id TEXT,
+    
+    target_value REAL,
+    target_value_updated_at TEXT,
+    target_value_updated_by TEXT,
+    target_value_updated_by_device_id TEXT,
+    
+    actual_value REAL DEFAULT 0,
+    actual_value_updated_at TEXT,
+    actual_value_updated_by TEXT,
+    actual_value_updated_by_device_id TEXT,
+    
+    status_id INTEGER,
+    status_id_updated_at TEXT,
+    status_id_updated_by TEXT,
+    status_id_updated_by_device_id TEXT,
+    
+    sync_priority TEXT NOT NULL DEFAULT 'high' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    
+    -- Document references
+    photo_evidence_ref TEXT NULL,
+    receipts_ref TEXT NULL,
+    signed_report_ref TEXT NULL,
+    monitoring_data_ref TEXT NULL,
+    output_verification_ref TEXT NULL,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT NOT NULL,
+    updated_by_user_id TEXT NOT NULL,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+    FOREIGN KEY (status_id) REFERENCES status_types(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (description_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (kpi_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (target_value_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (actual_value_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (status_id_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Activities indexes
+CREATE INDEX IF NOT EXISTS idx_activities_project ON activities(project_id);
+CREATE INDEX IF NOT EXISTS idx_activities_status ON activities(status_id);
+CREATE INDEX IF NOT EXISTS idx_activities_updated_at ON activities(updated_at);
+CREATE INDEX IF NOT EXISTS idx_activities_deleted_at ON activities(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_activities_created_by ON activities(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_activities_updated_by ON activities(updated_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_activities_sync_priority ON activities(sync_priority);
+CREATE INDEX IF NOT EXISTS idx_activities_created_by_device_id ON activities(created_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_activities_updated_by_device_id ON activities(updated_by_device_id);
+
+-- Participants Table
+CREATE TABLE IF NOT EXISTS participants (
+    id TEXT PRIMARY KEY,
+    
+    name TEXT NOT NULL,
+    name_updated_at TEXT,
+    name_updated_by TEXT,
+    name_updated_by_device_id TEXT,
+    
+    gender TEXT,
+    gender_updated_at TEXT,
+    gender_updated_by TEXT,
+    gender_updated_by_device_id TEXT,
+    
+    disability INTEGER DEFAULT 0,
+    disability_updated_at TEXT,
+    disability_updated_by TEXT,
+    disability_updated_by_device_id TEXT,
+    
+    disability_type TEXT DEFAULT NULL,
+    disability_type_updated_at TEXT,
+    disability_type_updated_by TEXT,
+    disability_type_updated_by_device_id TEXT,
+    
+    age_group TEXT,
+    age_group_updated_at TEXT,
+    age_group_updated_by TEXT,
+    age_group_updated_by_device_id TEXT,
+    
+    location TEXT,
+    location_updated_at TEXT,
+    location_updated_by TEXT,
+    location_updated_by_device_id TEXT,
+    
+    sync_priority TEXT NOT NULL DEFAULT 'high' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    
+    -- Document references
+    profile_photo_ref TEXT NULL,
+    identification_ref TEXT NULL,
+    consent_form_ref TEXT NULL,
+    needs_assessment_ref TEXT NULL,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (name_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (gender_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (disability_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (disability_type_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (age_group_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (location_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Participants indexes
+CREATE INDEX IF NOT EXISTS idx_participants_location ON participants(location);
+CREATE INDEX IF NOT EXISTS idx_participants_gender_age ON participants(gender, age_group);
+CREATE INDEX IF NOT EXISTS idx_participants_updated_at ON participants(updated_at);
+CREATE INDEX IF NOT EXISTS idx_participants_deleted_at ON participants(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_participants_created_by ON participants(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_participants_updated_by ON participants(updated_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_participants_name ON participants(name);
+CREATE INDEX IF NOT EXISTS idx_participants_sync_priority ON participants(sync_priority);
+CREATE INDEX IF NOT EXISTS idx_participants_created_by_device_id ON participants(created_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_participants_updated_by_device_id ON participants(updated_by_device_id);
+
+-- Workshops Table (updated schema)
+CREATE TABLE IF NOT EXISTS workshops (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NULL, -- Nullable
+    
+    purpose TEXT,
+    purpose_updated_at TEXT,
+    purpose_updated_by TEXT,
+    purpose_updated_by_device_id TEXT,
+    
+    event_date TEXT,
+    event_date_updated_at TEXT,
+    event_date_updated_by TEXT,
+    event_date_updated_by_device_id TEXT,
+    
+    location TEXT,
+    location_updated_at TEXT,
+    location_updated_by TEXT,
+    location_updated_by_device_id TEXT,
+    
+    budget TEXT, -- Stored as string for Decimal compatibility
+    budget_updated_at TEXT,
+    budget_updated_by TEXT,
+    budget_updated_by_device_id TEXT,
+    
+    actuals TEXT, -- Stored as string for Decimal compatibility
+    actuals_updated_at TEXT,
+    actuals_updated_by TEXT,
+    actuals_updated_by_device_id TEXT,
+    
+    participant_count INTEGER NOT NULL DEFAULT 0,
+    participant_count_updated_at TEXT,
+    participant_count_updated_by TEXT,
+    participant_count_updated_by_device_id TEXT,
+    
+    local_partner TEXT,
+    local_partner_updated_at TEXT,
+    local_partner_updated_by TEXT,
+    local_partner_updated_by_device_id TEXT,
+    
+    partner_responsibility TEXT,
+    partner_responsibility_updated_at TEXT,
+    partner_responsibility_updated_by TEXT,
+    partner_responsibility_updated_by_device_id TEXT,
+    
+    partnership_success TEXT,
+    partnership_success_updated_at TEXT,
+    partnership_success_updated_by TEXT,
+    partnership_success_updated_by_device_id TEXT,
+    
+    capacity_challenges TEXT,
+    capacity_challenges_updated_at TEXT,
+    capacity_challenges_updated_by TEXT,
+    capacity_challenges_updated_by_device_id TEXT,
+    
+    strengths TEXT,
+    strengths_updated_at TEXT,
+    strengths_updated_by TEXT,
+    strengths_updated_by_device_id TEXT,
+    
+    outcomes TEXT,
+    outcomes_updated_at TEXT,
+    outcomes_updated_by TEXT,
+    outcomes_updated_by_device_id TEXT,
+    
+    recommendations TEXT,
+    recommendations_updated_at TEXT,
+    recommendations_updated_by TEXT,
+    recommendations_updated_by_device_id TEXT,
+    
+    challenge_resolution TEXT,
+    challenge_resolution_updated_at TEXT,
+    challenge_resolution_updated_by TEXT,
+    challenge_resolution_updated_by_device_id TEXT,
+    
+    sync_priority TEXT NOT NULL DEFAULT 'high' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    
+    -- Document references
+    agenda_ref TEXT NULL,
+    materials_ref TEXT NULL,
+    attendance_sheet_ref TEXT NULL,
+    evaluation_summary_ref TEXT NULL,
+    photos_ref TEXT NULL,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (purpose_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (event_date_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (location_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (budget_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (actuals_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (participant_count_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (local_partner_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (partner_responsibility_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (partnership_success_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (capacity_challenges_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (strengths_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (outcomes_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (recommendations_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (challenge_resolution_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Workshops indexes
+CREATE INDEX IF NOT EXISTS idx_workshops_project ON workshops(project_id);
+CREATE INDEX IF NOT EXISTS idx_workshops_event_date ON workshops(event_date);
+CREATE INDEX IF NOT EXISTS idx_workshops_location ON workshops(location);
+CREATE INDEX IF NOT EXISTS idx_workshops_updated_at ON workshops(updated_at);
+CREATE INDEX IF NOT EXISTS idx_workshops_deleted_at ON workshops(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_workshops_created_by ON workshops(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_workshops_updated_by ON workshops(updated_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_workshops_sync_priority ON workshops(sync_priority);
+CREATE INDEX IF NOT EXISTS idx_workshops_created_by_device_id ON workshops(created_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_workshops_updated_by_device_id ON workshops(updated_by_device_id);
+
+-- Workshop Participants Junction Table
+CREATE TABLE IF NOT EXISTS workshop_participants (
+    id TEXT PRIMARY KEY,
+    workshop_id TEXT NOT NULL,
+    participant_id TEXT NULL, -- Nullable
+    
+    notes TEXT,
+    notes_updated_at TEXT,
+    notes_updated_by TEXT,
+    notes_updated_by_device_id TEXT,
+    
+    pre_evaluation TEXT,
+    pre_evaluation_updated_at TEXT,
+    pre_evaluation_updated_by TEXT,
+    pre_evaluation_updated_by_device_id TEXT,
+    
+    post_evaluation TEXT,
+    post_evaluation_updated_at TEXT,
+    post_evaluation_updated_by TEXT,
+    post_evaluation_updated_by_device_id TEXT,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (workshop_id) REFERENCES workshops(id) ON DELETE CASCADE,
+    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (notes_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (pre_evaluation_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (post_evaluation_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    
+    UNIQUE(workshop_id, participant_id) ON CONFLICT REPLACE
+);
+
+-- Workshop participants indexes
+CREATE INDEX IF NOT EXISTS idx_workshop_participants_workshop ON workshop_participants(workshop_id);
+CREATE INDEX IF NOT EXISTS idx_workshop_participants_participant ON workshop_participants(participant_id);
+CREATE INDEX IF NOT EXISTS idx_workshop_participants_updated_at ON workshop_participants(updated_at);
+CREATE INDEX IF NOT EXISTS idx_workshop_participants_deleted_at ON workshop_participants(deleted_at);
+
+-- Livelihoods Table
+CREATE TABLE IF NOT EXISTS livelihoods (
+    id TEXT PRIMARY KEY,
+    participant_id TEXT NULL, -- Nullable
+    project_id TEXT NULL, -- Nullable
+    
+    type TEXT NOT NULL,
+    type_updated_at TEXT,
+    type_updated_by TEXT,
+    type_updated_by_device_id TEXT,
+    
+    description TEXT,
+    description_updated_at TEXT,
+    description_updated_by TEXT,
+    description_updated_by_device_id TEXT,
+    
+    status_id INTEGER,
+    status_id_updated_at TEXT,
+    status_id_updated_by TEXT,
+    status_id_updated_by_device_id TEXT,
+    
+    initial_grant_date TEXT,
+    initial_grant_date_updated_at TEXT,
+    initial_grant_date_updated_by TEXT,
+    initial_grant_date_updated_by_device_id TEXT,
+    
+    initial_grant_amount REAL,
+    initial_grant_amount_updated_at TEXT,
+    initial_grant_amount_updated_by TEXT,
+    initial_grant_amount_updated_by_device_id TEXT,
+    
+    sync_priority TEXT NOT NULL DEFAULT 'high' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    
+    -- Document references
+    business_plan_ref TEXT NULL,
+    grant_agreement_ref TEXT NULL,
+    receipts_ref TEXT NULL,
+    progress_photos_ref TEXT NULL,
+    case_study_ref TEXT NULL,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE SET NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+    FOREIGN KEY (status_id) REFERENCES status_types(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (type_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (description_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (status_id_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (initial_grant_date_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (initial_grant_amount_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Livelihoods indexes
+CREATE INDEX IF NOT EXISTS idx_livelihoods_participant ON livelihoods(participant_id);
+CREATE INDEX IF NOT EXISTS idx_livelihoods_project ON livelihoods(project_id);
+CREATE INDEX IF NOT EXISTS idx_livelihoods_updated_at ON livelihoods(updated_at);
+CREATE INDEX IF NOT EXISTS idx_livelihoods_deleted_at ON livelihoods(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_livelihoods_created_by ON livelihoods(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_livelihoods_updated_by ON livelihoods(updated_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_livelihoods_sync_priority ON livelihoods(sync_priority);
+CREATE INDEX IF NOT EXISTS idx_livelihoods_created_by_device_id ON livelihoods(created_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_livelihoods_updated_by_device_id ON livelihoods(updated_by_device_id);
+
+-- Subsequent Grants Table
+CREATE TABLE IF NOT EXISTS subsequent_grants (
+    id TEXT PRIMARY KEY,
+    livelihood_id TEXT NOT NULL,
+    
+    amount REAL,
+    amount_updated_at TEXT,
+    amount_updated_by TEXT,
+    amount_updated_by_device_id TEXT,
+    
+    purpose TEXT,
+    purpose_updated_at TEXT,
+    purpose_updated_by TEXT,
+    purpose_updated_by_device_id TEXT,
+    
+    grant_date TEXT,
+    grant_date_updated_at TEXT,
+    grant_date_updated_by TEXT,
+    grant_date_updated_by_device_id TEXT,
+    
+    sync_priority TEXT NOT NULL DEFAULT 'high' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    
+    -- Document references
+    grant_application_ref TEXT NULL,
+    grant_report_ref TEXT NULL,
+    receipts_ref TEXT NULL,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (livelihood_id) REFERENCES livelihoods(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (amount_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (purpose_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (grant_date_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Subsequent grants indexes
+CREATE INDEX IF NOT EXISTS idx_subsequent_grants_livelihood ON subsequent_grants(livelihood_id);
+CREATE INDEX IF NOT EXISTS idx_subsequent_grants_date ON subsequent_grants(grant_date);
+CREATE INDEX IF NOT EXISTS idx_subsequent_grants_updated_at ON subsequent_grants(updated_at);
+CREATE INDEX IF NOT EXISTS idx_subsequent_grants_deleted_at ON subsequent_grants(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_subsequent_grants_created_by ON subsequent_grants(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_subsequent_grants_updated_by ON subsequent_grants(updated_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_subsequent_grants_sync_priority ON subsequent_grants(sync_priority);
+
+-- Donors Table
+CREATE TABLE IF NOT EXISTS donors (
+    id TEXT PRIMARY KEY,
+    
+    name TEXT NOT NULL,
+    name_updated_at TEXT,
+    name_updated_by TEXT,
+    name_updated_by_device_id TEXT,
+    
+    type TEXT,
+    type_updated_at TEXT,
+    type_updated_by TEXT,
+    type_updated_by_device_id TEXT,
+    
+    contact_person TEXT,
+    contact_person_updated_at TEXT,
+    contact_person_updated_by TEXT,
+    contact_person_updated_by_device_id TEXT,
+    
+    email TEXT,
+    email_updated_at TEXT,
+    email_updated_by TEXT,
+    email_updated_by_device_id TEXT,
+    
+    phone TEXT,
+    phone_updated_at TEXT,
+    phone_updated_by TEXT,
+    phone_updated_by_device_id TEXT,
+    
+    country TEXT,
+    country_updated_at TEXT,
+    country_updated_by TEXT,
+    country_updated_by_device_id TEXT,
+    
+    first_donation_date TEXT,
+    first_donation_date_updated_at TEXT,
+    first_donation_date_updated_by TEXT,
+    first_donation_date_updated_by_device_id TEXT,
+    
+    notes TEXT,
+    notes_updated_at TEXT,
+    notes_updated_by TEXT,
+    notes_updated_by_device_id TEXT,
+    
+    sync_priority TEXT NOT NULL DEFAULT 'high' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    
+    -- Document references
+    donor_agreement_ref TEXT NULL,
+    due_diligence_ref TEXT NULL,
+    communication_log_ref TEXT NULL,
+    tax_information_ref TEXT NULL,
+    annual_report_ref TEXT NULL,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (name_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (type_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (contact_person_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (email_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (phone_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (country_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (first_donation_date_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (notes_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Donors indexes
+CREATE INDEX IF NOT EXISTS idx_donors_name ON donors(name);
+CREATE INDEX IF NOT EXISTS idx_donors_type ON donors(type);
+CREATE INDEX IF NOT EXISTS idx_donors_country ON donors(country);
+CREATE INDEX IF NOT EXISTS idx_donors_updated_at ON donors(updated_at);
+CREATE INDEX IF NOT EXISTS idx_donors_deleted_at ON donors(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_donors_created_by ON donors(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_donors_updated_by ON donors(updated_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_donors_sync_priority ON donors(sync_priority);
+CREATE INDEX IF NOT EXISTS idx_donors_created_by_device_id ON donors(created_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_donors_updated_by_device_id ON donors(updated_by_device_id);
+
+-- Project Funding Table
+CREATE TABLE IF NOT EXISTS project_funding (
+    id TEXT PRIMARY KEY,
+    
+    project_id TEXT NOT NULL,
+    project_id_updated_at TEXT,
+    project_id_updated_by TEXT,
+    project_id_updated_by_device_id TEXT,
+    
+    donor_id TEXT NOT NULL,
+    donor_id_updated_at TEXT,
+    donor_id_updated_by TEXT,
+    donor_id_updated_by_device_id TEXT,
+    
+    grant_id TEXT,
+    grant_id_updated_at TEXT,
+    grant_id_updated_by TEXT,
+    grant_id_updated_by_device_id TEXT,
+    
+    amount REAL,
+    amount_updated_at TEXT,
+    amount_updated_by TEXT,
+    amount_updated_by_device_id TEXT,
+    
+    currency TEXT NOT NULL DEFAULT 'AUD',
+    currency_updated_at TEXT,
+    currency_updated_by TEXT,
+    currency_updated_by_device_id TEXT,
+    
+    start_date TEXT,
+    start_date_updated_at TEXT,
+    start_date_updated_by TEXT,
+    start_date_updated_by_device_id TEXT,
+    
+    end_date TEXT,
+    end_date_updated_at TEXT,
+    end_date_updated_by TEXT,
+    end_date_updated_by_device_id TEXT,
+    
+    status TEXT,
+    status_updated_at TEXT,
+    status_updated_by TEXT,
+    status_updated_by_device_id TEXT,
+    
+    reporting_requirements TEXT,
+    reporting_requirements_updated_at TEXT,
+    reporting_requirements_updated_by TEXT,
+    reporting_requirements_updated_by_device_id TEXT,
+    
+    notes TEXT,
+    notes_updated_at TEXT,
+    notes_updated_by TEXT,
+    notes_updated_by_device_id TEXT,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+    FOREIGN KEY (donor_id) REFERENCES donors(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (project_id_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (donor_id_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (grant_id_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (amount_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (currency_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (start_date_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (end_date_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (status_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (reporting_requirements_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (notes_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Project funding indexes
+CREATE INDEX IF NOT EXISTS idx_project_funding_project ON project_funding(project_id);
+CREATE INDEX IF NOT EXISTS idx_project_funding_donor ON project_funding(donor_id);
+CREATE INDEX IF NOT EXISTS idx_project_funding_status ON project_funding(status);
+CREATE INDEX IF NOT EXISTS idx_project_funding_updated_at ON project_funding(updated_at);
+CREATE INDEX IF NOT EXISTS idx_project_funding_deleted_at ON project_funding(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_project_funding_created_by ON project_funding(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_project_funding_updated_by ON project_funding(updated_by_user_id);
+
+-- ========================================================================================================
+-- DOCUMENT MANAGEMENT TABLES
+-- ========================================================================================================
+
+-- Document Types Configuration Table
+CREATE TABLE IF NOT EXISTS document_types (
+    id TEXT PRIMARY KEY,
+    
+    name TEXT NOT NULL,
+    name_updated_at TEXT,
+    name_updated_by TEXT,
+    name_updated_by_device_id TEXT,
+    
+    allowed_extensions TEXT NOT NULL,
+    allowed_extensions_updated_at TEXT,
+    allowed_extensions_updated_by TEXT,
+    allowed_extensions_updated_by_device_id TEXT,
+    
+    max_size INTEGER NOT NULL,
+    max_size_updated_at TEXT,
+    max_size_updated_by TEXT,
+    max_size_updated_by_device_id TEXT,
+    
+    compression_level INTEGER NOT NULL DEFAULT 6,
+    compression_level_updated_at TEXT,
+    compression_level_updated_by TEXT,
+    compression_level_updated_by_device_id TEXT,
+    
+    compression_method TEXT DEFAULT 'lossless' 
+        CHECK(compression_method IN ('lossless', 'lossy', 'pdf_optimize', 'office_optimize', 'none')),
+    compression_method_updated_at TEXT,
+    compression_method_updated_by TEXT,
+    compression_method_updated_by_device_id TEXT,
+    
+    min_size_for_compression INTEGER DEFAULT 10240,
+    min_size_for_compression_updated_at TEXT,
+    min_size_for_compression_updated_by TEXT,
+    min_size_for_compression_updated_by_device_id TEXT,
+    
+    description TEXT,
+    description_updated_at TEXT,
+    description_updated_by TEXT,
+    description_updated_by_device_id TEXT,
+    
+    default_priority TEXT NOT NULL DEFAULT 'normal' CHECK(default_priority IN ('high', 'normal', 'low', 'never')),
+    default_priority_updated_at TEXT,
+    default_priority_updated_by TEXT,
+    default_priority_updated_by_device_id TEXT,
+    
+    icon TEXT,
+    icon_updated_at TEXT,
+    icon_updated_by TEXT,
+    icon_updated_by_device_id TEXT,
+    
+    related_tables TEXT,
+    related_tables_updated_at TEXT,
+    related_tables_updated_by TEXT,
+    related_tables_updated_by_device_id TEXT,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    deleted_at TEXT DEFAULT NULL,
+    deleted_by_user_id TEXT DEFAULT NULL,
+    deleted_by_device_id TEXT,
+    
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (name_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (allowed_extensions_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (max_size_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (compression_level_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (compression_method_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (min_size_for_compression_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (description_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (default_priority_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (icon_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (related_tables_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Document types indexes
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_types_name ON document_types(name) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_document_types_updated_at ON document_types(updated_at);
+CREATE INDEX IF NOT EXISTS idx_document_types_deleted_at ON document_types(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_document_types_created_by ON document_types(created_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_document_types_updated_by ON document_types(updated_by_user_id);
+
+-- Media Documents Table (Enhanced)
+CREATE TABLE IF NOT EXISTS media_documents (
+    id TEXT PRIMARY KEY NOT NULL,
+    related_table TEXT NOT NULL,
+    related_id TEXT NULL, -- Nullable for temporary documents
+    temp_related_id TEXT NULL, -- For documents uploaded before entity creation
+    type_id TEXT NOT NULL,
+    
+    original_filename TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    compressed_file_path TEXT NULL,
+    compressed_size_bytes INTEGER NULL,
+    field_identifier TEXT NULL, -- For linking to specific form fields
+    
+    title TEXT NULL,
+    title_updated_at TEXT NULL,
+    title_updated_by_user_id TEXT NULL,
+    title_updated_by_device_id TEXT NULL,
+    
+    description TEXT NULL,
+    description_updated_at TEXT NULL,
+    description_updated_by_user_id TEXT NULL,
+    description_updated_by_device_id TEXT NULL,
+    
+    mime_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    
+    -- Error handling
+    has_error INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT NULL,
+    error_type TEXT NULL CHECK(error_type IS NULL OR error_type IN (
+        'storage_failure', 'conversion_failure', 'compression_failure',
+        'sync_failure', 'permission_failure', 'upload_failure', 'other'
+    )),
+    
+    -- Status fields
+    compression_status TEXT NOT NULL DEFAULT 'pending',
+    blob_status TEXT NOT NULL DEFAULT 'pending',
+    blob_key TEXT NULL,
+    sync_priority TEXT NOT NULL DEFAULT 'normal' CHECK(sync_priority IN ('high', 'normal', 'low', 'never')),
+    source_of_change TEXT NOT NULL DEFAULT 'local',
+    
+    -- Sync tracking
+    last_sync_attempt_at TEXT NULL,
+    sync_attempt_count INTEGER NOT NULL DEFAULT 0,
+    
+    -- Record tracking
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    created_by_user_id TEXT NULL,
+    updated_by_user_id TEXT NULL,
+    created_by_device_id TEXT NULL,
+    updated_by_device_id TEXT NULL,
+    
+    deleted_at TEXT NULL,
+    deleted_by_user_id TEXT NULL,
+    deleted_by_device_id TEXT NULL,
+    
+    FOREIGN KEY (type_id) REFERENCES document_types(id) ON DELETE RESTRICT,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (title_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (description_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Media documents indexes
+CREATE INDEX IF NOT EXISTS idx_media_documents_related ON media_documents(related_table, related_id);
+CREATE INDEX IF NOT EXISTS idx_media_documents_temp_related_id ON media_documents(temp_related_id) WHERE temp_related_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_documents_related_id ON media_documents(related_id) WHERE related_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_media_documents_type ON media_documents(type_id);
+CREATE INDEX IF NOT EXISTS idx_media_documents_compression ON media_documents(compression_status);
+CREATE INDEX IF NOT EXISTS idx_media_documents_blob_sync ON media_documents(blob_status);
+CREATE INDEX IF NOT EXISTS idx_media_documents_updated_at ON media_documents(updated_at);
+CREATE INDEX IF NOT EXISTS idx_media_documents_deleted_at ON media_documents(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_media_documents_sync_priority ON media_documents(sync_priority);
+CREATE INDEX IF NOT EXISTS idx_media_documents_has_error ON media_documents(has_error);
+CREATE INDEX IF NOT EXISTS idx_media_documents_source_of_change ON media_documents(source_of_change);
+CREATE INDEX IF NOT EXISTS idx_media_documents_created_by_device_id ON media_documents(created_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_media_documents_updated_by_device_id ON media_documents(updated_by_device_id);
+CREATE INDEX IF NOT EXISTS idx_media_documents_deleted_by_device_id ON media_documents(deleted_by_device_id);
+
+-- Document Versions Table (Local)
+CREATE TABLE IF NOT EXISTS document_versions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    file_path TEXT NOT NULL,
+    file_size INTEGER,
+    is_compressed INTEGER DEFAULT 0,
+    change_type TEXT NOT NULL CHECK(change_type IN ('original', 'compressed', 'modified', 'restored')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    created_by_device_id TEXT,
+    
+    FOREIGN KEY (document_id) REFERENCES media_documents(id) ON DELETE CASCADE,
+    FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Document versions indexes
+CREATE INDEX IF NOT EXISTS idx_document_versions_document ON document_versions(document_id);
+CREATE INDEX IF NOT EXISTS idx_document_versions_created_at ON document_versions(created_at);
+
+-- Document Access Logs Table
+CREATE TABLE IF NOT EXISTS document_access_logs (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    user_id TEXT NULL, -- Nullable for system operations
+    access_type TEXT NOT NULL,
+    access_date TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    details TEXT,
+    device_id TEXT NULL,
+    
+    FOREIGN KEY (document_id) REFERENCES media_documents(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Document access logs indexes
+CREATE INDEX IF NOT EXISTS idx_document_access_logs_document ON document_access_logs(document_id);
+CREATE INDEX IF NOT EXISTS idx_document_access_logs_user ON document_access_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_document_access_logs_date ON document_access_logs(access_date);
+CREATE INDEX IF NOT EXISTS idx_document_access_logs_type ON document_access_logs(access_type);
+CREATE INDEX IF NOT EXISTS idx_document_access_logs_device_id ON document_access_logs(device_id);
+
+-- Active File Usage Table
+CREATE TABLE IF NOT EXISTS active_file_usage (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    user_id TEXT NULL, -- Nullable
+    device_id TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    last_active_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    use_type TEXT NOT NULL DEFAULT 'view',
+    
+    FOREIGN KEY (document_id) REFERENCES media_documents(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(document_id, user_id, device_id)
+);
+
+-- Active file usage indexes
+CREATE INDEX IF NOT EXISTS idx_active_file_usage_document ON active_file_usage(document_id);
+CREATE INDEX IF NOT EXISTS idx_active_file_usage_user ON active_file_usage(user_id);
+CREATE INDEX IF NOT EXISTS idx_active_file_usage_active ON active_file_usage(last_active_at);
+
+-- File Deletion Queue Table
+CREATE TABLE IF NOT EXISTS file_deletion_queue (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    compressed_file_path TEXT NULL,
+    requested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    requested_by TEXT NOT NULL,
+    requested_by_device_id TEXT NULL,
+    grace_period_seconds INTEGER DEFAULT 86400,
+    attempts INTEGER DEFAULT 0,
+    last_attempt_at TEXT NULL,
+    completed_at TEXT NULL,
+    error_message TEXT NULL,
+    
+    FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- File deletion queue indexes
+CREATE INDEX IF NOT EXISTS idx_file_deletion_queue_pending ON file_deletion_queue(requested_at) WHERE completed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_file_deletion_queue_document ON file_deletion_queue(document_id);
+
+-- Compression Queue Table (Local)
+CREATE TABLE IF NOT EXISTS compression_queue (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL UNIQUE,
+    priority INTEGER DEFAULT 5,
+    attempts INTEGER DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'completed', 'failed')),
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    error_message TEXT,
+    
+    FOREIGN KEY (document_id) REFERENCES media_documents(id) ON DELETE CASCADE
+);
+
+-- Compression queue indexes
+CREATE INDEX IF NOT EXISTS idx_compression_queue_pending ON compression_queue(status, priority DESC, created_at ASC) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_compression_queue_document ON compression_queue(document_id);
+
+-- Compression Stats Table (Local)
+CREATE TABLE IF NOT EXISTS compression_stats (
+    id TEXT PRIMARY KEY CHECK(id = 'global'),
+    total_original_size BIGINT DEFAULT 0,
+    total_compressed_size BIGINT DEFAULT 0,
+    space_saved BIGINT DEFAULT 0,
+    compression_ratio REAL DEFAULT 0,
+    total_files_compressed INTEGER DEFAULT 0,
+    total_files_pending INTEGER DEFAULT 0,
+    total_files_failed INTEGER DEFAULT 0,
+    total_files_skipped INTEGER DEFAULT 0,
+    last_compression_date TEXT,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Insert singleton row
+INSERT OR IGNORE INTO compression_stats (id) VALUES ('global');
+
+-- ========================================================================================================
+-- SYNC AND AUDIT TABLES
+-- ========================================================================================================
+
+-- Change Log Table
+CREATE TABLE IF NOT EXISTS change_log (
+    operation_id TEXT PRIMARY KEY,
+    entity_table TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    operation_type TEXT NOT NULL CHECK (operation_type IN ('create', 'update', 'delete', 'hard_delete')),
+    field_name TEXT,
+    old_value TEXT,
+    new_value TEXT,
+    timestamp TEXT NOT NULL,
+    user_id TEXT NULL, -- Nullable for system operations
+    device_id TEXT,
+    priority INTEGER DEFAULT 5,
+    document_metadata TEXT NULL,
+    entity_data TEXT NULL,
+    
+    -- Sync processing state
+    sync_batch_id TEXT,
+    processed_at TEXT,
+    sync_error TEXT,
+    
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (sync_batch_id) REFERENCES sync_batches(batch_id) ON DELETE SET NULL
+);
+
+-- Change log indexes
+CREATE INDEX IF NOT EXISTS idx_change_log_entity ON change_log(entity_table, entity_id);
+CREATE INDEX IF NOT EXISTS idx_change_log_timestamp_user ON change_log(timestamp, user_id);
+CREATE INDEX IF NOT EXISTS idx_change_log_operation ON change_log(operation_type);
+CREATE INDEX IF NOT EXISTS idx_change_log_batch ON change_log(sync_batch_id);
+CREATE INDEX IF NOT EXISTS idx_change_log_unprocessed_for_upload ON change_log(entity_table, entity_id, timestamp) WHERE sync_batch_id IS NULL AND processed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_change_log_hard_delete ON change_log(entity_table, entity_id) WHERE operation_type = 'hard_delete';
+CREATE INDEX IF NOT EXISTS idx_change_log_entity_data ON change_log(entity_data) WHERE entity_data IS NOT NULL;
+
+-- Tombstones Table
+CREATE TABLE IF NOT EXISTS tombstones (
+    id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    deleted_by TEXT NULL, -- Nullable for system operations
+    deleted_by_device_id TEXT,
+    deleted_at TEXT NOT NULL,
+    operation_id TEXT NOT NULL,
+    additional_metadata TEXT NULL,
+    pushed_at TEXT NULL,
+    sync_batch_id TEXT NULL,
+    
+    FOREIGN KEY (deleted_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Tombstones indexes
+CREATE INDEX IF NOT EXISTS idx_tombstones_entity ON tombstones(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_tombstones_deleted_by ON tombstones(deleted_by);
+CREATE INDEX IF NOT EXISTS idx_tombstones_deleted_at ON tombstones(deleted_at);
+CREATE INDEX IF NOT EXISTS idx_tombstones_operation ON tombstones(operation_id);
+CREATE INDEX IF NOT EXISTS idx_tombstones_pushed_at ON tombstones(pushed_at) WHERE pushed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_tombstones_sync_batch_id ON tombstones(sync_batch_id);
+CREATE INDEX IF NOT EXISTS idx_tombstones_deleted_by_device_id ON tombstones(deleted_by_device_id);
+
+-- Audit Logs Table
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NULL, -- Nullable
+    action TEXT NOT NULL CHECK (action IN (
+        'create', 'update', 'delete', 'hard_delete',
+        'login_success', 'login_fail', 'logout',
+        'sync_upload_start', 'sync_upload_complete', 'sync_upload_fail',
+        'sync_download_start', 'sync_download_complete', 'sync_download_fail',
+        'merge_conflict_resolved', 'merge_conflict_detected',
+        'permission_denied', 'data_export', 'data_import'
+    )),
+    entity_table TEXT,
+    entity_id TEXT,
+    field_name TEXT,
+    details TEXT,
+    timestamp TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    device_id TEXT NULL,
+    
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Audit logs indexes
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_target ON audit_logs(entity_table, entity_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_device_id ON audit_logs(device_id);
+
+-- ========================================================================================================
+-- SYNC INFRASTRUCTURE TABLES
+-- ========================================================================================================
+
+-- Sync Batches Table
+CREATE TABLE IF NOT EXISTS sync_batches (
+    batch_id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('upload', 'download')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'completed', 'failed', 'partially_failed')),
+    item_count INTEGER DEFAULT 0,
+    total_size INTEGER DEFAULT 0,
+    priority INTEGER DEFAULT 5,
+    attempts INTEGER DEFAULT 0,
+    last_attempt_at TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    completed_at TEXT
+);
+
+-- Sync batches indexes
+CREATE INDEX IF NOT EXISTS idx_sync_batches_status_priority ON sync_batches(status, priority, created_at);
+CREATE INDEX IF NOT EXISTS idx_sync_batches_direction ON sync_batches(direction, status);
+CREATE INDEX IF NOT EXISTS idx_sync_batches_device ON sync_batches(device_id, status);
+
+-- Device Sync State Table
+CREATE TABLE IF NOT EXISTS device_sync_state (
+    device_id TEXT PRIMARY KEY,
+    user_id TEXT NULL, -- Nullable
+    last_upload_timestamp TEXT,
+    last_download_timestamp TEXT,
+    last_sync_status TEXT CHECK(last_sync_status IN ('success', 'partial_success', 'failed', 'in_progress')),
+    last_sync_attempt_at TEXT,
+    server_version INTEGER DEFAULT 0,
+    sync_enabled INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Device sync state indexes
+CREATE INDEX IF NOT EXISTS idx_device_sync_state_user_id ON device_sync_state(user_id);
+CREATE INDEX IF NOT EXISTS idx_device_sync_state_updated_at ON device_sync_state(updated_at);
+
+-- Device Metadata Table
+CREATE TABLE IF NOT EXISTS device_metadata (
+    device_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    model TEXT,
+    os_version TEXT,
+    app_version TEXT NOT NULL,
+    last_active_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Device metadata indexes
+CREATE INDEX IF NOT EXISTS idx_device_metadata_last_active ON device_metadata(last_active_at DESC);
+
+-- Sync Configs Table
+CREATE TABLE IF NOT EXISTS sync_configs (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL UNIQUE,
+    
+    sync_interval_minutes INTEGER NOT NULL DEFAULT 60,
+    sync_interval_minutes_updated_at TEXT NULL,
+    sync_interval_minutes_updated_by_user_id TEXT NULL,
+    sync_interval_minutes_updated_by_device_id TEXT NULL,
+    
+    background_sync_enabled INTEGER NOT NULL DEFAULT 1,
+    background_sync_enabled_updated_at TEXT NULL,
+    background_sync_enabled_updated_by_user_id TEXT NULL,
+    background_sync_enabled_updated_by_device_id TEXT NULL,
+    
+    wifi_only INTEGER NOT NULL DEFAULT 1,
+    wifi_only_updated_at TEXT NULL,
+    wifi_only_updated_by_user_id TEXT NULL,
+    wifi_only_updated_by_device_id TEXT NULL,
+    
+    charging_only INTEGER NOT NULL DEFAULT 0,
+    charging_only_updated_at TEXT NULL,
+    charging_only_updated_by_user_id TEXT NULL,
+    charging_only_updated_by_device_id TEXT NULL,
+    
+    sync_priority_threshold INTEGER NOT NULL DEFAULT 1,
+    sync_priority_threshold_updated_at TEXT NULL,
+    sync_priority_threshold_updated_by_user_id TEXT NULL,
+    sync_priority_threshold_updated_by_device_id TEXT NULL,
+    
+    document_sync_enabled INTEGER NOT NULL DEFAULT 1,
+    document_sync_enabled_updated_at TEXT NULL,
+    document_sync_enabled_updated_by_user_id TEXT NULL,
+    document_sync_enabled_updated_by_device_id TEXT NULL,
+    
+    metadata_sync_enabled INTEGER NOT NULL DEFAULT 1,
+    metadata_sync_enabled_updated_at TEXT NULL,
+    metadata_sync_enabled_updated_by_user_id TEXT NULL,
+    metadata_sync_enabled_updated_by_device_id TEXT NULL,
+    
+    server_token TEXT NULL,
+    server_token_updated_at TEXT NULL,
+    server_token_updated_by_user_id TEXT NULL,
+    server_token_updated_by_device_id TEXT NULL,
+    
+    last_sync_timestamp TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_device_id TEXT NULL,
+    updated_by_user_id TEXT NULL,
+    updated_by_device_id TEXT NULL,
+    
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (sync_interval_minutes_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (background_sync_enabled_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (wifi_only_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (charging_only_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (sync_priority_threshold_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (document_sync_enabled_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (metadata_sync_enabled_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (server_token_updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Sync configs indexes
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_configs_user_id ON sync_configs(user_id);
+
+-- Sync Conflicts Table
+CREATE TABLE IF NOT EXISTS sync_conflicts (
+    conflict_id TEXT PRIMARY KEY,
+    entity_table TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    field_name TEXT NULL,
+    local_change_op_id TEXT NOT NULL,
+    remote_change_op_id TEXT NOT NULL,
+    resolution_status TEXT NOT NULL DEFAULT 'unresolved' CHECK(resolution_status IN ('resolved', 'unresolved', 'manual', 'ignored')),
+    resolution_strategy TEXT NULL CHECK(resolution_strategy IS NULL OR resolution_strategy IN ('server_wins', 'client_wins', 'last_write_wins', 'merge_prioritize_server', 'merge_prioritize_client', 'manual')),
+    resolved_by_user_id TEXT NULL,
+    resolved_by_device_id TEXT NULL,
+    resolved_at TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_device_id TEXT NULL,
+    details TEXT NULL,
+    
+    FOREIGN KEY (resolved_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (local_change_op_id) REFERENCES change_log(operation_id) ON DELETE CASCADE
+);
+
+-- Sync conflicts indexes
+CREATE INDEX IF NOT EXISTS idx_sync_conflicts_entity ON sync_conflicts(entity_table, entity_id);
+CREATE INDEX IF NOT EXISTS idx_sync_conflicts_status ON sync_conflicts(resolution_status);
+CREATE INDEX IF NOT EXISTS idx_sync_conflicts_local_op ON sync_conflicts(local_change_op_id);
+CREATE INDEX IF NOT EXISTS idx_sync_conflicts_resolved_by_device_id ON sync_conflicts(resolved_by_device_id);
+
+-- Sync Operation Logs Table
+CREATE TABLE IF NOT EXISTS sync_operation_logs (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    entity_id TEXT NULL,
+    entity_type TEXT NULL,
+    status TEXT NOT NULL CHECK(status IN ('started', 'completed', 'failed', 'skipped')),
+    error_message TEXT NULL,
+    blob_key TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    
+    FOREIGN KEY (batch_id) REFERENCES sync_batches(batch_id) ON DELETE CASCADE
+);
+
+-- Sync operation logs indexes
+CREATE INDEX IF NOT EXISTS idx_sync_operation_logs_batch_id ON sync_operation_logs(batch_id);
+CREATE INDEX IF NOT EXISTS idx_sync_operation_logs_entity ON sync_operation_logs(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_sync_operation_logs_status ON sync_operation_logs(status);
+
+-- Sync Sessions Table
+CREATE TABLE IF NOT EXISTS sync_sessions (
+    session_id TEXT PRIMARY KEY,
+    user_id TEXT NULL, -- Nullable
+    device_id TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NULL,
+    sync_mode TEXT NOT NULL CHECK(sync_mode IN ('full', 'incremental', 'minimal', 'selective')),
+    status TEXT NOT NULL CHECK(status IN ('success', 'partial_success', 'failed', 'in_progress')),
+    error_message TEXT NULL,
+    changes_uploaded INTEGER NULL,
+    changes_downloaded INTEGER NULL,
+    conflicts_encountered INTEGER NULL,
+    bytes_transferred INTEGER NULL,
+    network_type TEXT NULL,
+    duration_seconds REAL NULL,
+    
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+-- Sync sessions indexes
+CREATE INDEX IF NOT EXISTS idx_sync_sessions_user_device ON sync_sessions(user_id, device_id, start_time DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_sessions_status ON sync_sessions(status);
+
+-- Sync Queue Table
+CREATE TABLE IF NOT EXISTS sync_queue (
+    id TEXT PRIMARY KEY,
+    sync_batch_id TEXT NULL,
+    entity_id TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    operation_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'processing', 'completed', 'failed')),
+    blob_key TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    completed_at TEXT NULL,
+    error_message TEXT NULL,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    
+    FOREIGN KEY (sync_batch_id) REFERENCES sync_batches(batch_id) ON DELETE SET NULL
+);
+
+-- Sync queue indexes
+CREATE INDEX IF NOT EXISTS idx_sync_queue_status_created ON sync_queue(status, created_at) WHERE status = 'pending' OR status = 'failed';
+CREATE INDEX IF NOT EXISTS idx_sync_queue_entity ON sync_queue(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_sync_queue_batch ON sync_queue(sync_batch_id);
+
+-- ========================================================================================================
+-- APPLICATION SETTINGS TABLES
+-- ========================================================================================================
+
+-- App Settings Table (Global)
+CREATE TABLE IF NOT EXISTS app_settings (
+    id TEXT PRIMARY KEY CHECK(id = 'global'),
+    
+    compression_enabled INTEGER DEFAULT 1,
+    compression_enabled_updated_at TEXT,
+    compression_enabled_updated_by TEXT,
+    compression_enabled_updated_by_device_id TEXT,
+    
+    default_compression_timing TEXT DEFAULT 'immediate' CHECK(default_compression_timing IN ('immediate', 'background', 'manual')),
+    default_compression_timing_updated_at TEXT,
+    default_compression_timing_updated_by TEXT,
+    default_compression_timing_updated_by_device_id TEXT,
+    
+    background_service_interval INTEGER DEFAULT 300,
+    background_service_interval_updated_at TEXT,
+    background_service_interval_updated_by TEXT,
+    background_service_interval_updated_by_device_id TEXT,
+    
+    last_background_run TEXT,
+    
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_user_id TEXT,
+    updated_by_user_id TEXT,
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    FOREIGN KEY (compression_enabled_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (default_compression_timing_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (background_service_interval_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- Insert singleton row
+INSERT OR IGNORE INTO app_settings (id) VALUES ('global');
+
+-- App Connection Settings Table
+CREATE TABLE IF NOT EXISTS app_connection_settings (
+    id TEXT PRIMARY KEY CHECK(id = 'cloud'),
+    api_endpoint TEXT NOT NULL,
+    api_version TEXT,
+    connection_timeout INTEGER DEFAULT 30000,
+    offline_mode_enabled INTEGER DEFAULT 0,
+    retry_count INTEGER DEFAULT 3,
+    retry_delay INTEGER DEFAULT 5000,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Sync Settings Table (Per User)
+CREATE TABLE IF NOT EXISTS sync_settings (
+    user_id TEXT PRIMARY KEY,
+    
+    max_file_size INTEGER DEFAULT 10485760,
+    max_file_size_updated_at TEXT,
+    max_file_size_updated_by TEXT,
+    max_file_size_updated_by_device_id TEXT,
+    
+    compression_enabled INTEGER DEFAULT 1,
+    compression_enabled_updated_at TEXT,
+    compression_enabled_updated_by TEXT,
+    compression_enabled_updated_by_device_id TEXT,
+    
+    compression_timing TEXT DEFAULT 'immediate' CHECK(compression_timing IN ('immediate', 'background', 'manual')),
+    compression_timing_updated_at TEXT,
+    compression_timing_updated_by TEXT,
+    compression_timing_updated_by_device_id TEXT,
+    
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    created_by_device_id TEXT,
+    updated_by_device_id TEXT,
+    
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (max_file_size_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (compression_enabled_updated_by) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (compression_timing_updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- ========================================================================================================
+-- MISCELLANEOUS TABLES
+-- ========================================================================================================
+
+-- Revoked Tokens Table
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    jti TEXT PRIMARY KEY NOT NULL,
+    expiry INTEGER NOT NULL
+);
+
+-- Revoked tokens indexes
+CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expiry ON revoked_tokens(expiry);
+
+-- Export Jobs Table
+CREATE TABLE IF NOT EXISTS export_jobs (
+    id TEXT PRIMARY KEY,
+    requested_by_user_id TEXT,
+    requested_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    include_blobs INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL CHECK (status IN ('running','completed','failed')),
+    local_path TEXT,
+    total_entities INTEGER,
+    total_bytes INTEGER,
+    error_message TEXT,
+    
+    FOREIGN KEY (requested_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- ========================================================================================================
+-- FINAL STEPS
+-- ========================================================================================================
+
+-- Enable foreign keys
+PRAGMA foreign_keys = ON;
+
+-- Perform integrity check
+PRAGMA integrity_check;
+
+-- ========================================================================================================
+-- END OF CONSOLIDATED MIGRATION
+-- ========================================================================================================

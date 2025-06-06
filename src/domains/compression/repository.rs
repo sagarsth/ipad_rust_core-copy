@@ -356,7 +356,7 @@ impl CompressionRepository for SqliteCompressionRepository {
             total_files_compressed: row.total_files_compressed.unwrap_or(0),
             total_files_pending: row.total_files_pending.unwrap_or(0),
             total_files_failed: row.total_files_failed.unwrap_or(0),
-            total_files_skipped: row.total_files_skipped,
+            total_files_skipped: row.total_files_skipped.unwrap_or(0),
             last_compression_date,
             updated_at,
         })

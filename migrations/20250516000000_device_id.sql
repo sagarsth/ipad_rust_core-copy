@@ -177,19 +177,22 @@ ALTER TABLE document_types ADD COLUMN deleted_by_device_id TEXT NULL;
 -- --------------------------------------------
 -- Media/Documents Table
 -- --------------------------------------------
-ALTER TABLE media_documents ADD COLUMN created_by_device_id TEXT NULL;
-ALTER TABLE media_documents ADD COLUMN updated_by_device_id TEXT NULL;
-ALTER TABLE media_documents ADD COLUMN deleted_by_device_id TEXT NULL;
+-- NOTE: device_id columns for media_documents are already added in migration 20250424000000
+-- to prevent ALTER TABLE conflicts when the table was recreated for enhanced error handling.
+-- These ALTER TABLE statements are commented out to avoid "duplicate column" errors:
+-- ALTER TABLE media_documents ADD COLUMN created_by_device_id TEXT NULL;
+-- ALTER TABLE media_documents ADD COLUMN updated_by_device_id TEXT NULL;
+-- ALTER TABLE media_documents ADD COLUMN deleted_by_device_id TEXT NULL;
 
--- Add field-level LWW for title in media_documents
-ALTER TABLE media_documents ADD COLUMN title_updated_at TEXT NULL;
-ALTER TABLE media_documents ADD COLUMN title_updated_by_user_id TEXT NULL REFERENCES users(id) ON DELETE SET NULL;
-ALTER TABLE media_documents ADD COLUMN title_updated_by_device_id TEXT NULL;
+-- Add field-level LWW for title in media_documents (also commented out, already in table)
+-- ALTER TABLE media_documents ADD COLUMN title_updated_at TEXT NULL;
+-- ALTER TABLE media_documents ADD COLUMN title_updated_by_user_id TEXT NULL REFERENCES users(id) ON DELETE SET NULL;
+-- ALTER TABLE media_documents ADD COLUMN title_updated_by_device_id TEXT NULL;
 
--- Add field-level LWW for description in media_documents
-ALTER TABLE media_documents ADD COLUMN description_updated_at TEXT NULL;
-ALTER TABLE media_documents ADD COLUMN description_updated_by_user_id TEXT NULL REFERENCES users(id) ON DELETE SET NULL;
-ALTER TABLE media_documents ADD COLUMN description_updated_by_device_id TEXT NULL;
+-- Add field-level LWW for description in media_documents (also commented out, already in table)
+-- ALTER TABLE media_documents ADD COLUMN description_updated_at TEXT NULL;
+-- ALTER TABLE media_documents ADD COLUMN description_updated_by_user_id TEXT NULL REFERENCES users(id) ON DELETE SET NULL;
+-- ALTER TABLE media_documents ADD COLUMN description_updated_by_device_id TEXT NULL;
 
 -- --------------------------------------------
 -- Document Versions Table

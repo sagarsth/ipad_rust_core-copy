@@ -2,58 +2,16 @@ use crate::ffi::error::{FFIError, FFIResult};
 use sqlx::SqlitePool;
 use crate::globals;
 
-// Embed all migration SQL files at compile time
-const MIGRATION_BASIC: &str = include_str!("../migrations/20240320000000_basic.sql");
-const MIGRATION_CASCADE: &str = include_str!("../migrations/20240404000000_cascade.sql");
-const MIGRATION_TOMBSTONE: &str = include_str!("../migrations/20240407000000_tombstone.sql");
-const MIGRATION_SYNC: &str = include_str!("../migrations/20240412000000_sync.sql");
-const MIGRATION_NULLABLE: &str = include_str!("../migrations/20240417000000_nullable.sql");
-const MIGRATION_EVALUATIONS: &str = include_str!("../migrations/20240420000000_add_evaluations.sql");
-const MIGRATION_DOC_UPDATES: &str = include_str!("../migrations/20240421000000_document_updates.sql");
-const MIGRATION_SYNC_PRIORITY: &str = include_str!("../migrations/20240422000000_add_sync_priority.sql");
-const MIGRATION_TEMP_DOC_LINK: &str = include_str!("../migrations/20240423000000_add_temp_doc_link.sql");
-const MIGRATION_SYNC_PRIORITY_ACTIVITIES: &str = include_str!("../migrations/20240730100000_add_sync_priority_to_activities_donors.sql");
-const MIGRATION_DOC_REF_COLUMNS: &str = include_str!("../migrations/20240801000000_add_document_ref_columns.sql");
-const MIGRATION_COMPRESSION_STATS: &str = include_str!("../migrations/20250421170655_add_total_files_skipped_to_compression_stats.sql");
-const MIGRATION_DOC_TYPE_COMPRESSION: &str = include_str!("../migrations/20250422061436_update_document_type_compression_check.sql");
-const MIGRATION_DOC_SCHEMA_FIELDS: &str = include_str!("../migrations/20250423000001_update_document_schema_fields.sql");
-const MIGRATION_DOC_ENHANCEMENTS: &str = include_str!("../migrations/20250424000000_document_enhancements.sql");
-const MIGRATION_REVOKED_TOKENS: &str = include_str!("../migrations/20250425000000_add_revoked_tokens_table.sql");
-const MIGRATION_MERGE_SYNC_TYPES: &str = include_str!("../migrations/20250502040000_merge_sync_types.sql");
-const MIGRATION_STANDARDIZE_SYNC: &str = include_str!("../migrations/20250503000000_standardize_sync_priority.sql");
-const MIGRATION_UPDATE_DONORS_SYNC: &str = include_str!("../migrations/20250503000001_update_donors_sync_priority.sql");
-const MIGRATION_DEVICE_ID: &str = include_str!("../migrations/20250516000000_device_id.sql");
-const MIGRATION_SOURCE_OF_CHANGE: &str = include_str!("../migrations/20250517000000_add_source_of_change_to_media_documents.sql");
-const MIGRATION_EXPORT_JOBS: &str = include_str!("../migrations/20250523000000_create_export_jobs.sql");
-const MIGRATION_FIX_FK_CONSTRAINTS: &str = include_str!("../migrations/20250523050000_fix_foreign_key_constraints.sql");
-const MIGRATION_ALLOW_NULL_USER_IDS: &str = include_str!("../migrations/20250524000000_allow_null_user_ids.sql");
+// Embed the consolidated migration SQL file at compile time
+const MIGRATION_CONSOLIDATED: &str = include_str!("../migrations/20240101000000_consolidated.sql");
 
-// List of migrations with their names and SQL content
+// List of migrations with their names and SQL content.
+// This now starts with the consolidated schema.
+// Future migrations can be added here.
 const MIGRATIONS: &[(&str, &str)] = &[
-    ("20240320000000_basic.sql", MIGRATION_BASIC),
-    ("20240404000000_cascade.sql", MIGRATION_CASCADE),
-    ("20240407000000_tombstone.sql", MIGRATION_TOMBSTONE),
-    ("20240412000000_sync.sql", MIGRATION_SYNC),
-    ("20240417000000_nullable.sql", MIGRATION_NULLABLE),
-    ("20240420000000_add_evaluations.sql", MIGRATION_EVALUATIONS),
-    ("20240421000000_document_updates.sql", MIGRATION_DOC_UPDATES),
-    ("20240422000000_add_sync_priority.sql", MIGRATION_SYNC_PRIORITY),
-    ("20240423000000_add_temp_doc_link.sql", MIGRATION_TEMP_DOC_LINK),
-    ("20240730100000_add_sync_priority_to_activities_donors.sql", MIGRATION_SYNC_PRIORITY_ACTIVITIES),
-    ("20240801000000_add_document_ref_columns.sql", MIGRATION_DOC_REF_COLUMNS),
-    ("20250421170655_add_total_files_skipped_to_compression_stats.sql", MIGRATION_COMPRESSION_STATS),
-    ("20250422061436_update_document_type_compression_check.sql", MIGRATION_DOC_TYPE_COMPRESSION),
-    ("20250423000001_update_document_schema_fields.sql", MIGRATION_DOC_SCHEMA_FIELDS),
-    ("20250424000000_document_enhancements.sql", MIGRATION_DOC_ENHANCEMENTS),
-    ("20250425000000_add_revoked_tokens_table.sql", MIGRATION_REVOKED_TOKENS),
-    ("20250502040000_merge_sync_types.sql", MIGRATION_MERGE_SYNC_TYPES),
-    ("20250503000000_standardize_sync_priority.sql", MIGRATION_STANDARDIZE_SYNC),
-    ("20250503000001_update_donors_sync_priority.sql", MIGRATION_UPDATE_DONORS_SYNC),
-    ("20250516000000_device_id.sql", MIGRATION_DEVICE_ID),
-    ("20250517000000_add_source_of_change_to_media_documents.sql", MIGRATION_SOURCE_OF_CHANGE),
-    ("20250523000000_create_export_jobs.sql", MIGRATION_EXPORT_JOBS),
-    ("20250523050000_fix_foreign_key_constraints.sql", MIGRATION_FIX_FK_CONSTRAINTS),
-    ("20250524000000_allow_null_user_ids.sql", MIGRATION_ALLOW_NULL_USER_IDS),
+    ("20240101000000_consolidated.sql", MIGRATION_CONSOLIDATED),
+    // Add new migrations here in the future, for example:
+    // ("20250601120000_new_feature.sql", include_str!("../migrations/20250601120000_new_feature.sql")),
 ];
 
 /// Initialize the database with migrations (async version)

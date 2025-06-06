@@ -68,6 +68,17 @@ CREATE TABLE media_documents_new (
     deleted_at TEXT NULL,
     deleted_by_user_id TEXT NULL,
     
+    -- Device ID columns (for compatibility with later migrations)
+    created_by_device_id TEXT NULL,
+    updated_by_device_id TEXT NULL,
+    deleted_by_device_id TEXT NULL,
+    title_updated_at TEXT NULL,
+    title_updated_by_user_id TEXT NULL,
+    title_updated_by_device_id TEXT NULL,
+    description_updated_at TEXT NULL,
+    description_updated_by_user_id TEXT NULL,
+    description_updated_by_device_id TEXT NULL,
+    
     FOREIGN KEY (type_id) REFERENCES document_types(id) ON DELETE RESTRICT,
     FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
     FOREIGN KEY (updated_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
@@ -82,11 +93,15 @@ INSERT INTO media_documents_new (
     -- Error fields with derived values
     has_error, error_message, error_type,
     -- Status fields
-    compression_status, blob_status, blob_key, sync_priority,
+    compression_status, blob_sync_status, blob_key, sync_priority,
     -- Sync tracking (new fields)
     last_sync_attempt_at, sync_attempt_count,
     -- Standard tracking
-    created_at, updated_at, created_by_user_id, updated_by_user_id, deleted_at, deleted_by_user_id
+    created_at, updated_at, created_by_user_id, updated_by_user_id, deleted_at, deleted_by_user_id,
+    -- Device tracking columns (new fields)
+    created_by_device_id, updated_by_device_id, deleted_by_device_id,
+    title_updated_at, title_updated_by_user_id, title_updated_by_device_id,
+    description_updated_at, description_updated_by_user_id, description_updated_by_device_id
 )
 SELECT 
     id, related_table, related_id, temp_related_id, type_id, original_filename,
@@ -100,13 +115,15 @@ SELECT
     CASE WHEN file_path = 'ERROR' THEN 'upload_failure' ELSE NULL END as error_type,
     -- Status fields
     compression_status, 
-    'pending' as blob_status, -- Default value since column doesn't exist
+    blob_sync_status, -- Use existing column
     NULL as blob_key, 
     'normal' as sync_priority, -- Default value
     -- New sync tracking fields
     NULL as last_sync_attempt_at, 0 as sync_attempt_count,
     -- Standard tracking
-    created_at, updated_at, created_by_user_id, updated_by_user_id, deleted_at, deleted_by_user_id
+    created_at, updated_at, created_by_user_id, updated_by_user_id, deleted_at, deleted_by_user_id,
+    -- Device tracking columns (set to NULL for existing data)
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 FROM media_documents;
 
 -- Drop old table and rename new one
@@ -119,7 +136,7 @@ CREATE INDEX idx_media_documents_temp_related_id ON media_documents(temp_related
     WHERE temp_related_id IS NOT NULL;
 CREATE INDEX idx_media_documents_type ON media_documents(type_id);
 CREATE INDEX idx_media_documents_compression ON media_documents(compression_status);
-CREATE INDEX idx_media_documents_blob_sync ON media_documents(blob_status);
+CREATE INDEX idx_media_documents_blob_sync ON media_documents(blob_sync_status);
 CREATE INDEX idx_media_documents_updated_at ON media_documents(updated_at);
 CREATE INDEX idx_media_documents_deleted_at ON media_documents(deleted_at);
 CREATE INDEX idx_media_documents_sync_priority ON media_documents(sync_priority);

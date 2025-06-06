@@ -401,103 +401,80 @@ impl CompressionWorker {
 /// Queue original file for deletion after successful compression
 /// This function would be implemented using file_deletion_queue
 async fn queue_original_for_deletion(document_id: Uuid) -> Result<(), ServiceError> {
-    // Create a function to get the pool rather than using a static function on SqlitePool
-    fn get_connection_pool() -> &'static SqlitePool {
-        // In a real implementation, you would retrieve this from your app context
-        // For now, we'll return an error instead of a hard-coded Option<None>
-        unimplemented!("You need to implement a proper pool access method")
-    }
+    // For now, just log that we would queue for deletion to avoid crashes
+    // TODO: Implement proper file deletion queue when database pool is properly available
+    eprintln!("INFO: Would queue document {} for deletion after compression", document_id);
     
-    // Get the pool from your app context
-    let pool = get_connection_pool(); // Call directly, unimplemented! will panic if not ready
-    
-    // --- Add binding here ---
-    let doc_id_str_for_fetch = document_id.to_string();
-
-    // Fetch the document details to get file paths
-    let doc = sqlx::query!(
-        r#"
-        SELECT 
-            file_path, 
-            compressed_file_path, 
-            compression_status
-        FROM media_documents
-        WHERE id = ?
-        "#,
-        doc_id_str_for_fetch // Use variable
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::Sqlx(e))))?;
-    
-    // Only queue for deletion if compression is completed and we have a compressed path
-    if doc.compression_status == "completed" && doc.compressed_file_path.is_some() {
-        // --- Introduce bindings here --- 
-        let queue_id_str = Uuid::new_v4().to_string();
-        let doc_id_str = document_id.to_string();
-        let requested_at_str = chrono::Utc::now().to_rfc3339();
-        let requested_by_str = "system"; // Already a literal, but good practice
-        let grace_period_val: i64 = 7 * 24 * 60 * 60;
-
-        // Add to file_deletion_queue with grace period
-        sqlx::query!(
-            r#"
-            INSERT INTO file_deletion_queue (
-                id, 
-                document_id,
-                file_path, 
-                compressed_file_path, 
-                requested_at, 
-                requested_by, 
-                grace_period_seconds
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            "#,
-            queue_id_str, // Use variable
-            doc_id_str, // Use variable
-            doc.file_path,
-            doc.compressed_file_path,
-            requested_at_str, // Use variable
-            requested_by_str, // Use variable
-            grace_period_val // Use variable
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::Sqlx(e))))?;
-    }
-    
+    // Return early to avoid the unimplemented pool access
     Ok(())
 }
 
-/// Helper to access the database pool
-pub struct DbPool {
-    pool: SqlitePool,
+// REMOVED UNSAFE GLOBAL POOL ACCESS - THIS WAS CAUSING THE CRASH
+// The unsafe global static with raw pointer access was causing memory protection faults
+// 
+// TODO: Implement proper dependency injection or pass the pool through function parameters
+// For now, this entire global pool system is disabled to prevent crashes
+
+/// Stub implementation of CompressionManager that delegates to service/repository
+/// This is used for FFI compatibility while the actual compression work is done by CompressionWorker
+pub struct StubCompressionManager {
+    compression_service: Arc<dyn CompressionService>,
+    compression_repo: Arc<dyn CompressionRepository>,
 }
 
-impl DbPool {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+impl StubCompressionManager {
+    pub fn new(
+        compression_service: Arc<dyn CompressionService>,
+        compression_repo: Arc<dyn CompressionRepository>,
+    ) -> Self {
+        Self {
+            compression_service,
+            compression_repo,
+        }
+    }
+}
+
+#[async_trait]
+impl CompressionManager for StubCompressionManager {
+    fn get_sender(&self) -> mpsc::Sender<CompressionMessage> {
+        // Return a dummy channel that will be dropped immediately
+        // The actual work is done by CompressionWorker, not through messages
+        let (sender, _receiver) = mpsc::channel(1);
+        sender
     }
     
-    pub fn get(&self) -> &SqlitePool {
-        &self.pool
+    fn start(&self) -> JoinHandle<()> {
+        // No-op start since CompressionWorker handles the actual work
+        tokio::spawn(async {})
     }
-}
-
-// Create a global instance
-static mut DB_POOL: Option<DbPool> = None;
-
-pub fn initialize_pool(pool: SqlitePool) {
-    unsafe {
-        DB_POOL = Some(DbPool::new(pool));
+    
+    async fn stop(&self) -> ServiceResult<()> {
+        // No-op stop since CompressionWorker handles shutdown separately
+        Ok(())
     }
-}
-
-pub fn get_pool() -> &'static SqlitePool {
-    unsafe {
-        match *(&raw const DB_POOL) {
-            Some(ref provider) => provider.get(),
-            None => panic!("Database pool not initialized"),
-        }
+    
+    async fn queue_document(&self, document_id: Uuid, priority: CompressionPriority) -> ServiceResult<()> {
+        // Delegate to service
+        self.compression_service.queue_document_for_compression(document_id, priority).await
+    }
+    
+    async fn cancel_compression(&self, document_id: Uuid) -> ServiceResult<bool> {
+        // Delegate to service
+        self.compression_service.cancel_compression(document_id).await
+    }
+    
+    async fn update_priority(&self, document_id: Uuid, priority: CompressionPriority) -> ServiceResult<bool> {
+        // Delegate to service
+        self.compression_service.update_compression_priority(document_id, priority).await
+    }
+    
+    async fn bulk_update_priority(&self, document_ids: &[Uuid], priority: CompressionPriority) -> ServiceResult<u64> {
+        // Delegate to service
+        self.compression_service.bulk_update_compression_priority(document_ids, priority).await
+    }
+    
+    async fn get_queue_status(&self) -> ServiceResult<crate::domains::compression::types::CompressionQueueStatus> {
+        // Delegate to service
+        self.compression_service.get_compression_queue_status().await
     }
 }

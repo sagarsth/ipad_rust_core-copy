@@ -79,7 +79,14 @@ INSERT INTO document_types_new (
     icon, icon_updated_at, icon_updated_by,
     related_tables, related_tables_updated_at, related_tables_updated_by,
     created_at, updated_at, created_by_user_id, updated_by_user_id,
-    deleted_at, deleted_by_user_id
+    deleted_at, deleted_by_user_id,
+    -- Device ID columns (setting to NULL for existing data)
+    created_by_device_id, updated_by_device_id, name_updated_by_device_id,
+    allowed_extensions_updated_by_device_id, max_size_updated_by_device_id,
+    compression_level_updated_by_device_id, compression_method_updated_by_device_id,
+    min_size_for_compression_updated_by_device_id, description_updated_by_device_id,
+    default_priority_updated_by_device_id, icon_updated_by_device_id,
+    related_tables_updated_by_device_id, deleted_by_device_id
 )
 SELECT 
     id, name, name_updated_at, name_updated_by, 
@@ -93,7 +100,9 @@ SELECT
     icon, icon_updated_at, icon_updated_by,
     related_tables, related_tables_updated_at, related_tables_updated_by,
     created_at, updated_at, created_by_user_id, updated_by_user_id,
-    deleted_at, deleted_by_user_id
+    deleted_at, deleted_by_user_id,
+    -- Set device ID columns to NULL for existing data
+    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
 FROM document_types;
 
 -- Step 5: Drop the old table
