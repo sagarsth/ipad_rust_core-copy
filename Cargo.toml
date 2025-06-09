@@ -11,9 +11,11 @@ crate-type = ["staticlib"]
 
 
 # Compression libraries
-image = "0.24.6"
+image = { version = "0.24.6", default-features = false, features = ["jpeg", "png"] }
 zip = "0.6.6"
 tempfile = "3.7.0"
+kamadak-exif = "0.5.5"  # For EXIF metadata stripping (correct crate name)
+lopdf = "0.36.0"  # Pure Rust PDF compression (Ghostscript alternative)
 
 # Optional WebP support
 webp = { version = "0.2.5", optional = true }

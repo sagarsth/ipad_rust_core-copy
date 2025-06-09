@@ -13,7 +13,7 @@ use crate::errors::{DbError, DomainError, ServiceError, ServiceResult};
 use super::repository::CompressionRepository;
 use super::types::{
     CompressionResult,
-    CompressionQueueStatus, CompressionPriority, CompressionStats, CompressionConfig
+    CompressionQueueStatus, CompressionPriority, CompressionStats, CompressionConfig, CompressionMethod
 };
 use super::compressors::{
     Compressor,
@@ -294,7 +294,27 @@ impl CompressionService for CompressionServiceImpl {
         })?;
         
         // 6. Get document type details to determine compression settings
-        let config = config.unwrap_or_else(|| CompressionConfig::default());
+        let config = config.unwrap_or_else(|| {
+            // Create format-specific default config based on MIME type
+            match document.mime_type.as_str() {
+                "image/jpeg" | "image/jpg" => CompressionConfig {
+                    method: CompressionMethod::Lossy,
+                    quality_level: 80, // Good balance for JPEG
+                    min_size_bytes: 5120, // 5KB minimum for images
+                },
+                "image/png" => CompressionConfig {
+                    method: CompressionMethod::Lossless,
+                    quality_level: 9, // Best compression for PNG
+                    min_size_bytes: 10240, // 10KB minimum for PNG
+                },
+                "application/pdf" => CompressionConfig {
+                    method: CompressionMethod::PdfOptimize,
+                    quality_level: 5, // Balanced PDF compression
+                    min_size_bytes: 51200, // 50KB minimum for PDFs
+                },
+                _ => CompressionConfig::default()
+            }
+        });
 
         // BEFORE loading the entire file, check its size to avoid RAM spikes
         println!("📏 [COMPRESSION_SERVICE] Checking file size for document {}", document_id);
@@ -361,6 +381,32 @@ impl CompressionService for CompressionServiceImpl {
         let original_size = file_data.len() as i64;
         println!("📊 [COMPRESSION_SERVICE] Original file size: {} bytes for document {}", original_size, document_id);
         
+        // Check minimum size threshold for compression
+        if original_size < config.min_size_bytes {
+            println!("⏭️ [COMPRESSION_SERVICE] File too small to compress: {} bytes < {} bytes minimum", 
+                     original_size, config.min_size_bytes);
+            
+            self.media_doc_repo.update_compression_status(
+                document_id,
+                CompressionStatus::Skipped,
+                None,
+                None
+            ).await.map_err(|e| ServiceError::Domain(e))?;
+            
+            if let Some(queue_entry) = self.compression_repo.get_queue_entry_by_document_id(document_id).await
+                .map_err(|e| ServiceError::Domain(e))? {
+                self.compression_repo.update_queue_entry_status(
+                    queue_entry.id,
+                    "skipped",
+                    Some("File too small to benefit from compression")
+                ).await.map_err(|e| ServiceError::Domain(e))?;
+            }
+            
+            return Err(ServiceError::Domain(DomainError::Validation(
+                crate::errors::ValidationError::custom("File too small to benefit from compression")
+            )));
+        }
+        
         // 8. Determine MIME type and extension
         let mime_type = document.mime_type.as_str();
         let extension = get_extension(&document.original_filename);
@@ -414,6 +460,51 @@ impl CompressionService for CompressionServiceImpl {
         };
         
         let compressed_size = compressed_data.len() as i64;
+        
+        // Validate compression effectiveness - adaptive thresholds by MIME type
+        let effectiveness_threshold = match mime_type {
+            "image/jpeg" | "image/jpg" => 0.98, // Images should compress well (98% threshold)
+            "image/png" => 0.95, // PNG less compressible (95% threshold)
+            "application/pdf" => 0.90, // PDFs may not compress much (90% threshold)
+            _ => 0.95 // Default threshold
+        };
+        
+        let size_threshold = (original_size as f32 * effectiveness_threshold) as i64;
+        if compressed_size > size_threshold {
+            println!("⚠️ [COMPRESSION_SERVICE] Compression ineffective for document {}: {} -> {} bytes (>{:.1}% of original, threshold: {:.1}%)",
+                     document_id,
+                     original_size,
+                     compressed_size,
+                     (compressed_size as f32 / original_size as f32) * 100.0,
+                     effectiveness_threshold * 100.0);
+            
+            // Mark as skipped instead of completed
+            self.media_doc_repo.update_compression_status(
+                document_id,
+                CompressionStatus::Skipped,
+                None,
+                None
+            ).await.map_err(|e| ServiceError::Domain(e))?;
+            
+            if let Some(queue_entry) = self.compression_repo.get_queue_entry_by_document_id(document_id).await
+                .map_err(|e| ServiceError::Domain(e))? {
+                self.compression_repo.update_queue_entry_status(
+                    queue_entry.id,
+                    "skipped",
+                    Some("Compression would not reduce file size significantly")
+                ).await.map_err(|e| ServiceError::Domain(e))?;
+            }
+            
+            // Update stats for skipped
+            let mut tx = self.pool.begin().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+            self.compression_repo.update_stats_for_skipped(&mut tx).await
+                .map_err(|e| ServiceError::Domain(e))?;
+            tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+            
+            return Err(ServiceError::Domain(DomainError::Validation(
+                crate::errors::ValidationError::custom("Compression would not reduce file size significantly")
+            )));
+        }
         
         // 11. Determine entity type and ID for file storage
         let entity_type = document.related_table.as_str();
@@ -497,7 +588,10 @@ impl CompressionService for CompressionServiceImpl {
             original_size,
             compressed_size,
             &mut tx
-        ).await.map_err(|e| ServiceError::Domain(e))?;
+        ).await.map_err(|e| {
+            println!("❌ [COMPRESSION_SERVICE] Failed to update stats for {}: {:?}", document_id, e);
+            ServiceError::Domain(e)
+        })?;
         
         // 16. Update queue entry if exists
         if let Some(queue_entry) = self.compression_repo.get_queue_entry_by_document_id(document_id).await

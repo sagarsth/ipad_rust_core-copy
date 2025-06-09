@@ -321,3 +321,14 @@ impl From<User> for UserResponse {
         }
     }
 }
+
+/// Provides a summary of user counts by role and status.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UserStats {
+    pub total: i64,
+    pub active: i64,
+    pub inactive: i64,
+    pub admin: i64,
+    pub field_tl: i64,
+    pub field: i64,
+}

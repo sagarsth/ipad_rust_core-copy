@@ -1,7 +1,7 @@
 // user/repository.rs
 
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
-use crate::domains::user::types::{User, NewUser, UpdateUser, UserRow};
+use crate::domains::user::types::{User, NewUser, UpdateUser, UserRow, UserStats};
 use crate::auth::AuthContext;
 use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
 use crate::domains::core::repository::{HardDeletable, FindById};
@@ -35,6 +35,9 @@ pub trait UserRepository: Send + Sync + FindById<User> + HardDeletable + Mergeab
     
     /// Check if email is unique
     async fn is_email_unique(&self, email: &str, exclude_id: Option<Uuid>) -> DomainResult<bool>;
+
+    /// Get user statistics.
+    async fn get_stats(&self) -> DomainResult<UserStats>;
 }
 
 /// MergeableEntityRepository trait definition
@@ -1005,5 +1008,26 @@ impl UserRepository for SqliteUserRepository {
             .map_err(|e| DomainError::Database(DbError::from(e)))?;
             
         Ok(count == 0)
+    }
+
+    async fn get_stats(&self) -> DomainResult<UserStats> {
+        let stats = query_as::<_, UserStats>(
+            r#"
+            SELECT
+                COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END), 0) AS active,
+                COALESCE(SUM(CASE WHEN active = 0 THEN 1 ELSE 0 END), 0) AS inactive,
+                COALESCE(SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END), 0) AS admin,
+                COALESCE(SUM(CASE WHEN role = 'field_tl' THEN 1 ELSE 0 END), 0) AS field_tl,
+                COALESCE(SUM(CASE WHEN role = 'field' THEN 1 ELSE 0 END), 0) AS "field"
+            FROM users
+            WHERE deleted_at IS NULL
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| DomainError::Database(DbError::from(e)))?;
+
+        Ok(stats)
     }
 }

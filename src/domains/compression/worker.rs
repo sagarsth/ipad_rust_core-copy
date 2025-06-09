@@ -148,7 +148,28 @@ impl CompressionWorker {
                                     
                                     match result {
                                         Ok(compression_result) => {
-                                            // Successfully compressed
+                                            // Validate compression effectiveness (95% threshold)
+                                            let size_threshold = (compression_result.original_size as f32 * 0.95) as i64;
+                                            
+                                            if compression_result.compressed_size > size_threshold {
+                                                println!("⚠️ [COMPRESSION_JOB] Compression ineffective for document {}: {} -> {} bytes (>{:.1}% of original)",
+                                                         document_id,
+                                                         compression_result.original_size,
+                                                         compression_result.compressed_size,
+                                                         (compression_result.compressed_size as f32 / compression_result.original_size as f32) * 100.0);
+                                                
+                                                // Mark as skipped instead of completed
+                                                if let Err(e) = repo.update_queue_entry_status(
+                                                    queue_entry.id,
+                                                    "skipped", 
+                                                    Some("Compression would increase file size")
+                                                ).await {
+                                                    println!("❌ [COMPRESSION_JOB] Failed to update status to skipped: {:?}", e);
+                                                }
+                                                return;
+                                            }
+                                            
+                                            // Successfully compressed with meaningful size reduction
                                             println!("✅ [COMPRESSION_JOB] Document {} compressed successfully in {:?}", 
                                                      document_id, duration);
                                             println!("   📊 Original: {} bytes, Compressed: {} bytes, Saved: {:.1}%",

@@ -23,7 +23,7 @@
 // ----------------------------------------------------------------------------
 
 use crate::ffi::{handle_status_result, error::{FFIError}};
-use crate::domains::user::types::{NewUser, UpdateUser, UserResponse};
+use crate::domains::user::types::{NewUser, UpdateUser, UserResponse, UserStats};
 use crate::auth::AuthContext;
 use crate::types::UserRole;
 use crate::globals;
@@ -366,6 +366,42 @@ pub unsafe extern "C" fn user_change_password(payload_json: *const c_char) -> c_
 
         block_on_async(svc.change_password(&payload.old_password, &payload.new_password, &auth_ctx))
             .map_err(|e| FFIError::from_service_error(e))?;
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// FFI – Get User Stats
+// ---------------------------------------------------------------------------
+// Expected JSON payload:
+// {
+//   "auth": { AuthCtxDto }
+// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn user_get_stats(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        if payload_json.is_null() || result.is_null() {
+            return Err(FFIError::invalid_argument("null ptr"));
+        }
+        let json_str = CStr::from_ptr(payload_json)
+            .to_str()
+            .map_err(|_| FFIError::invalid_argument("utf8"))?;
+
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        let payload: Payload = serde_json::from_str(json_str)
+            .map_err(|e| FFIError::invalid_argument(&format!("json parse: {e}")))?;
+
+        let auth_ctx: AuthContext = payload.auth.try_into()?;
+        let svc = globals::get_user_service()?;
+
+        let stats = block_on_async(svc.get_user_stats(&auth_ctx))
+            .map_err(|e| FFIError::from_service_error(e))?;
+
+        let json_resp = serde_json::to_string(&stats)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
         Ok(())
     })
 }

@@ -302,7 +302,7 @@ int32_t strategic_goal_get_value_statistics(const char*, char**);
 void strategic_goal_free(char*);
 
 // ============================================================================
-// USER FUNCTIONS (8 functions)
+// USER FUNCTIONS (9 functions)
 // ============================================================================
 
 int32_t user_create(const char*, char**);
@@ -312,6 +312,7 @@ int32_t user_update(const char*, char**);
 int32_t user_hard_delete(const char*);
 int32_t user_is_email_unique(const char*, char**);
 int32_t user_change_password(const char*);
+int32_t user_get_stats(const char*, char**);
 void user_free(char*);
 
 // ============================================================================

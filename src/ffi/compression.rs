@@ -112,6 +112,11 @@ fn parse_json_input<T: for<'de> Deserialize<'de>>(input: *const c_char) -> FFIRe
     let json_str = c_str.to_str()
         .map_err(|_| FFIError::new(ErrorCode::InvalidArgument, "Invalid UTF-8 in input JSON"))?;
     
+    // Prevent memory exhaustion on iOS with large payloads
+    if json_str.len() > 1_048_576 { // 1MB limit
+        return Err(FFIError::new(ErrorCode::InvalidArgument, "Input JSON exceeds 1MB limit"));
+    }
+    
     serde_json::from_str(json_str)
         .map_err(|e| FFIError::with_details(
             ErrorCode::InvalidArgument,
@@ -129,22 +134,27 @@ fn parse_json_input<T: for<'de> Deserialize<'de>>(input: *const c_char) -> FFIRe
 /// Output: CompressionResult JSON
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn compression_compress_document(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    // Validate result pointer first
+    if result.is_null() {
+        return ErrorCode::NullPointer as c_int;
+    }
+    *result = std::ptr::null_mut(); // Initialize to null
+    
     let json_result = handle_json_result(|| -> FFIResult<_> {
         let request: CompressDocumentRequest = parse_json_input(payload_json)?;
         let document_id = Uuid::parse_str(&request.document_id)
             .map_err(|_| FFIError::new(ErrorCode::InvalidArgument, "Invalid document_id UUID"))?;
         
-        let service = globals::get_compression_service()?;
+        // Clone service to avoid lifetime issues
+        let service = globals::get_compression_service()?.clone();
         
-        crate::ffi::block_on_async(async {
+        crate::ffi::block_on_async(async move {
             service.compress_document(document_id, request.config).await
                 .map_err(|e| to_ffi_error(e))
         })
     });
     
-    if !result.is_null() {
-        *result = json_result;
-    }
+    *result = json_result;
     if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
 }
 
@@ -152,18 +162,22 @@ pub unsafe extern "C" fn compression_compress_document(payload_json: *const c_ch
 /// Output: CompressionQueueStatus JSON
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn compression_get_queue_status(result: *mut *mut c_char) -> c_int {
+    // Validate result pointer first
+    if result.is_null() {
+        return ErrorCode::NullPointer as c_int;
+    }
+    *result = std::ptr::null_mut(); // Initialize to null
+    
     let json_result = handle_json_result(|| -> FFIResult<_> {
-        let service = globals::get_compression_service()?;
+        let service = globals::get_compression_service()?.clone();
         
-        crate::ffi::block_on_async(async {
+        crate::ffi::block_on_async(async move {
             service.get_compression_queue_status().await
                 .map_err(|e| to_ffi_error(e))
         })
     });
     
-    if !result.is_null() {
-        *result = json_result;
-    }
+    *result = json_result;
     if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
 }
 
@@ -343,6 +357,8 @@ pub unsafe extern "C" fn compression_is_document_in_use(payload_json: *const c_c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn compression_free(ptr: *mut c_char) {
     if !ptr.is_null() {
+        // Track deallocation for debugging
+        crate::ffi::track_string_deallocation(ptr);
         let _ = CString::from_raw(ptr);
     }
 }

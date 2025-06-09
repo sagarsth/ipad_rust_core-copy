@@ -1,5 +1,5 @@
 use crate::errors::{ServiceError, ServiceResult, DomainError};
-use crate::domains::user::types::{User, NewUser, UpdateUser, UserResponse};
+use crate::domains::user::types::{User, NewUser, UpdateUser, UserResponse, UserStats};
 use crate::domains::user::repository::UserRepository;
 use crate::auth::{AuthContext, AuthService};
 use crate::types::Permission;
@@ -236,106 +236,83 @@ impl UserService {
         Ok(())
     }
     
+    /// Get user statistics (counts by role and status).
+    pub async fn get_user_stats(&self, auth: &AuthContext) -> ServiceResult<UserStats> {
+        // Only admins can view user stats
+        auth.authorize(Permission::ManageUsers)?;
+
+        let stats = self.user_repo.get_stats()
+            .await
+            .map_err(ServiceError::Domain)?;
+
+        Ok(stats)
+    }
+    
     /// Initialize default admin, team lead, and officer accounts
     pub async fn initialize_default_accounts(&self, auth_context: &AuthContext) -> ServiceResult<()> {
         println!("👥 [USER_SERVICE] Starting default account initialization");
         println!("👤 [USER_SERVICE] Auth context - User: {}, Role: {:?}", auth_context.user_id, auth_context.role);
         
-        // Create admin directly through repository to bypass permission checks
-        println!("🔧 [USER_SERVICE] Creating admin account...");
-        let admin = NewUser {
-            email: "admin@example.com".to_string(),
-            password: "Admin123!".to_string(),
-            name: "System Administrator".to_string(),
-            role: "admin".to_string(),
-            active: true,
-            created_by_user_id: None, // System created, not tied to context user
+        // Helper function to create an account if it doesn't exist
+        let create_account_if_needed = |email: String, password: String, name: String, role: String| async move {
+            println!("🔍 [USER_SERVICE] Checking if {} account exists...", email);
+            
+            // Check if account already exists
+            match self.user_repo.find_by_email(&email).await {
+                Ok(_user) => {
+                    println!("✅ [USER_SERVICE] Account {} already exists, skipping creation", email);
+                    return Ok(());
+                },
+                Err(crate::errors::DomainError::EntityNotFound(_, _)) => {
+                    println!("🔧 [USER_SERVICE] Account {} not found, creating...", email);
+                    // Account doesn't exist, create it
+                },
+                Err(e) => {
+                    println!("❌ [USER_SERVICE] Error checking for existing account {}: {}", email, e);
+                    return Err(ServiceError::Domain(e));
+                }
+            }
+            
+            let new_user = NewUser {
+                email: email.to_string(),
+                password: password.to_string(),
+                name: name.to_string(),
+                role: role.to_string(),
+                active: true,
+                created_by_user_id: None, // System created
+            };
+            
+            println!("🔐 [USER_SERVICE] Hashing password for {}...", email);
+            let password_hash = self.auth_service.hash_password(&new_user.password)
+                .map_err(|e| {
+                    println!("❌ [USER_SERVICE] Failed to hash password for {}: {}", email, e);
+                    e
+                })?;
+            
+            let mut user_with_hash = new_user;
+            user_with_hash.password = password_hash;
+            
+            println!("💾 [USER_SERVICE] Creating {} user in repository...", email);
+            match self.user_repo.create(user_with_hash, auth_context).await {
+                Ok(user) => {
+                    println!("✅ [USER_SERVICE] {} user created successfully: {}", email, user.email);
+                    Ok(())
+                },
+                Err(e) => {
+                    println!("❌ [USER_SERVICE] Failed to create {} user: {}", email, e);
+                    Err(ServiceError::Domain(e))
+                }
+            }
         };
         
-        println!("🔐 [USER_SERVICE] Hashing admin password...");
-        let admin_password_hash = self.auth_service.hash_password(&admin.password)
-            .map_err(|e| {
-                println!("❌ [USER_SERVICE] Failed to hash admin password: {}", e);
-                e
-            })?;
+        // Create admin account if needed
+        create_account_if_needed("admin@example.com".to_string(), "Admin123!".to_string(), "System Administrator".to_string(), "admin".to_string()).await?;
         
-        let mut admin_with_hash = admin;
-        admin_with_hash.password = admin_password_hash;
-        
-        println!("💾 [USER_SERVICE] Creating admin user in repository...");
-        match self.user_repo.create(admin_with_hash, auth_context).await {
-            Ok(user) => {
-                println!("✅ [USER_SERVICE] Admin user created successfully: {}", user.email);
-            },
-            Err(e) => {
-                println!("❌ [USER_SERVICE] Failed to create admin user: {}", e);
-                return Err(ServiceError::Domain(e));
-            }
-        }
-        
-        // Create default Team Lead account
-        println!("🔧 [USER_SERVICE] Creating team lead account...");
-        let team_lead = NewUser {
-            email: "lead@example.com".to_string(),
-            password: "Lead123!".to_string(), // Should be changed on first login
-            name: "Field Team Lead".to_string(),
-            role: "field_tl".to_string(),
-            active: true,
-            created_by_user_id: None, // System created
-        };
-        
-        println!("🔐 [USER_SERVICE] Hashing team lead password...");
-        let tl_password_hash = self.auth_service.hash_password(&team_lead.password)
-            .map_err(|e| {
-                println!("❌ [USER_SERVICE] Failed to hash team lead password: {}", e);
-                e
-            })?;
-        
-        let mut tl_with_hash = team_lead;
-        tl_with_hash.password = tl_password_hash;
-        
-        println!("💾 [USER_SERVICE] Creating team lead user in repository...");
-        match self.user_repo.create(tl_with_hash, auth_context).await {
-            Ok(user) => {
-                println!("✅ [USER_SERVICE] Team lead user created successfully: {}", user.email);
-            },
-            Err(e) => {
-                println!("❌ [USER_SERVICE] Failed to create team lead user: {}", e);
-                return Err(ServiceError::Domain(e));
-            }
-        }
+        // Create team lead account if needed
+        create_account_if_needed("lead@example.com".to_string(), "Lead123!".to_string(), "Field Team Lead".to_string(), "field_tl".to_string()).await?;
 
-        // Create default Officer account
-        println!("🔧 [USER_SERVICE] Creating officer account...");
-        let officer = NewUser {
-            email: "officer@example.com".to_string(),
-            password: "Officer123!".to_string(), // Should be changed on first login
-            name: "Field Officer".to_string(),
-            role: "field".to_string(),
-            active: true,
-            created_by_user_id: None, // System created
-        };
-        
-        println!("🔐 [USER_SERVICE] Hashing officer password...");
-        let officer_password_hash = self.auth_service.hash_password(&officer.password)
-            .map_err(|e| {
-                println!("❌ [USER_SERVICE] Failed to hash officer password: {}", e);
-                e
-            })?;
-        
-        let mut officer_with_hash = officer;
-        officer_with_hash.password = officer_password_hash;
-        
-        println!("💾 [USER_SERVICE] Creating officer user in repository...");
-        match self.user_repo.create(officer_with_hash, auth_context).await {
-            Ok(user) => {
-                println!("✅ [USER_SERVICE] Officer user created successfully: {}", user.email);
-            },
-            Err(e) => {
-                println!("❌ [USER_SERVICE] Failed to create officer user: {}", e);
-                return Err(ServiceError::Domain(e));
-            }
-        }
+        // Create officer account if needed
+        create_account_if_needed("officer@example.com".to_string(), "Officer123!".to_string(), "Field Officer".to_string(), "field".to_string()).await?;
 
         println!("🎉 [USER_SERVICE] All default accounts initialized successfully!");
         log::info!("Initialized default admin, team lead, and officer accounts.");

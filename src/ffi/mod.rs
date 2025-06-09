@@ -6,6 +6,7 @@ use crate::ffi::error::{FFIError, ErrorCode};
 use serde::Serialize;
 use std::sync::OnceLock;
 use tokio::runtime::Runtime;
+use std::future::Future;
 
 // Declare necessary FFI submodules
 pub mod auth;
@@ -26,24 +27,21 @@ pub mod livelihood;
 pub mod workshop;
 pub mod participant;
 
-// Global runtime instance
+// iOS-safe single-threaded runtime
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
-/// Get or create the global Tokio runtime
+/// Initialize or get the iOS-safe Tokio runtime
 pub fn get_runtime() -> &'static Runtime {
     RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .expect("Failed to create Tokio runtime")
+            .expect("Failed to create iOS-safe Tokio runtime")
     })
 }
 
-/// Execute an async function using the global runtime
-pub fn block_on_async<F, T, E>(future: F) -> Result<T, E>
-where
-    F: std::future::Future<Output = Result<T, E>>,
-{
+/// Block on async operation in iOS-safe manner
+pub fn block_on_async<F: Future>(future: F) -> F::Output {
     get_runtime().block_on(future)
 }
 
@@ -131,3 +129,25 @@ pub fn to_ffi_error<E: std::error::Error + Clone + 'static>(error: E) -> FFIErro
 
 // Re-export FFIResult for convenience if needed within ffi module
 pub use error::FFIResult;
+
+// Memory safety utilities for FFI
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+// Simple counter for tracking allocations instead of using raw pointers
+static ALLOCATION_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Track string allocation for debugging (simplified approach)
+pub fn track_string_allocation(_ptr: *mut std::os::raw::c_char) {
+    ALLOCATION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Track string deallocation for debugging (simplified approach)
+pub fn track_string_deallocation(_ptr: *mut std::os::raw::c_char) {
+    ALLOCATION_COUNTER.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Get count of currently allocated strings
+pub fn get_allocated_string_count() -> usize {
+    ALLOCATION_COUNTER.load(std::sync::atomic::Ordering::Relaxed)
+}
