@@ -18,9 +18,10 @@ class UserFFIHandler {
     private let jsonDecoder = JSONDecoder()
 
     init() {
-        // Customize encoder/decoder if needed
-        jsonEncoder.keyEncodingStrategy = .convertToSnakeCase
-        jsonDecoder.keyDecodingStrategy = .convertFromSnakeCase
+        // Note: Do NOT use convertToSnakeCase because AuthContextPayload already uses snake_case field names
+        // Using convertToSnakeCase would corrupt field names like "user_id" -> "user__id"
+        // jsonEncoder.keyEncodingStrategy = .convertToSnakeCase
+        // jsonDecoder.keyDecodingStrategy = .convertFromSnakeCase
     }
     
     // MARK: - User Management

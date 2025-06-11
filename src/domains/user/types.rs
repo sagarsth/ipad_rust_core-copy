@@ -305,6 +305,16 @@ pub struct UserResponse {
     pub last_login: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    // Audit fields
+    pub created_by_user_id: Option<Uuid>,
+    pub updated_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
+    // Enriched fields (set by service layer)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>, // Username of creator
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by: Option<String>, // Username of last updater
 }
 
 impl From<User> for UserResponse {
@@ -318,7 +328,27 @@ impl From<User> for UserResponse {
             last_login: user.last_login.map(|dt| dt.to_rfc3339()),
             created_at: user.created_at.to_rfc3339(),
             updated_at: user.updated_at.to_rfc3339(),
+            created_by_user_id: user.created_by_user_id,
+            updated_by_user_id: user.updated_by_user_id,
+            created_by_device_id: user.created_by_device_id,
+            updated_by_device_id: user.updated_by_device_id,
+            created_by: None, // Set by enrichment
+            updated_by: None, // Set by enrichment
         }
+    }
+}
+
+impl UserResponse {
+    /// Set created by username
+    pub fn with_created_by(mut self, username: String) -> Self {
+        self.created_by = Some(username);
+        self
+    }
+    
+    /// Set updated by username  
+    pub fn with_updated_by(mut self, username: String) -> Self {
+        self.updated_by = Some(username);
+        self
     }
 }
 

@@ -8,9 +8,18 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - Scroll Offset Preference Key
+struct ScrollOffsetPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 // MARK: - Main View
 struct StrategicGoalsView: View {
     @EnvironmentObject var authManager: AuthenticationManager
+    @StateObject private var viewStyleManager = ViewStylePreferenceManager()
     private let ffiHandler = StrategicGoalFFIHandler()
 
     @State private var goals: [StrategicGoalResponse] = []
@@ -21,12 +30,24 @@ struct StrategicGoalsView: View {
     @State private var selectedGoal: StrategicGoalResponse?
     @State private var showErrorAlert = false
     @State private var errorMessage: String?
+    @State private var currentViewStyle: ListViewStyle = .cards
+    @State private var isScrolling = false
+    @State private var scrollOffset: CGFloat = 0
+    
+    // Selection state for AdaptiveListView
+    @State private var isInSelectionMode = false
+    @State private var selectedItems: Set<String> = []
     
     // Stats
     @State private var totalGoals = 0
     @State private var onTrackGoals = 0
     @State private var atRiskGoals = 0
     @State private var completedGoals = 0
+    
+    // Computed property to determine if we should hide the top section
+    private var shouldHideTopSection: Bool {
+        scrollOffset > 100
+    }
     
     var filteredGoals: [StrategicGoalResponse] {
         goals.filter { goal in
@@ -46,89 +67,11 @@ struct StrategicGoalsView: View {
     }
     
     var body: some View {
-        VStack(spacing: 0) {
-            // Stats Cards
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 16) {
-                    StatsCard(title: "Total Goals", value: "\(totalGoals)", color: .blue, icon: "target")
-                    StatsCard(title: "On Track", value: "\(onTrackGoals)", color: .green, icon: "checkmark.circle")
-                    StatsCard(title: "At Risk", value: "\(atRiskGoals)", color: .orange, icon: "exclamationmark.triangle")
-                    StatsCard(title: "Completed", value: "\(completedGoals)", color: .purple, icon: "flag.checkered")
-                }
-                .padding(.horizontal)
-            }
-            .padding(.vertical)
-            
-            // Search and Filters
-            VStack(spacing: 12) {
-                // Search Bar
-                HStack {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("Search goals...", text: $searchText)
-                    if !searchText.isEmpty {
-                        Button(action: { searchText = "" }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .padding(10)
-                .background(Color(.systemGray6))
-                .cornerRadius(8)
-                
-                // Status Filter
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        FilterChip(title: "All", value: "all", selection: $selectedStatus)
-                        FilterChip(title: "On Track", value: "on_track", selection: $selectedStatus, color: .green)
-                        FilterChip(title: "At Risk", value: "at_risk", selection: $selectedStatus, color: .orange)
-                        FilterChip(title: "Behind", value: "behind", selection: $selectedStatus, color: .red)
-                        FilterChip(title: "Completed", value: "completed", selection: $selectedStatus, color: .blue)
-                    }
-                }
-            }
-            .padding(.horizontal)
-            
-            // Goals List
-            if isLoading {
-                Spacer()
-                ProgressView("Loading goals...")
-                Spacer()
-            } else if filteredGoals.isEmpty {
-                Spacer()
-                VStack(spacing: 16) {
-                    Image(systemName: "target")
-                        .font(.system(size: 60))
-                        .foregroundColor(.secondary)
-                    Text("No goals found")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
-                    if !searchText.isEmpty || selectedStatus != "all" {
-                        Button("Clear Filters") {
-                            searchText = ""
-                            selectedStatus = "all"
-                        }
-                        .font(.caption)
-                    }
-                }
-                Spacer()
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 12) {
-                        ForEach(filteredGoals) { goal in
-                            GoalCard(goal: goal) {
-                                selectedGoal = goal
-                            }
-                        }
-                    }
-                    .padding(.horizontal)
-                    .padding(.bottom)
-                }
-            }
+        GeometryReader { geometry in
+            mainScrollView
         }
         .navigationTitle("Strategic Goals")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(shouldHideTopSection ? .inline : .large)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button(action: { showCreateSheet = true }) {
@@ -153,7 +96,158 @@ struct StrategicGoalsView: View {
             Text(errorMessage ?? "An error occurred")
         }
         .onAppear {
+            currentViewStyle = viewStyleManager.getViewStyle(for: "strategic_goals")
             loadGoals()
+        }
+    }
+    
+    // MARK: - View Components
+    
+    private var mainScrollView: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                statsCardsSection
+                searchFiltersSection
+                goalsListSection
+            }
+            .background(scrollOffsetGeometry)
+        }
+        .coordinateSpace(name: "scroll")
+        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
+            withAnimation(.easeInOut(duration: 0.1)) {
+                scrollOffset = -value
+            }
+            isScrolling = abs(value) > 50
+        }
+    }
+    
+    private var statsCardsSection: some View {
+        Group {
+            if !shouldHideTopSection {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 16) {
+                        StatsCard(title: "Total Goals", value: "\(totalGoals)", color: .blue, icon: "target")
+                        StatsCard(title: "On Track", value: "\(onTrackGoals)", color: .green, icon: "checkmark.circle")
+                        StatsCard(title: "At Risk", value: "\(atRiskGoals)", color: .orange, icon: "exclamationmark.triangle")
+                        StatsCard(title: "Completed", value: "\(completedGoals)", color: .purple, icon: "flag.checkered")
+                    }
+                    .padding(.horizontal)
+                }
+                .padding(.vertical)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+    }
+    
+    private var searchFiltersSection: some View {
+        VStack(spacing: shouldHideTopSection ? 8 : 12) {
+            searchBar
+            statusFilters
+        }
+        .padding(.horizontal)
+        .padding(.bottom, shouldHideTopSection ? 8 : 16)
+        .background(Color(.systemBackground))
+        .animation(.easeInOut(duration: 0.3), value: shouldHideTopSection)
+    }
+    
+    private var searchBar: some View {
+        HStack {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(.secondary)
+            TextField("Search goals...", text: $searchText)
+            if !searchText.isEmpty {
+                Button(action: { searchText = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(shouldHideTopSection ? 8 : 10)
+        .background(Color(.systemGray6))
+        .cornerRadius(8)
+    }
+    
+    private var statusFilters: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                FilterChip(title: "All", value: "all", selection: $selectedStatus)
+                FilterChip(title: "On Track", value: "on_track", selection: $selectedStatus, color: .green)
+                FilterChip(title: "At Risk", value: "at_risk", selection: $selectedStatus, color: .orange)
+                FilterChip(title: "Behind", value: "behind", selection: $selectedStatus, color: .red)
+                FilterChip(title: "Completed", value: "completed", selection: $selectedStatus, color: .blue)
+            }
+        }
+    }
+    
+    private var goalsListSection: some View {
+        Group {
+            if isLoading {
+                loadingView
+            } else if filteredGoals.isEmpty {
+                emptyStateView
+            } else {
+                adaptiveListView
+            }
+        }
+    }
+    
+    private var loadingView: some View {
+        VStack {
+            Spacer()
+            ProgressView("Loading goals...")
+            Spacer()
+        }
+        .frame(height: 300)
+    }
+    
+    private var emptyStateView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "target")
+                .font(.system(size: 60))
+                .foregroundColor(.secondary)
+            Text("No goals found")
+                .font(.headline)
+                .foregroundColor(.secondary)
+            if !searchText.isEmpty || selectedStatus != "all" {
+                Button("Clear Filters") {
+                    searchText = ""
+                    selectedStatus = "all"
+                }
+                .font(.caption)
+            }
+        }
+        .frame(height: 300)
+    }
+    
+    private var adaptiveListView: some View {
+        AdaptiveListView(
+            items: filteredGoals,
+            viewStyle: currentViewStyle,
+            onViewStyleChange: { newStyle in
+                currentViewStyle = newStyle
+                viewStyleManager.setViewStyle(newStyle, for: "strategic_goals")
+            },
+            onItemTap: { goal in
+                selectedGoal = goal
+            },
+            cardContent: { goal in
+                GoalCard(goal: goal)
+            },
+            tableColumns: Self.tableColumns,
+            rowContent: { goal, columns in
+                StrategicGoalTableRow(goal: goal, columns: columns)
+            },
+            domainName: "strategic_goals",
+            userRole: authManager.currentUser?.role,
+            isInSelectionMode: $isInSelectionMode,
+            selectedItems: $selectedItems
+        )
+    }
+    
+    private var scrollOffsetGeometry: some View {
+        GeometryReader { scrollGeometry in
+            Color.clear
+                .preference(key: ScrollOffsetPreferenceKey.self, value: scrollGeometry.frame(in: .named("scroll")).minY)
         }
     }
     
@@ -181,8 +275,8 @@ struct StrategicGoalsView: View {
             await MainActor.run {
                 isLoading = false
                 switch result {
-                case .success(let goalsResponse):
-                    self.goals = goalsResponse
+                case .success(let paginatedResult):
+                    self.goals = paginatedResult.items
                     updateStats()
                 case .failure(let error):
                     self.errorMessage = "Failed to load goals: \(error.localizedDescription)"
@@ -203,7 +297,6 @@ struct StrategicGoalsView: View {
 // MARK: - Goal Card Component
 struct GoalCard: View {
     let goal: StrategicGoalResponse
-    let onTap: () -> Void
     
     private var progress: Double {
         goal.progressPercentage ?? 0.0
@@ -220,7 +313,6 @@ struct GoalCard: View {
     }
 
     var body: some View {
-        Button(action: onTap) {
             VStack(alignment: .leading, spacing: 12) {
                 // Header
                 HStack {
@@ -267,6 +359,7 @@ struct GoalCard: View {
                         Text("\(Int(progress))%")
                             .font(.caption)
                             .fontWeight(.medium)
+                            .foregroundColor(progress > 100 ? .purple : .primary)
                     }
                     
                     GeometryReader { geometry in
@@ -276,8 +369,8 @@ struct GoalCard: View {
                                 .frame(height: 8)
                             
                             RoundedRectangle(cornerRadius: 4)
-                                .fill(statusInfo.color)
-                                .frame(width: geometry.size.width * (progress / 100), height: 8)
+                                .fill(progress > 100 ? .purple : statusInfo.color)
+                                .frame(width: geometry.size.width * min(progress / 100, 1.0), height: 8)
                         }
                     }
                     .frame(height: 8)
@@ -318,8 +411,6 @@ struct GoalCard: View {
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(Color(.systemGray5), lineWidth: 1)
             )
-        }
-        .buttonStyle(PlainButtonStyle())
     }
 }
 
@@ -392,7 +483,7 @@ struct CreateGoalSheet: View {
     @State private var kpi = ""
     @State private var targetValue = ""
     @State private var actualValue = ""
-    @State private var statusId = 1
+    @State private var statusId: Int64 = 1
     @State private var responsibleTeam = ""
     @State private var syncPriority: SyncPriority = .normal
     @State private var isLoading = false
@@ -431,10 +522,10 @@ struct CreateGoalSheet: View {
                 
                 Section("Details") {
                     Picker("Status", selection: $statusId) {
-                        Text("On Track").tag(1)
-                        Text("At Risk").tag(2)
-                        Text("Behind").tag(3)
-                        Text("Completed").tag(4)
+                        Text("On Track").tag(Int64(1))
+                        Text("At Risk").tag(Int64(2))
+                        Text("Behind").tag(Int64(3))
+                        Text("Completed").tag(Int64(4))
                     }
                     
                     TextField("Responsible Team", text: $responsibleTeam)
@@ -499,14 +590,14 @@ struct CreateGoalSheet: View {
 
         let newGoal = NewStrategicGoal(
             objectiveCode: code,
-            outcome: outcome,
-            kpi: kpi,
-            targetValue: Double(targetValue),
-            actualValue: Double(actualValue),
+            outcome: outcome.isEmpty ? nil : outcome,
+            kpi: kpi.isEmpty ? nil : kpi,
+            targetValue: targetValue.isEmpty ? nil : Double(targetValue),
+            actualValue: actualValue.isEmpty ? nil : Double(actualValue),
             statusId: statusId,
-            responsibleTeam: responsibleTeam,
+            responsibleTeam: responsibleTeam.isEmpty ? nil : responsibleTeam,
             syncPriority: syncPriority,
-            createdByUserId: currentUser.userId
+            createdByUserId: UUID(uuidString: currentUser.userId)
         )
 
         Task {
@@ -889,6 +980,18 @@ struct DocumentUploadSheet: View {
     @State private var linkedField = ""
     @State private var priority = "Normal"
     
+    // Strategic Goal document-linkable fields based on DocumentLinkable implementation
+    private let linkableFields = [
+        ("", "None"),
+        ("outcome", "Outcome"),
+        ("kpi", "KPI"),
+        ("actual_value", "Actual Value"),
+        ("supporting_documentation", "Supporting Documentation"),
+        ("impact_assessment", "Impact Assessment"),
+        ("theory_of_change", "Theory of Change"),
+        ("baseline_data", "Baseline Data")
+    ]
+    
     var body: some View {
         NavigationView {
             Form {
@@ -900,13 +1003,16 @@ struct DocumentUploadSheet: View {
                         Text("Strategic Plan").tag("strategic_plan")
                         Text("Progress Report").tag("progress_report")
                         Text("Evidence").tag("evidence")
+                        Text("Impact Assessment").tag("impact_assessment")
+                        Text("Theory of Change").tag("theory_of_change")
+                        Text("Baseline Data").tag("baseline_data")
+                        Text("Supporting Documentation").tag("supporting_documentation")
                     }
                     
                     Picker("Link to Field", selection: $linkedField) {
-                        Text("None").tag("")
-                        Text("Target Value").tag("target_value")
-                        Text("Actual Value").tag("actual_value")
-                        Text("KPI").tag("kpi")
+                        ForEach(linkableFields, id: \.0) { field in
+                            Text(field.1).tag(field.0)
+                        }
                     }
                     
                     Picker("Priority", selection: $priority) {
@@ -916,10 +1022,16 @@ struct DocumentUploadSheet: View {
                     }
                 }
                 
-                Section {
+                Section("Upload") {
                     Button(action: selectDocument) {
                         Label("Select Document", systemImage: "doc.badge.plus")
                     }
+                }
+                
+                Section {
+                    Text("Documents can be linked to specific fields for better organization and validation.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
             .navigationTitle("Upload Document")
@@ -928,13 +1040,24 @@ struct DocumentUploadSheet: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Upload") {
+                        uploadDocument()
+                    }
+                    .disabled(documentTitle.isEmpty || selectedDocumentType.isEmpty)
+                }
             }
         }
     }
     
     private func selectDocument() {
-        // In a real app, this would open a document picker
-        // For now, we'll just dismiss
+        // TODO: Implement document picker
+        print("Select document for goal: \(goalId)")
+    }
+    
+    private func uploadDocument() {
+        // TODO: Implement document upload
+        print("Upload document - Title: \(documentTitle), Type: \(selectedDocumentType), Field: \(linkedField), Priority: \(priority)")
         dismiss()
     }
 }

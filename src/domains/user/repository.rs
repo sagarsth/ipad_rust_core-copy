@@ -974,9 +974,10 @@ impl UserRepository for SqliteUserRepository {
             log::debug!("No changes made to user {}", id);
         }
         
-        // Return updated user
-        self.find_by_id_with_tx(id, &mut tx).await?
-            .ok_or_else(|| DomainError::EntityNotFound(Self::ENTITY_TABLE.to_string(), id))
+        // Commit transaction to persist changes
+        tx.commit().await.map_err(DbError::from)?;
+        // Return updated user (outside of the transaction)
+        self.find_by_id(id).await
     }
     
     async fn update_last_login(&self, id: Uuid) -> DomainResult<()> {

@@ -14,7 +14,6 @@ class StrategicGoalFFIHandler {
 
     init() {
         jsonEncoder.keyEncodingStrategy = .convertToSnakeCase
-        jsonDecoder.keyDecodingStrategy = .convertFromSnakeCase
     }
 
     private func encode<T: Encodable>(_ value: T) throws -> String {
@@ -33,6 +32,8 @@ class StrategicGoalFFIHandler {
             queue.async {
                 do {
                     let jsonPayload = try self.encode(payload)
+                    // DEBUG: Print payload for FFI create
+                    print("[StrategicGoalFFIHandler] JSON Payload: \(jsonPayload)")
                     let ffiResult = FFIHelper.execute(
                         call: { resultPtr in
                             jsonPayload.withCString { cJson in
@@ -40,10 +41,33 @@ class StrategicGoalFFIHandler {
                             }
                         },
                         parse: { responseString in
+                            // DEBUG: Print response from FFI
+                            print("[StrategicGoalFFIHandler] FFI Response: \(responseString)")
                             guard let data = responseString.data(using: .utf8) else {
                                 throw FFIError.stringConversionFailed
                             }
-                            return try self.jsonDecoder.decode(R.self, from: data)
+                            do {
+                                return try self.jsonDecoder.decode(R.self, from: data)
+                            } catch let decodingError as DecodingError {
+                                var message: String
+                                switch decodingError {
+                                case .keyNotFound(let codingKey, let context):
+                                    message = "Missing key '\(codingKey.stringValue)': \(context.debugDescription)"
+                                case .typeMismatch(let type, let context):
+                                    message = "Type mismatch for '\(type)': \(context.debugDescription)"
+                                case .valueNotFound(let type, let context):
+                                    message = "Value not found for '\(type)': \(context.debugDescription)"
+                                case .dataCorrupted(let context):
+                                    message = "Data corrupted: \(context.debugDescription)"
+                                @unknown default:
+                                    message = decodingError.localizedDescription
+                                }
+                                print("[StrategicGoalFFIHandler] JSON Decoding Detailed Error: \(message)")
+                                throw FFIError.rustError(message)
+                            } catch {
+                                print("[StrategicGoalFFIHandler] JSON Decoding Unknown Error: \(error)")
+                                throw error
+                            }
                         },
                         free: strategic_goal_free
                     )
@@ -74,7 +98,7 @@ class StrategicGoalFFIHandler {
         return await executeOperation(payload: payload, ffiCall: strategic_goal_get)
     }
     
-    func list(pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<[StrategicGoalResponse], Error> {
+    func list(pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<PaginatedResult<StrategicGoalResponse>, Error> {
         let payload = StrategicGoalListRequest(pagination: pagination, include: include, auth: auth)
         return await executeOperation(payload: payload, ffiCall: strategic_goal_list)
     }
@@ -155,27 +179,27 @@ class StrategicGoalFFIHandler {
 
     // MARK: - Queries
     
-    func findByStatus(statusId: Int, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<[StrategicGoalResponse], Error> {
+    func findByStatus(statusId: Int, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<PaginatedResult<StrategicGoalResponse>, Error> {
         let payload = FindByStatusRequest(statusId: statusId, pagination: pagination, include: include, auth: auth)
         return await executeOperation(payload: payload, ffiCall: strategic_goal_find_by_status)
     }
     
-    func findByTeam(teamName: String, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<[StrategicGoalResponse], Error> {
+    func findByTeam(teamName: String, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<PaginatedResult<StrategicGoalResponse>, Error> {
         let payload = FindByTeamRequest(teamName: teamName, pagination: pagination, include: include, auth: auth)
         return await executeOperation(payload: payload, ffiCall: strategic_goal_find_by_team)
     }
 
-    func findByUserRole(userId: String, role: UserGoalRole, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<[StrategicGoalResponse], Error> {
+    func findByUserRole(userId: String, role: UserGoalRole, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<PaginatedResult<StrategicGoalResponse>, Error> {
         let payload = FindByUserRoleRequest(userId: userId, role: role, pagination: pagination, include: include, auth: auth)
         return await executeOperation(payload: payload, ffiCall: strategic_goal_find_by_user_role)
     }
 
-    func findStale(daysStale: Int, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<[StrategicGoalResponse], Error> {
+    func findStale(daysStale: Int, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<PaginatedResult<StrategicGoalResponse>, Error> {
         let payload = FindStaleRequest(daysStale: daysStale, pagination: pagination, include: include, auth: auth)
         return await executeOperation(payload: payload, ffiCall: strategic_goal_find_stale)
     }
 
-    func findByDateRange(startDate: String, endDate: String, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<[StrategicGoalResponse], Error> {
+    func findByDateRange(startDate: String, endDate: String, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<PaginatedResult<StrategicGoalResponse>, Error> {
         let payload = FindByDateRangeRequest(startDate: startDate, endDate: endDate, pagination: pagination, include: include, auth: auth)
         return await executeOperation(payload: payload, ffiCall: strategic_goal_find_by_date_range)
     }

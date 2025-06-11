@@ -25,25 +25,25 @@ enum UserGoalRole: String, Codable {
 }
 
 enum SyncPriority: String, Codable {
-    case low = "Low"
-    case normal = "Normal"
-    case high = "High"
+    case low = "low"
+    case normal = "normal"
+    case high = "high"
 }
 
 
 // MARK: - Core DTOs
 
 struct NewStrategicGoal: Codable {
-    var id: String?
+    var id: UUID?
     let objectiveCode: String
     let outcome: String?
     let kpi: String?
     let targetValue: Double?
     let actualValue: Double?
-    let statusId: Int?
+    let statusId: Int64?
     let responsibleTeam: String?
     let syncPriority: SyncPriority
-    let createdByUserId: String?
+    let createdByUserId: UUID?
 
     enum CodingKeys: String, CodingKey {
         case id, kpi, outcome
@@ -257,7 +257,7 @@ struct StatsRequest: Codable {
 
 // MARK: - Response Payloads
 
-struct StrategicGoalResponse: Codable, Identifiable {
+struct StrategicGoalResponse: Codable, Identifiable, MonthGroupable, Equatable {
     let id: String
     let objectiveCode: String
     let outcome: String?

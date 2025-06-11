@@ -246,9 +246,8 @@ pub unsafe extern "C" fn user_update(payload_json: *const c_char, result: *mut *
             updated_by_user_id: auth_ctx.user_id,
         };
 
-        let user = block_on_async(svc.update_user(id, update, &auth_ctx))
+        let resp = block_on_async(svc.update_user_with_response(id, update, &auth_ctx))
             .map_err(|e| FFIError::from_service_error(e))?;
-        let resp: UserResponse = user.into();
         let json_resp = serde_json::to_string(&resp)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();

@@ -35,23 +35,18 @@ struct PaginationDto: Codable {
     }
 }
 
-/// Generic paginated result wrapper containing data and pagination metadata.
+/// Generic paginated result wrapper that matches the Rust PaginatedResult structure.
 struct PaginatedResult<T: Codable>: Codable {
-    let data: [T]
-    let pagination: PaginationInfo?
+    let items: [T]
+    let total: UInt64
+    let page: UInt32
+    let perPage: UInt32
+    let totalPages: UInt32
     
-    struct PaginationInfo: Codable {
-        let currentPage: UInt32
-        let perPage: UInt32
-        let totalPages: UInt32?
-        let totalCount: UInt64?
-        
-        enum CodingKeys: String, CodingKey {
-            case currentPage = "current_page"
-            case perPage = "per_page" 
-            case totalPages = "total_pages"
-            case totalCount = "total_count"
-        }
+    enum CodingKeys: String, CodingKey {
+        case items, total, page
+        case perPage = "per_page"
+        case totalPages = "total_pages"
     }
 }
 

@@ -41,7 +41,8 @@ impl UserService {
     /// Get a user by ID as response DTO
     pub async fn get_user_response(&self, id: Uuid, auth: &AuthContext) -> ServiceResult<UserResponse> {
         let user = self.get_user(id, auth).await?;
-        Ok(user.into())
+        let response = UserResponse::from(user);
+        self.enrich_response(response).await
     }
     
     /// Get all users
@@ -60,7 +61,45 @@ impl UserService {
     /// Get all users as response DTOs
     pub async fn get_all_user_responses(&self, auth: &AuthContext) -> ServiceResult<Vec<UserResponse>> {
         let users = self.get_all_users(auth).await?;
-        Ok(users.into_iter().map(|u| u.into()).collect())
+        let mut responses = Vec::new();
+        
+        for user in users {
+            let response = UserResponse::from(user);
+            let enriched = self.enrich_response(response).await?;
+            responses.push(enriched);
+        }
+        
+        Ok(responses)
+    }
+    
+    /// Enrich a UserResponse with additional metadata (usernames, etc.)
+    async fn enrich_response(&self, mut response: UserResponse) -> ServiceResult<UserResponse> {
+        // Populate created_by username
+        if let Some(created_by_id) = response.created_by_user_id {
+            if let Ok(creator) = self.user_repo.find_by_id(created_by_id).await {
+                response.created_by = Some(creator.name.clone());
+                
+                // Populate updated_by username - check if same as creator
+                if let Some(updated_by_id) = response.updated_by_user_id {
+                    if updated_by_id == created_by_id {
+                        // Same person as creator
+                        response.updated_by = Some(creator.name);
+                    } else {
+                        // Different person - fetch separately
+                        if let Ok(updater) = self.user_repo.find_by_id(updated_by_id).await {
+                            response.updated_by = Some(updater.name);
+                        }
+                    }
+                }
+            }
+        } else if let Some(updated_by_id) = response.updated_by_user_id {
+            // No creator found, but we have an updater
+            if let Ok(updater) = self.user_repo.find_by_id(updated_by_id).await {
+                response.updated_by = Some(updater.name);
+            }
+        }
+        
+        Ok(response)
     }
     
     /// Create a new user
@@ -342,5 +381,12 @@ impl UserService {
         println!("💡 [USER_SERVICE] Suggestion: Create domain-specific test data services or use Swift-side data population");
         
         Ok(())
+    }
+
+    /// Update an existing user and return enriched response
+    pub async fn update_user_with_response(&self, id: Uuid, update: UpdateUser, auth: &AuthContext) -> ServiceResult<UserResponse> {
+        let updated_user = self.update_user(id, update, auth).await?;
+        let response = UserResponse::from(updated_user);
+        self.enrich_response(response).await
     }
 }

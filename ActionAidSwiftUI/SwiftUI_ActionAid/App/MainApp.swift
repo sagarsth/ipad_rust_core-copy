@@ -51,18 +51,16 @@ struct ActionAidApp: App {
         if fileExists {
             print("📂 [APP] Database file exists, attempting quick verification...")
             // Quick verification - try to access the auth service directly
-            do {
-                // Try a minimal FFI call to verify Rust state
-                let testResult = auth_initialize_default_accounts("verification_check")
-                if testResult == 0 {
-                    print("✅ [APP] Existing initialization verified, proceeding...")
-                    await MainActor.run {
-                        self.isInitialized = true
-                    }
-                    return
+            // Try a minimal FFI call to verify Rust state
+            let testResult = auth_initialize_default_accounts("verification_check")
+            if testResult == 0 {
+                print("✅ [APP] Existing initialization verified, proceeding...")
+                await MainActor.run {
+                    self.isInitialized = true
                 }
-            } catch {
-                print("⚠️ [APP] Verification failed, will re-initialize: \(error)")
+                return
+            } else {
+                print("⚠️ [APP] Verification failed, will re-initialize")
             }
         }
         
@@ -267,14 +265,43 @@ class AuthenticationManager: ObservableObject {
     private func loadStoredUser() {
         if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
            let user = try? JSONDecoder().decode(AuthenticatedUser.self, from: data) {
+            
             // Check if token is still valid (e.g., not older than 30 days)
             let daysSinceLogin = Calendar.current.dateComponents([.day], from: user.loginTime, to: Date()).day ?? 0
             if daysSinceLogin < 30 {
-                currentUser = user
-                isAuthenticated = true
+                // Validate token with backend to ensure user is still active
+                validateStoredToken(user)
             } else {
                 // Token expired, clear it
                 logout()
+            }
+        }
+    }
+    
+    private func validateStoredToken(_ user: AuthenticatedUser) {
+        Task {
+            do {
+                let authHandler = AuthFFIHandler()
+                let currentUserResult = try await authHandler.getCurrentUser(token: user.token).get()
+                
+                await MainActor.run {
+                    if currentUserResult.active {
+                        // User is still active, keep them logged in
+                        self.currentUser = user
+                        self.isAuthenticated = true
+                        print("✅ Stored token validated - user is active")
+                    } else {
+                        // User has been deactivated, force logout
+                        print("❌ User has been deactivated - forcing logout")
+                        self.logout()
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    // Token validation failed, force logout
+                    print("❌ Token validation failed - forcing logout: \(error)")
+                    self.logout()
+                }
             }
         }
     }

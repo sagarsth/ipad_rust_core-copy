@@ -222,11 +222,12 @@ impl ConflictResolutionStrategy {
 
 /// Sync priority for entities
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SyncPriority {
-    High,    // 'high'
-    Normal,  // 'normal'
-    Low,     // 'low'
-    Never,   // 'never'
+    High,
+    Normal,
+    Low,
+    Never,
 }
 
 impl std::fmt::Display for SyncPriority {

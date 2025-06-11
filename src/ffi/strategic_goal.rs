@@ -39,6 +39,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use base64;
 
 // ---------------------------------------------------------------------------
 // Helper utilities

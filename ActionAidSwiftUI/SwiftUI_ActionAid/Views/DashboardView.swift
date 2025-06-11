@@ -92,6 +92,20 @@ struct DashboardView: View {
     @State private var showingStats = false
     @State private var refreshTimer: Timer?
     
+    // Filter domains based on user role - hide funding and donors for non-admin users
+    private var filteredDomains: [Domain] {
+        guard let currentUser = authManager.currentUser else { return domains }
+        
+        if currentUser.role.lowercased() != "admin" {
+            // Hide funding and donor domains for non-admin users
+            return domains.filter { domain in
+                domain.id != "funding" && domain.id != "donors"
+            }
+        }
+        
+        return domains
+    }
+    
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -110,7 +124,7 @@ struct DashboardView: View {
                     GridItem(.flexible()),
                     GridItem(.flexible())
                 ], spacing: 20) {
-                    ForEach(domains) { domain in
+                    ForEach(filteredDomains) { domain in
                         DomainCard(domain: domain, showingStats: showingStats)
                     }
                 }
@@ -278,8 +292,15 @@ struct DashboardView: View {
         guard let currentUser = authManager.currentUser else { return }
         
         do {
-            let authHandler = AuthFFIHandler()
-            let users = try await authHandler.getAllUsers(token: currentUser.token).get()
+            // Fixed: Use UserFFIHandler for consistency with user management
+            let userHandler = UserFFIHandler()
+            let authContext = AuthContextPayload(
+                user_id: currentUser.userId,
+                role: currentUser.role,
+                device_id: authManager.getDeviceId(),
+                offline_mode: false
+            )
+            let users = try await userHandler.getAllUsers(auth: authContext).get()
             
             await MainActor.run {
                 // Update users domain with real stats
@@ -431,6 +452,8 @@ struct DomainCard: View {
 
 // MARK: - Quick Actions Card
 struct QuickActionsCard: View {
+    @EnvironmentObject var authManager: AuthenticationManager
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 4) {
@@ -442,7 +465,10 @@ struct QuickActionsCard: View {
             }
             
             VStack(spacing: 12) {
-                QuickActionButton(icon: "person.badge.plus", title: "Create New User", color: .blue)
+                // Only show create user button for admin users
+                if authManager.currentUser?.role.lowercased() == "admin" {
+                    QuickActionButton(icon: "person.badge.plus", title: "Create New User", color: .blue)
+                }
                 QuickActionButton(icon: "heart.fill", title: "Add Livelihood Program", color: .green)
                 QuickActionButton(icon: "calendar.badge.plus", title: "Schedule Workshop", color: .orange)
                 QuickActionButton(icon: "square.and.arrow.up", title: "Export Data", color: .purple)

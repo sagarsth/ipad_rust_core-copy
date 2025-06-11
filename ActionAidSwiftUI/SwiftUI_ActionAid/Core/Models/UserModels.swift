@@ -29,6 +29,16 @@ struct NewUser: Codable {
         case email, password, name, role, active
         case created_by_user_id = "created_by_user_id"
     }
+    
+    // Convenience initializer with default active = true
+    init(email: String, password: String, name: String, role: String, active: Bool = true, created_by_user_id: String? = nil) {
+        self.email = email
+        self.password = password
+        self.name = name
+        self.role = role
+        self.active = active
+        self.created_by_user_id = created_by_user_id
+    }
 }
 
 /// DTO for updating an existing user. All fields are optional.
@@ -55,17 +65,31 @@ struct UserResponse: Codable {
     let name: String
     let role: String
     let active: Bool
+    let last_login: String?
     let created_at: String
     let updated_at: String?
+    
+    // Audit fields
     let created_by_user_id: String?
     let updated_by_user_id: String?
+    let created_by_device_id: String?
+    let updated_by_device_id: String?
+    
+    // Enriched fields (usernames)
+    let created_by: String?
+    let updated_by: String?
     
     enum CodingKeys: String, CodingKey {
         case id, email, name, role, active
+        case last_login = "last_login"
         case created_at = "created_at"
         case updated_at = "updated_at"
         case created_by_user_id = "created_by_user_id"
         case updated_by_user_id = "updated_by_user_id"
+        case created_by_device_id = "created_by_device_id"
+        case updated_by_device_id = "updated_by_device_id"
+        case created_by = "created_by"
+        case updated_by = "updated_by"
     }
 }
 
