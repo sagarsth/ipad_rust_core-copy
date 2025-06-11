@@ -215,4 +215,13 @@ class StrategicGoalFFIHandler {
         let payload = StatsRequest(auth: auth)
         return await executeOperation(payload: payload, ffiCall: strategic_goal_get_value_statistics)
     }
+
+    // MARK: - Bulk Selection Support
+    
+    /// Get filtered strategic goal IDs for bulk selection
+    /// Supports complex AND/OR filter logic matching SwiftUI selection behavior
+    func getFilteredIds(filter: StrategicGoalFilter, auth: AuthContextPayload) async -> Result<[String], Error> {
+        let payload = StrategicGoalFilterRequest(filter: filter, auth: auth)
+        return await executeOperation(payload: payload, ffiCall: strategic_goal_get_filtered_ids)
+    }
 } 

@@ -270,6 +270,11 @@ struct StrategicGoalResponse: Codable, Identifiable, MonthGroupable, Equatable {
     let createdAt: String
     let updatedAt: String
     let syncPriority: SyncPriority
+    let createdByUserId: String?
+    let updatedByUserId: String?
+    let lastSyncedAt: String?
+    let createdByUsername: String?
+    let updatedByUsername: String?
     
     enum CodingKeys: String, CodingKey {
         case id, outcome, kpi
@@ -282,6 +287,11 @@ struct StrategicGoalResponse: Codable, Identifiable, MonthGroupable, Equatable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case syncPriority = "sync_priority"
+        case createdByUserId = "created_by_user_id"
+        case updatedByUserId = "updated_by_user_id"
+        case lastSyncedAt = "last_synced_at"
+        case createdByUsername = "created_by_username"
+        case updatedByUsername = "updated_by_username"
     }
 }
 
@@ -326,4 +336,165 @@ struct GoalValueSummaryResponse: Codable {
         case totalActual = "total_actual"
         case avgProgressPercentage = "avg_progress_percentage"
     }
+}
+
+struct ValueStatisticsResponse: Codable {
+    let avgTarget: Double?
+    let avgActual: Double?
+    let totalTarget: Double?
+    let totalActual: Double?
+    let count: Int64
+    let avgProgressPercentage: Double?
+    
+    enum CodingKeys: String, CodingKey {
+        case count
+        case avgTarget = "avg_target"
+        case avgActual = "avg_actual"
+        case totalTarget = "total_target"
+        case totalActual = "total_actual"
+        case avgProgressPercentage = "avg_progress_percentage"
+    }
+}
+
+// MARK: - Filter Models for Bulk Selection
+
+struct StrategicGoalFilter: Codable {
+    let statusIds: [Int64]?
+    let responsibleTeams: [String]?
+    let years: [Int32]?
+    let months: [Int32]? // 1-12
+    let userRole: UserRoleFilter?
+    let syncPriorities: [String]?
+    let searchText: String?
+    let progressRange: [Double]? // [min, max]
+    let targetValueRange: [Double]?
+    let actualValueRange: [Double]?
+    let dateRange: [String]? // [start_rfc3339, end_rfc3339]
+    let daysStale: UInt32?
+    let excludeDeleted: Bool?
+    
+    enum CodingKeys: String, CodingKey {
+        case statusIds = "status_ids"
+        case responsibleTeams = "responsible_teams"
+        case years
+        case months
+        case userRole = "user_role"
+        case syncPriorities = "sync_priorities"
+        case searchText = "search_text"
+        case progressRange = "progress_range"
+        case targetValueRange = "target_value_range"
+        case actualValueRange = "actual_value_range"
+        case dateRange = "date_range"
+        case daysStale = "days_stale"
+        case excludeDeleted = "exclude_deleted"
+    }
+    
+    // Convenience initializers
+    static func all() -> StrategicGoalFilter {
+        StrategicGoalFilter(
+            statusIds: nil,
+            responsibleTeams: nil,
+            years: nil,
+            months: nil,
+            userRole: nil,
+            syncPriorities: nil,
+            searchText: nil,
+            progressRange: nil,
+            targetValueRange: nil,
+            actualValueRange: nil,
+            dateRange: nil,
+            daysStale: nil,
+            excludeDeleted: true
+        )
+    }
+    
+    static func byStatus(_ statusIds: [Int64]) -> StrategicGoalFilter {
+        var filter = StrategicGoalFilter.all()
+        return StrategicGoalFilter(
+            statusIds: statusIds,
+            responsibleTeams: filter.responsibleTeams,
+            years: filter.years,
+            months: filter.months,
+            userRole: filter.userRole,
+            syncPriorities: filter.syncPriorities,
+            searchText: filter.searchText,
+            progressRange: filter.progressRange,
+            targetValueRange: filter.targetValueRange,
+            actualValueRange: filter.actualValueRange,
+            dateRange: filter.dateRange,
+            daysStale: filter.daysStale,
+            excludeDeleted: filter.excludeDeleted
+        )
+    }
+    
+    static func byDateParts(years: [Int32]?, months: [Int32]?) -> StrategicGoalFilter {
+        var filter = StrategicGoalFilter.all()
+        return StrategicGoalFilter(
+            statusIds: filter.statusIds,
+            responsibleTeams: filter.responsibleTeams,
+            years: years,
+            months: months,
+            userRole: filter.userRole,
+            syncPriorities: filter.syncPriorities,
+            searchText: filter.searchText,
+            progressRange: filter.progressRange,
+            targetValueRange: filter.targetValueRange,
+            actualValueRange: filter.actualValueRange,
+            dateRange: filter.dateRange,
+            daysStale: filter.daysStale,
+            excludeDeleted: filter.excludeDeleted
+        )
+    }
+    
+    // Combine multiple filters with AND logic
+    func combined(with other: StrategicGoalFilter) -> StrategicGoalFilter {
+        StrategicGoalFilter(
+            statusIds: other.statusIds ?? self.statusIds,
+            responsibleTeams: other.responsibleTeams ?? self.responsibleTeams,
+            years: other.years ?? self.years,
+            months: other.months ?? self.months,
+            userRole: other.userRole ?? self.userRole,
+            syncPriorities: other.syncPriorities ?? self.syncPriorities,
+            searchText: other.searchText ?? self.searchText,
+            progressRange: other.progressRange ?? self.progressRange,
+            targetValueRange: other.targetValueRange ?? self.targetValueRange,
+            actualValueRange: other.actualValueRange ?? self.actualValueRange,
+            dateRange: other.dateRange ?? self.dateRange,
+            daysStale: other.daysStale ?? self.daysStale,
+            excludeDeleted: other.excludeDeleted ?? self.excludeDeleted
+        )
+    }
+    
+    // Check if filter has any constraints
+    var isEmpty: Bool {
+        statusIds == nil &&
+        responsibleTeams == nil &&
+        years == nil &&
+        months == nil &&
+        userRole == nil &&
+        syncPriorities == nil &&
+        (searchText?.isEmpty ?? true) &&
+        progressRange == nil &&
+        targetValueRange == nil &&
+        actualValueRange == nil &&
+        dateRange == nil &&
+        daysStale == nil
+    }
+}
+
+struct UserRoleFilter: Codable {
+    let userId: String
+    let role: String // "created" or "updated"
+    
+    enum CodingKeys: String, CodingKey {
+        case userId = "user_id"
+        case role
+    }
+}
+
+// MARK: - Filter Request Payloads
+
+struct StrategicGoalFilterRequest: Codable {
+    let filter: StrategicGoalFilter
+    let auth: AuthContextPayload
 } 

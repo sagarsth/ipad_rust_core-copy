@@ -281,7 +281,7 @@ int32_t project_get_document_references(const char*, char**);
 void project_free(char*);
 
 // ============================================================================
-// STRATEGIC_GOAL FUNCTIONS (16 functions)
+// STRATEGIC_GOAL FUNCTIONS (17 functions)
 // ============================================================================
 
 int32_t strategic_goal_create(const char*, char**);
@@ -299,6 +299,7 @@ int32_t strategic_goal_find_stale(const char*, char**);
 int32_t strategic_goal_find_by_date_range(const char*, char**);
 int32_t strategic_goal_get_status_distribution(const char*, char**);
 int32_t strategic_goal_get_value_statistics(const char*, char**);
+int32_t strategic_goal_get_filtered_ids(const char*, char**);
 void strategic_goal_free(char*);
 
 // ============================================================================

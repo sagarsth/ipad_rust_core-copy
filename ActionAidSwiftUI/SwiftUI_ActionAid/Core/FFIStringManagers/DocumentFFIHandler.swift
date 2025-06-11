@@ -106,7 +106,7 @@ class DocumentFFIHandler {
         return await executeOperation(payload: payload, ffiCall: document_get)
     }
     
-    func listDocumentsByEntity(relatedTable: String, relatedId: String, pagination: PaginationDto?, include: [DocumentIncludeDto]?, auth: AuthCtxDto) async -> Result<[MediaDocumentResponse], Error> {
+    func listDocumentsByEntity(relatedTable: String, relatedId: String, pagination: PaginationDto?, include: [DocumentIncludeDto]?, auth: AuthCtxDto) async -> Result<PaginatedResult<MediaDocumentResponse>, Error> {
         struct Payload: Codable {
             let related_table: String
             let related_id: String

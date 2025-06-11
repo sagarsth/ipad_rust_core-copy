@@ -409,14 +409,14 @@ pub unsafe extern "C" fn strategic_goal_delete(payload_json: *const c_char, resu
 // Document Integration
 // ---------------------------------------------------------------------------
 
-/// Upload a single document for a strategic goal
+/// Upload a single document for a strategic goal (with auto-detection)
 /// Expected JSON payload:
 /// {
 ///   "goal_id": "uuid",
 ///   "file_data": "base64_encoded_file_data",
 ///   "original_filename": "string",
 ///   "title": "optional_string",
-///   "document_type_id": "uuid",
+///   "document_type_id": "uuid", // IGNORED - document type auto-detected from file extension
 ///   "linked_field": "optional_string",
 ///   "sync_priority": "HIGH|NORMAL|LOW",
 ///   "compression_priority": "HIGH|NORMAL|LOW",
@@ -484,13 +484,13 @@ pub unsafe extern "C" fn strategic_goal_upload_document(payload_json: *const c_c
     })
 }
 
-/// Bulk upload multiple documents for a strategic goal
+/// Bulk upload multiple documents for a strategic goal (with auto-detection)
 /// Expected JSON payload:
 /// {
 ///   "goal_id": "uuid",
 ///   "files": [{"file_data": "base64", "filename": "string"}, ...],
 ///   "title": "optional_string",
-///   "document_type_id": "uuid",
+///   "document_type_id": "uuid", // IGNORED - document types auto-detected from file extensions
 ///   "sync_priority": "HIGH|NORMAL|LOW",
 ///   "compression_priority": "HIGH|NORMAL|LOW",
 ///   "auth": { AuthCtxDto }
@@ -549,7 +549,6 @@ pub unsafe extern "C" fn strategic_goal_bulk_upload_documents(payload_json: *con
             goal_id,
             files,
             p.title,
-            document_type_id,
             sync_priority,
             compression_priority,
             &auth,
@@ -861,6 +860,121 @@ pub unsafe extern "C" fn strategic_goal_get_value_statistics(payload_json: *cons
             .map_err(FFIError::from_service_error)?;
         
         let json_resp = serde_json::to_string(&stats)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get filtered strategic goal IDs for bulk selection
+/// Expected JSON payload:
+/// {
+///   "filter": {
+///     "status_ids": [1, 2],
+///     "years": [2024, 2023],
+///     "months": [1, 2, 3],
+///     "responsible_teams": ["Team A", "Team B"],
+///     "search_text": "optional search",
+///     "user_role": {"user_id": "uuid", "role": "created|updated"},
+///     "progress_range": [50.0, 100.0],
+///     "target_value_range": [1000.0, 5000.0],
+///     "actual_value_range": [500.0, 4000.0],
+///     "date_range": ["2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z"],
+///     "days_stale": 30,
+///     "exclude_deleted": true
+///   },
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strategic_goal_get_filtered_ids(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct UserRoleFilter {
+            user_id: String,
+            role: String,
+        }
+        
+        #[derive(Deserialize)]
+        struct FilterDto {
+            status_ids: Option<Vec<i64>>,
+            responsible_teams: Option<Vec<String>>,
+            years: Option<Vec<i32>>,
+            months: Option<Vec<i32>>,
+            user_role: Option<UserRoleFilter>,
+            sync_priorities: Option<Vec<String>>,
+            search_text: Option<String>,
+            progress_range: Option<(f64, f64)>,
+            target_value_range: Option<(f64, f64)>,
+            actual_value_range: Option<(f64, f64)>,
+            date_range: Option<(String, String)>,
+            days_stale: Option<u32>,
+            exclude_deleted: Option<bool>,
+        }
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            filter: FilterDto,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        // Convert DTO to domain filter
+        let user_role = if let Some(ur) = p.filter.user_role {
+            let user_id = Uuid::parse_str(&ur.user_id)
+                .map_err(|_| FFIError::invalid_argument("invalid user_id in user_role"))?;
+            let role = match ur.role.as_str() {
+                "created" => crate::domains::strategic_goal::types::UserGoalRole::Created,
+                "updated" => crate::domains::strategic_goal::types::UserGoalRole::Updated,
+                _ => return Err(FFIError::invalid_argument("invalid role in user_role")),
+            };
+            Some((user_id, role))
+        } else {
+            None
+        };
+        
+        // Convert sync priority strings to enums
+        let sync_priorities = if let Some(priorities) = p.filter.sync_priorities {
+            let converted: Result<Vec<_>, _> = priorities
+                .into_iter()
+                .map(|s| crate::domains::sync::types::SyncPriority::from_str(&s))
+                .collect();
+            Some(converted.map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?)
+        } else {
+            None
+        };
+        
+        let filter = crate::domains::strategic_goal::types::StrategicGoalFilter {
+            status_ids: p.filter.status_ids,
+            responsible_teams: p.filter.responsible_teams,
+            years: p.filter.years,
+            months: p.filter.months,
+            user_role,
+            sync_priorities,
+            search_text: p.filter.search_text,
+            progress_range: p.filter.progress_range,
+            target_value_range: p.filter.target_value_range,
+            actual_value_range: p.filter.actual_value_range,
+            date_range: p.filter.date_range,
+            days_stale: p.filter.days_stale,
+            exclude_deleted: p.filter.exclude_deleted,
+        };
+        
+        let svc = globals::get_strategic_goal_service()?;
+        let filtered_ids = block_on_async(svc.get_filtered_goal_ids(filter, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        // Convert UUIDs to strings for JSON response
+        let id_strings: Vec<String> = filtered_ids.into_iter().map(|id| id.to_string()).collect();
+        
+        let json_resp = serde_json::to_string(&id_strings)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();

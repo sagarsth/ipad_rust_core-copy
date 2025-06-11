@@ -12,6 +12,46 @@ use std::str::FromStr;
 use crate::domains::project::types::ProjectSummary;
 use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
 
+/// Sync status for individual records
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RecordSyncStatus {
+    Pending,   // Waiting to be synced
+    Synced,    // Successfully synced
+    Failed,    // Sync failed
+    Conflict,  // Sync conflict detected
+}
+
+impl Default for RecordSyncStatus {
+    fn default() -> Self {
+        Self::Pending
+    }
+}
+
+impl FromStr for RecordSyncStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "pending" => Ok(Self::Pending),
+            "synced" => Ok(Self::Synced),
+            "failed" => Ok(Self::Failed),
+            "conflict" => Ok(Self::Conflict),
+            _ => Err(format!("Unknown sync status: {}", s)),
+        }
+    }
+}
+
+impl RecordSyncStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Synced => "synced",
+            Self::Failed => "failed",
+            Self::Conflict => "conflict",
+        }
+    }
+}
+
 /// Role a user can have in relation to a strategic goal
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UserGoalRole {
@@ -111,6 +151,12 @@ pub struct StrategicGoal {
     pub deleted_by_user_id: Option<Uuid>,
     pub deleted_by_device_id: Option<Uuid>,
     pub sync_priority: SyncPriorityFromSyncDomain,
+    // Sync tracking fields
+    pub last_synced_at: Option<DateTime<Utc>>,
+    pub last_sync_attempt_at: Option<DateTime<Utc>>,
+    pub sync_status: RecordSyncStatus,
+    pub sync_error_message: Option<String>,
+    pub sync_version: i64,
 }
 
 impl StrategicGoal {
@@ -275,6 +321,12 @@ pub struct StrategicGoalRow {
     pub deleted_by_user_id: Option<String>,
     pub deleted_by_device_id: Option<String>,
     pub sync_priority: String,
+    // Sync tracking fields
+    pub last_synced_at: Option<String>,
+    pub last_sync_attempt_at: Option<String>,
+    pub sync_status: Option<String>,
+    pub sync_error_message: Option<String>,
+    pub sync_version: Option<i64>,
 }
 
 impl StrategicGoalRow {
@@ -338,6 +390,14 @@ impl StrategicGoalRow {
             deleted_by_user_id: parse_optional_uuid(&self.deleted_by_user_id, "deleted_by_user_id")?,
             deleted_by_device_id: parse_optional_uuid(&self.deleted_by_device_id, "deleted_by_device_id")?,
             sync_priority: SyncPriorityFromSyncDomain::from_str(&self.sync_priority).unwrap_or_default(),
+            // Sync tracking fields
+            last_synced_at: parse_optional_datetime(&self.last_synced_at, "last_synced_at")?,
+            last_sync_attempt_at: parse_optional_datetime(&self.last_sync_attempt_at, "last_sync_attempt_at")?,
+            sync_status: self.sync_status.as_ref()
+                .map(|s| RecordSyncStatus::from_str(s).unwrap_or_default())
+                .unwrap_or_default(),
+            sync_error_message: self.sync_error_message.clone(),
+            sync_version: self.sync_version.unwrap_or(0)
         })
     }
 }
@@ -357,6 +417,13 @@ pub struct StrategicGoalResponse {
     pub created_at: String,
     pub updated_at: String,
     pub sync_priority: SyncPriorityFromSyncDomain,
+    pub created_by_user_id: Option<Uuid>,
+    pub updated_by_user_id: Option<Uuid>,
+    pub last_synced_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by_username: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Vec<MediaDocumentResponse>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -383,6 +450,11 @@ impl From<StrategicGoal> for StrategicGoalResponse {
             created_at: goal.created_at.to_rfc3339(),
             updated_at: goal.updated_at.to_rfc3339(),
             sync_priority: goal.sync_priority,
+            created_by_user_id: goal.created_by_user_id,
+            updated_by_user_id: goal.updated_by_user_id,
+            last_synced_at: goal.last_synced_at.map(|dt| dt.to_rfc3339()),
+            created_by_username: None, // Will be populated by service enrichment
+            updated_by_username: None, // Will be populated by service enrichment
             documents: None,
             document_upload_errors: None,
             project_count: None,
@@ -410,5 +482,108 @@ impl StrategicGoalWithDocumentsResponse {
             successful_uploads: successful,
             failed_uploads: failed,
         }
+    }
+}
+
+/// Comprehensive filter structure for strategic goals
+/// Supports complex AND/OR logic for year, month, status, team, and date range filters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategicGoalFilter {
+    /// Status IDs (OR logic within, AND with other filters)
+    pub status_ids: Option<Vec<i64>>,
+    
+    /// Responsible teams (OR logic within, AND with other filters)
+    pub responsible_teams: Option<Vec<String>>,
+    
+    /// Years (OR logic within, AND with other filters)
+    pub years: Option<Vec<i32>>,
+    
+    /// Months (OR logic within, AND with other filters)
+    /// When combined with years: (year1 OR year2) AND (month1 OR month2)
+    pub months: Option<Vec<i32>>, // 1-12
+    
+    /// User role filter
+    pub user_role: Option<(Uuid, UserGoalRole)>,
+    
+    /// Sync priority filter
+    pub sync_priorities: Option<Vec<SyncPriorityFromSyncDomain>>,
+    
+    /// Search text (searches in objective_code, outcome, kpi, responsible_team)
+    pub search_text: Option<String>,
+    
+    /// Progress percentage range
+    pub progress_range: Option<(f64, f64)>, // (min, max)
+    
+    /// Value range filters
+    pub target_value_range: Option<(f64, f64)>,
+    pub actual_value_range: Option<(f64, f64)>,
+    
+    /// Date range filter (RFC3339 format)
+    pub date_range: Option<(String, String)>, // (start, end)
+    
+    /// Days stale filter (items not updated in X days)
+    pub days_stale: Option<u32>,
+    
+    /// Include only non-deleted items (default: true)
+    pub exclude_deleted: Option<bool>,
+}
+
+impl Default for StrategicGoalFilter {
+    fn default() -> Self {
+        Self {
+            status_ids: None,
+            responsible_teams: None,
+            years: None,
+            months: None,
+            user_role: None,
+            sync_priorities: None,
+            search_text: None,
+            progress_range: None,
+            target_value_range: None,
+            actual_value_range: None,
+            date_range: None,
+            days_stale: None,
+            exclude_deleted: Some(true),
+        }
+    }
+}
+
+impl StrategicGoalFilter {
+    /// Create a filter that matches all items (no restrictions)
+    pub fn all() -> Self {
+        Self::default()
+    }
+    
+    /// Create a filter for specific status IDs
+    pub fn by_status(status_ids: Vec<i64>) -> Self {
+        Self {
+            status_ids: Some(status_ids),
+            ..Default::default()
+        }
+    }
+    
+    /// Create a filter for specific years and months
+    pub fn by_date_parts(years: Option<Vec<i32>>, months: Option<Vec<i32>>) -> Self {
+        Self {
+            years,
+            months,
+            ..Default::default()
+        }
+    }
+    
+    /// Check if filter has any constraints
+    pub fn is_empty(&self) -> bool {
+        self.status_ids.is_none() &&
+        self.responsible_teams.is_none() &&
+        self.years.is_none() &&
+        self.months.is_none() &&
+        self.user_role.is_none() &&
+        self.sync_priorities.is_none() &&
+        self.search_text.is_none() &&
+        self.progress_range.is_none() &&
+        self.target_value_range.is_none() &&
+        self.actual_value_range.is_none() &&
+        self.date_range.is_none() &&
+        self.days_stale.is_none()
     }
 }

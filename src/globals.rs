@@ -20,6 +20,7 @@ use crate::domains::donor::repository::{DonorRepository, SqliteDonorRepository};
 use crate::domains::donor::Donor;
 use crate::domains::document::repository::{MediaDocumentRepository, SqliteMediaDocumentRepository, DocumentTypeRepository, SqliteDocumentTypeRepository};
 use crate::domains::document::types::{MediaDocument, DocumentType}; // Assuming MediaDocument type
+use crate::domains::document::initialization; // Add document initialization import
 use crate::domains::compression::repository::{CompressionRepository, SqliteCompressionRepository};
 use crate::domains::compression::service::{CompressionService, CompressionServiceImpl};
 use crate::domains::compression::manager::{CompressionManager, CompressionManagerImpl, StubCompressionManager};
@@ -516,7 +517,10 @@ async fn initialize_internal(
             println!("❌ [GLOBALS] Status types initialization failed: {}", e);
             e
         })?;
-    println!("✅ [GLOBALS] Critical lookup data verified");
+    println!("✅ [GLOBALS] Status types verified");
+    
+    // Initialize document types after repositories are created
+    // Note: We'll do this after the document_type_repo is created below
 
     // Store device ID and offline mode
     *DEVICE_ID.lock().map_err(|_| FFIError::internal("DEVICE_ID lock poisoned".to_string()))? = Some(device_id_str.to_string());
@@ -1102,6 +1106,7 @@ async fn initialize_internal(
         dependency_checker.clone(),
         document_service.clone(),
         project_repo.clone(),
+        user_repo.clone(),
         deletion_manager.clone(),
     ));
 
@@ -1233,6 +1238,15 @@ async fn initialize_internal(
     *ENTITY_MERGER_GLOBAL.lock().map_err(|_| FFIError::internal("ENTITY_MERGER_GLOBAL lock poisoned".to_string()))? = Some(central_merger);
     *SYNC_SERVICE_GLOBAL.lock().map_err(|_| FFIError::internal("SYNC_SERVICE_GLOBAL lock poisoned".to_string()))? = Some(sync_service);
 
+    // Initialize document types after all services are set up
+    println!("📄 [GLOBALS] Ensuring document types initialized...");
+    ensure_document_types_initialized(&pool).await
+        .map_err(|e| {
+            println!("❌ [GLOBALS] Document types initialization failed: {}", e);
+            e
+        })?;
+    println!("✅ [GLOBALS] Document types verified");
+
     Ok(())
 }
 
@@ -1300,5 +1314,101 @@ async fn ensure_status_types_initialized(pool: &SqlitePool) -> FFIResult<()> {
         Ok(())
     } else {
         Err(FFIError::internal(format!("Status types seeding failed: only {} entries after seeding", final_count)))
+    }
+}
+
+/// Ensure document types are properly initialized
+async fn ensure_document_types_initialized(pool: &SqlitePool) -> FFIResult<()> {
+    println!("🔍 [GLOBALS] Checking document_types table...");
+    
+    // Check if document_types table exists and has data
+    let count_result = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM document_types WHERE deleted_at IS NULL")
+        .fetch_one(pool)
+        .await;
+    
+    match count_result {
+        Ok(count) => {
+            if count >= 9 { // We expect 9 standard document types
+                println!("✅ [GLOBALS] Document types table has {} entries, looks good", count);
+                return Ok(());
+            } else {
+                println!("⚠️ [GLOBALS] Document types table only has {} entries, initializing...", count);
+            }
+        },
+        Err(e) => {
+            println!("❌ [GLOBALS] Error checking document_types table: {}", e);
+            return Err(FFIError::internal(format!("Failed to check document_types: {}", e)));
+        }
+    }
+    
+    // Get the standard document types from our initialization module
+    let standard_types = initialization::initialize_standard_document_types();
+    
+    println!("🌱 [GLOBALS] Seeding {} document types...", standard_types.len());
+    let now = chrono::Utc::now().to_rfc3339();
+    
+    for doc_type in standard_types {
+        let doc_type_id = Uuid::new_v4().to_string();
+        
+        let query = r#"
+            INSERT OR IGNORE INTO document_types (
+                id, name, description, icon, default_priority,
+                allowed_extensions, max_size, compression_level, 
+                compression_method, min_size_for_compression, related_tables,
+                created_at, updated_at,
+                name_updated_at, allowed_extensions_updated_at,
+                max_size_updated_at, compression_level_updated_at,
+                compression_method_updated_at, min_size_for_compression_updated_at,
+                description_updated_at, default_priority_updated_at,
+                icon_updated_at, related_tables_updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#;
+        
+        match sqlx::query(query)
+            .bind(&doc_type_id)
+            .bind(&doc_type.name)
+            .bind(&doc_type.description)
+            .bind(&doc_type.icon)
+            .bind(&doc_type.default_priority)
+            .bind(&doc_type.allowed_extensions)
+            .bind(doc_type.max_size)
+            .bind(doc_type.compression_level)
+            .bind(&doc_type.compression_method)
+            .bind(doc_type.min_size_for_compression)
+            .bind(&doc_type.related_tables)
+            .bind(&now)
+            .bind(&now)
+            .bind(&now) // name_updated_at
+            .bind(&now) // allowed_extensions_updated_at
+            .bind(&now) // max_size_updated_at
+            .bind(&now) // compression_level_updated_at
+            .bind(&now) // compression_method_updated_at
+            .bind(&now) // min_size_for_compression_updated_at
+            .bind(&now) // description_updated_at
+            .bind(&now) // default_priority_updated_at
+            .bind(&now) // icon_updated_at
+            .bind(&now) // related_tables_updated_at
+            .execute(pool)
+            .await
+        {
+            Ok(_) => println!("✅ [GLOBALS] Seeded document type: {}", doc_type.name),
+            Err(e) => {
+                println!("⚠️ [GLOBALS] Warning seeding {}: {}", doc_type.name, e);
+                // Don't fail on individual seed errors, might already exist
+            }
+        }
+    }
+    
+    // Verify the seeding worked
+    let final_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM document_types WHERE deleted_at IS NULL")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| FFIError::internal(format!("Failed to verify document_types after seeding: {}", e)))?;
+    
+    if final_count >= 9 {
+        println!("✅ [GLOBALS] Document types successfully verified: {} entries", final_count);
+        Ok(())
+    } else {
+        Err(FFIError::internal(format!("Document types seeding failed: only {} entries after seeding", final_count)))
     }
 }

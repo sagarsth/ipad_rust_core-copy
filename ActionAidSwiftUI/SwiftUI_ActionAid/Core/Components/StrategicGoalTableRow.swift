@@ -38,7 +38,7 @@ struct StrategicGoalTableRow: View {
     @ViewBuilder
     private func cellContent(for column: TableColumn) -> some View {
         switch column.key {
-        case "code":
+        case "code", "objective_code":
             Text(goal.objectiveCode)
                 .font(.caption)
                 .fontWeight(.medium)
@@ -79,7 +79,7 @@ struct StrategicGoalTableRow: View {
                 .frame(height: 4)
             }
             
-        case "team":
+        case "team", "responsible_team":
             Text(goal.responsibleTeam ?? "N/A")
                 .font(.caption2)
                 .lineLimit(1)
@@ -91,7 +91,17 @@ struct StrategicGoalTableRow: View {
                 .lineLimit(1)
                 .foregroundColor(.secondary)
                 
-        case "values":
+        case "values", "target_value":
+            Text("\(Int(goal.targetValue ?? 0))")
+                .font(.caption2)
+                .fontWeight(.medium)
+                
+        case "actual_value":
+            Text("\(Int(goal.actualValue ?? 0))")
+                .font(.caption2)
+                .fontWeight(.medium)
+                
+        case "values_combined":
             VStack(alignment: .leading, spacing: 1) {
                 HStack {
                     Text("T:")
@@ -122,7 +132,7 @@ struct StrategicGoalTableRow: View {
                     .foregroundColor(.gray)
             }
             
-        case "updated":
+        case "updated", "updated_at":
             Text(formatDate(goal.updatedAt))
                 .font(.caption2)
                 .foregroundColor(.secondary)
@@ -153,9 +163,9 @@ extension StrategicGoalsView {
     static var tableColumns: [TableColumn] {
         [
             TableColumn(
-                key: "code",
+                key: "objective_code",
                 title: "Code",
-                width: 80,
+                width: 100,
                 alignment: .leading,
                 isRequired: true
             ),
@@ -168,57 +178,42 @@ extension StrategicGoalsView {
             TableColumn(
                 key: "status",
                 title: "Status",
-                width: 80,
-                alignment: .center,
-                isRequired: true
+                width: 100,
+                alignment: .center
             ),
             TableColumn(
                 key: "progress",
                 title: "Progress",
-                width: 90,
-                alignment: .leading,
-                isVisible: { $0.userInterfaceIdiom == .pad },
-                isCustomizable: true
+                width: 120,
+                alignment: .center
             ),
             TableColumn(
-                key: "team",
+                key: "responsible_team",
                 title: "Team",
+                width: 140,
+                alignment: .leading,
+                isVisible: { $0.userInterfaceIdiom == .pad }
+            ),
+            TableColumn(
+                key: "target_value",
+                title: "Target",
                 width: 100,
-                alignment: .leading,
-                isVisible: { $0.userInterfaceIdiom == .pad },
-                isCustomizable: true
+                alignment: .trailing,
+                isVisible: { $0.userInterfaceIdiom == .pad }
             ),
             TableColumn(
-                key: "kpi",
-                title: "KPI",
-                width: 80,
-                alignment: .leading,
-                isVisible: { $0.userInterfaceIdiom == .pad },
-                isCustomizable: true
+                key: "actual_value",
+                title: "Actual",
+                width: 100,
+                alignment: .trailing,
+                isVisible: { $0.userInterfaceIdiom == .pad }
             ),
             TableColumn(
-                key: "values",
-                title: "Target/Actual",
-                width: 80,
-                alignment: .leading,
-                isVisible: { $0.userInterfaceIdiom == .pad },
-                isCustomizable: true
-            ),
-            TableColumn(
-                key: "priority",
-                title: "Priority",
-                width: 50,
-                alignment: .center,
-                isVisible: { $0.userInterfaceIdiom == .pad },
-                isCustomizable: true
-            ),
-            TableColumn(
-                key: "updated",
+                key: "updated_at",
                 title: "Updated",
-                width: 70,
-                alignment: .leading,
-                isVisible: { $0.userInterfaceIdiom == .pad },
-                isCustomizable: true
+                width: 120,
+                alignment: .center,
+                isVisible: { $0.userInterfaceIdiom == .pad }
             )
         ]
     }

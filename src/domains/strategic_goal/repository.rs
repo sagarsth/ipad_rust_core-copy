@@ -4,7 +4,7 @@ use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::strategic_goal::types::{
-    NewStrategicGoal, StrategicGoal, StrategicGoalRow, UpdateStrategicGoal, UserGoalRole, GoalValueSummary,
+    NewStrategicGoal, StrategicGoal, StrategicGoalRow, UpdateStrategicGoal, UserGoalRole, GoalValueSummary, StrategicGoalFilter,
 };
 use crate::domains::sync::repository::ChangeLogRepository;
 use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
@@ -147,6 +147,13 @@ pub trait StrategicGoalRepository:
         end_date: DateTime<Utc>,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<StrategicGoal>>;
+
+    /// Find strategic goal IDs that match complex filter criteria
+    /// Supports AND/OR logic: (status1 OR status2) AND (year1 OR year2) AND (month1 OR month2)
+    async fn find_ids_by_filter(
+        &self,
+        filter: StrategicGoalFilter,
+    ) -> DomainResult<Vec<Uuid>>;
 }
 
 /// SQLite implementation for StrategicGoalRepository
@@ -1202,6 +1209,233 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
             .collect::<DomainResult<Vec<StrategicGoal>>>()?;
 
         Ok(PaginatedResult::new(entities, total as u64, params))
+    }
+
+    /// Find strategic goal IDs that match complex filter criteria
+    /// Supports AND/OR logic: (status1 OR status2) AND (year1 OR year2) AND (month1 OR month2)
+    async fn find_ids_by_filter(
+        &self,
+        filter: StrategicGoalFilter,
+    ) -> DomainResult<Vec<Uuid>> {
+        use sqlx::QueryBuilder;
+        
+        let mut query_builder = QueryBuilder::new("SELECT DISTINCT sg.id FROM strategic_goals sg WHERE 1=1");
+        
+        // Exclude deleted items by default
+        if filter.exclude_deleted.unwrap_or(true) {
+            query_builder.push(" AND sg.deleted_at IS NULL");
+        }
+        
+        // Status filter (OR logic within)
+        if let Some(status_ids) = &filter.status_ids {
+            if !status_ids.is_empty() {
+                query_builder.push(" AND sg.status_id IN (");
+                let mut separated = query_builder.separated(", ");
+                for status_id in status_ids {
+                    separated.push_bind(status_id);
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        // Responsible teams filter (OR logic within)
+        if let Some(teams) = &filter.responsible_teams {
+            if !teams.is_empty() {
+                query_builder.push(" AND sg.responsible_team IN (");
+                let mut separated = query_builder.separated(", ");
+                for team in teams {
+                    separated.push_bind(team);
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        // Year and Month filters (complex AND/OR logic)
+        if let (Some(years), Some(months)) = (&filter.years, &filter.months) {
+            if !years.is_empty() && !months.is_empty() {
+                // (year1 OR year2) AND (month1 OR month2)
+                query_builder.push(" AND (");
+                
+                // Year condition
+                query_builder.push("CAST(strftime('%Y', sg.created_at) AS INTEGER) IN (");
+                let mut separated = query_builder.separated(", ");
+                for year in years {
+                    separated.push_bind(year);
+                }
+                separated.push_unseparated(")");
+                
+                query_builder.push(" OR CAST(strftime('%Y', sg.updated_at) AS INTEGER) IN (");
+                let mut separated = query_builder.separated(", ");
+                for year in years {
+                    separated.push_bind(year);
+                }
+                separated.push_unseparated(")");
+                
+                query_builder.push(") AND (");
+                
+                // Month condition
+                query_builder.push("CAST(strftime('%m', sg.created_at) AS INTEGER) IN (");
+                let mut separated = query_builder.separated(", ");
+                for month in months {
+                    separated.push_bind(month);
+                }
+                separated.push_unseparated(")");
+                
+                query_builder.push(" OR CAST(strftime('%m', sg.updated_at) AS INTEGER) IN (");
+                let mut separated = query_builder.separated(", ");
+                for month in months {
+                    separated.push_bind(month);
+                }
+                separated.push_unseparated(")");
+                
+                query_builder.push(")");
+            }
+        } else if let Some(years) = &filter.years {
+            if !years.is_empty() {
+                query_builder.push(" AND (");
+                query_builder.push("CAST(strftime('%Y', sg.created_at) AS INTEGER) IN (");
+                let mut separated = query_builder.separated(", ");
+                for year in years {
+                    separated.push_bind(year);
+                }
+                separated.push_unseparated(")");
+                
+                query_builder.push(" OR CAST(strftime('%Y', sg.updated_at) AS INTEGER) IN (");
+                let mut separated = query_builder.separated(", ");
+                for year in years {
+                    separated.push_bind(year);
+                }
+                separated.push_unseparated(")");
+                query_builder.push(")");
+            }
+        } else if let Some(months) = &filter.months {
+            if !months.is_empty() {
+                query_builder.push(" AND (");
+                query_builder.push("CAST(strftime('%m', sg.created_at) AS INTEGER) IN (");
+                let mut separated = query_builder.separated(", ");
+                for month in months {
+                    separated.push_bind(month);
+                }
+                separated.push_unseparated(")");
+                
+                query_builder.push(" OR CAST(strftime('%m', sg.updated_at) AS INTEGER) IN (");
+                let mut separated = query_builder.separated(", ");
+                for month in months {
+                    separated.push_bind(month);
+                }
+                separated.push_unseparated(")");
+                query_builder.push(")");
+            }
+        }
+        
+        // Search text filter
+        if let Some(search_text) = &filter.search_text {
+            if !search_text.trim().is_empty() {
+                let search_pattern = format!("%{}%", search_text.trim());
+                query_builder.push(" AND (");
+                query_builder.push("sg.objective_code LIKE ")
+                    .push_bind(search_pattern.clone());
+                query_builder.push(" OR sg.outcome LIKE ")
+                    .push_bind(search_pattern.clone());
+                query_builder.push(" OR sg.kpi LIKE ")
+                    .push_bind(search_pattern.clone());
+                query_builder.push(" OR sg.responsible_team LIKE ")
+                    .push_bind(search_pattern.clone());
+                query_builder.push(")");
+            }
+        }
+        
+        // Sync priority filter
+        if let Some(priorities) = &filter.sync_priorities {
+            if !priorities.is_empty() {
+                query_builder.push(" AND sg.sync_priority IN (");
+                let mut separated = query_builder.separated(", ");
+                for priority in priorities {
+                    separated.push_bind(priority.to_string());
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        // User role filter
+        if let Some((user_id, role)) = &filter.user_role {
+            match role {
+                UserGoalRole::Created => {
+                    query_builder.push(" AND sg.created_by_user_id = ").push_bind(user_id.to_string());
+                }
+                UserGoalRole::Updated => {
+                    query_builder.push(" AND sg.updated_by_user_id = ").push_bind(user_id.to_string());
+                }
+            }
+        }
+        
+        // Progress range filter
+        if let Some((min_progress, max_progress)) = &filter.progress_range {
+            query_builder.push(" AND sg.target_value IS NOT NULL AND sg.target_value > 0");
+            query_builder.push(" AND ((sg.actual_value / sg.target_value) * 100) BETWEEN ")
+                .push_bind(min_progress)
+                .push(" AND ")
+                .push_bind(max_progress);
+        }
+        
+        // Target value range filter
+        if let Some((min_target, max_target)) = &filter.target_value_range {
+            query_builder.push(" AND sg.target_value BETWEEN ")
+                .push_bind(min_target)
+                .push(" AND ")
+                .push_bind(max_target);
+        }
+        
+        // Actual value range filter
+        if let Some((min_actual, max_actual)) = &filter.actual_value_range {
+            query_builder.push(" AND sg.actual_value BETWEEN ")
+                .push_bind(min_actual)
+                .push(" AND ")
+                .push_bind(max_actual);
+        }
+        
+        // Date range filter
+        if let Some((start_date, end_date)) = &filter.date_range {
+            // Parse RFC3339 dates
+            if let (Ok(start), Ok(end)) = (
+                DateTime::parse_from_rfc3339(start_date),
+                DateTime::parse_from_rfc3339(end_date)
+            ) {
+                let start_utc = start.with_timezone(&Utc);
+                let end_utc = end.with_timezone(&Utc);
+                
+                query_builder.push(" AND (");
+                query_builder.push("sg.created_at BETWEEN ")
+                    .push_bind(start_utc.to_rfc3339())
+                    .push(" AND ")
+                    .push_bind(end_utc.to_rfc3339());
+                query_builder.push(" OR sg.updated_at BETWEEN ")
+                    .push_bind(start_utc.to_rfc3339())
+                    .push(" AND ")
+                    .push_bind(end_utc.to_rfc3339());
+                query_builder.push(")");
+            }
+        }
+        
+        // Days stale filter
+        if let Some(days_stale) = &filter.days_stale {
+            let cutoff_date = Utc::now() - chrono::Duration::days(*days_stale as i64);
+            query_builder.push(" AND sg.updated_at < ")
+                .push_bind(cutoff_date.to_rfc3339());
+        }
+        
+        // Execute the query
+        let query = query_builder.build_query_as::<(String,)>();
+        let rows = query.fetch_all(&self.pool).await
+            .map_err(|e| DomainError::Database(DbError::from(e)))?;
+        
+        // Parse UUIDs
+        let ids: Result<Vec<Uuid>, _> = rows
+            .into_iter()
+            .map(|(id_str,)| Uuid::parse_str(&id_str))
+            .collect();
+        
+        ids.map_err(|e| DomainError::InvalidUuid(e.to_string()))
     }
 }
 

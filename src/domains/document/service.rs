@@ -62,6 +62,11 @@ pub trait DocumentService:
         id: Uuid,
     ) -> ServiceResult<DocumentTypeResponse>;
 
+    async fn get_document_type_by_name(
+        &self,
+        name: &str,
+    ) -> ServiceResult<Option<DocumentTypeResponse>>;
+
     async fn list_document_types(
         &self,
         params: PaginationParams,
@@ -630,6 +635,14 @@ impl DocumentService for DocumentServiceImpl {
     ) -> ServiceResult<DocumentTypeResponse> {
         let doc_type = self.doc_type_repo.find_by_id(id).await?;
         Ok(DocumentTypeResponse::from(doc_type))
+    }
+
+    async fn get_document_type_by_name(
+        &self,
+        name: &str,
+    ) -> ServiceResult<Option<DocumentTypeResponse>> {
+        let doc_type_opt = self.doc_type_repo.find_by_name(name).await?;
+        Ok(doc_type_opt.map(DocumentTypeResponse::from))
     }
 
     async fn list_document_types(

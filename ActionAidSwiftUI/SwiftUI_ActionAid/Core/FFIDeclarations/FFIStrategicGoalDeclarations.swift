@@ -104,4 +104,11 @@ func strategic_goal_get_status_distribution(
 func strategic_goal_get_value_statistics(
     _ payload_json: UnsafePointer<CChar>,
     _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
+// MARK: - Bulk Selection Support
+@_silgen_name("strategic_goal_get_filtered_ids")
+func strategic_goal_get_filtered_ids(
+    _ payload_json: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
 ) -> CInt 

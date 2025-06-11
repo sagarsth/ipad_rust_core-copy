@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use uuid::Uuid;
 use sqlx::FromRow;
+use async_trait::async_trait;
+use sqlx::Sqlite;
+use sqlx::Transaction;
+use crate::errors::DomainResult;
 
 /// The direction of a sync operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1249,4 +1253,48 @@ pub struct SyncQueueItem {
     pub completed_at: Option<DateTime<Utc>>,
     pub error_message: Option<String>,
     pub retry_count: i64,
+}
+
+/// Trait for entities that support per-record sync tracking
+#[async_trait]
+pub trait SyncTrackable {
+    /// Update the sync timestamp and status for a specific record
+    async fn update_sync_status(
+        &self,
+        entity_id: Uuid,
+        last_synced_at: Option<DateTime<Utc>>,
+        sync_status: &str,
+        error_message: Option<&str>,
+        tx: Option<&mut Transaction<'_, Sqlite>>,
+    ) -> DomainResult<()>;
+
+    /// Get records that need to be synced (pending status)
+    async fn find_pending_sync_records(
+        &self,
+        limit: u32,
+        priority_filter: Option<SyncPriority>,
+    ) -> DomainResult<Vec<Uuid>>;
+
+    /// Mark records as sync attempted
+    async fn mark_sync_attempted(
+        &self,
+        entity_ids: &[Uuid],
+        attempt_timestamp: DateTime<Utc>,
+        tx: Option<&mut Transaction<'_, Sqlite>>,
+    ) -> DomainResult<()>;
+
+    /// Get sync statistics for this entity type
+    async fn get_sync_stats(&self) -> DomainResult<EntitySyncStats>;
+}
+
+/// Sync statistics for a specific entity type
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntitySyncStats {
+    pub total_records: i64,
+    pub pending_sync: i64,
+    pub synced: i64,
+    pub failed: i64,
+    pub conflicts: i64,
+    pub last_sync_attempt: Option<DateTime<Utc>>,
+    pub oldest_pending: Option<DateTime<Utc>>,
 }

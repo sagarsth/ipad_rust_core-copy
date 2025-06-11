@@ -26,9 +26,10 @@ use crate::domains::core::delete_service::PendingDeletionManager;
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
 
-// --- ADDED: Import ProjectRepository and ProjectSummary --- 
+// --- ADDED: Import ProjectRepository, ProjectSummary, and UserRepository --- 
 use crate::domains::project::repository::ProjectRepository;
 use crate::domains::project::types::ProjectSummary;
+use crate::domains::user::repository::UserRepository;
 
 /// Trait defining strategic goal service operations
 #[async_trait]
@@ -97,7 +98,6 @@ pub trait StrategicGoalService: DeleteService<StrategicGoal> + Send + Sync {
         goal_id: Uuid,
         files: Vec<(Vec<u8>, String)>,
         title: Option<String>,
-        document_type_id: Uuid,
         sync_priority: SyncPriority,
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
@@ -175,6 +175,14 @@ pub trait StrategicGoalService: DeleteService<StrategicGoal> + Send + Sync {
         include: Option<&[StrategicGoalInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<StrategicGoalResponse>>;
+
+    /// Get filtered strategic goal IDs for bulk selection based on complex filter criteria
+    /// This method is used by the UI for efficient bulk operations
+    async fn get_filtered_goal_ids(
+        &self,
+        filter: crate::domains::strategic_goal::types::StrategicGoalFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>>;
 }
 
 /// Implementation of the strategic goal service
@@ -185,6 +193,8 @@ pub struct StrategicGoalServiceImpl {
     document_service: Arc<dyn DocumentService>,
     // --- ADDED: Project Repository --- 
     project_repo: Arc<dyn ProjectRepository + Send + Sync>,
+    // --- ADDED: User Repository for username lookups --- 
+    user_repo: Arc<dyn UserRepository + Send + Sync>,
 }
 
 impl StrategicGoalServiceImpl {
@@ -197,6 +207,8 @@ impl StrategicGoalServiceImpl {
         document_service: Arc<dyn DocumentService>,
         // --- ADDED: Inject Project Repository --- 
         project_repo: Arc<dyn ProjectRepository + Send + Sync>,
+        // --- ADDED: Inject User Repository --- 
+        user_repo: Arc<dyn UserRepository + Send + Sync>,
         deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
         // Define a local wrapper struct that implements DeleteServiceRepository
@@ -266,7 +278,42 @@ impl StrategicGoalServiceImpl {
             document_service,
             // --- ADDED: Store Project Repository --- 
             project_repo,
+            // --- ADDED: Store User Repository --- 
+            user_repo,
         }
+    }
+
+    // ADDED: Helper to enrich response with usernames
+    async fn enrich_response_with_usernames(
+        &self,
+        mut response: StrategicGoalResponse,
+    ) -> ServiceResult<StrategicGoalResponse> {
+        // Populate created_by username
+        if let Some(created_by_id) = response.created_by_user_id {
+            if let Ok(creator) = self.user_repo.find_by_id(created_by_id).await {
+                response.created_by_username = Some(creator.name.clone());
+                
+                // Populate updated_by username - check if same as creator
+                if let Some(updated_by_id) = response.updated_by_user_id {
+                    if updated_by_id == created_by_id {
+                        // Same person as creator
+                        response.updated_by_username = Some(creator.name);
+                    } else {
+                        // Different person - fetch separately
+                        if let Ok(updater) = self.user_repo.find_by_id(updated_by_id).await {
+                            response.updated_by_username = Some(updater.name);
+                        }
+                    }
+                }
+            }
+        } else if let Some(updated_by_id) = response.updated_by_user_id {
+            // No creator found, but we have an updater
+            if let Ok(updater) = self.user_repo.find_by_id(updated_by_id).await {
+                response.updated_by_username = Some(updater.name);
+            }
+        }
+        
+        Ok(response)
     }
 
     // ADDED: Enrichment helper similar to ActivityService
@@ -343,7 +390,9 @@ impl StrategicGoalServiceImpl {
             
             // TODO: Implement enrichment for Status, Activities, Participants, DocumentCounts
         }
-        Ok(response)
+        
+        // Always enrich with usernames
+        self.enrich_response_with_usernames(response).await
     }
 }
 
@@ -630,7 +679,7 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         file_data: Vec<u8>,
         original_filename: String,
         title: Option<String>,
-        document_type_id: Uuid,
+        document_type_id: Uuid, // Still in signature for FFI compatibility, but will be ignored
         linked_field: Option<String>,
         sync_priority: SyncPriority,
         compression_priority: Option<CompressionPriority>,
@@ -661,13 +710,40 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
             }
         }
 
-        // 4. Delegate to document service
+        // 4. Auto-detect document type from file extension (same as bulk upload)
+        let extension = original_filename.split('.').last().unwrap_or("").to_lowercase();
+        
+        let document_type_name = match crate::domains::document::initialization::get_document_type_for_extension(&extension) {
+            Some(type_name) => type_name,
+            None => {
+                return Err(ServiceError::Domain(
+                    DomainError::Validation(ValidationError::custom(&format!(
+                        "Unsupported file type: .{}", extension
+                    )))
+                ));
+            }
+        };
+        
+        // Get document type ID by name
+        let auto_detected_document_type = match self.document_service.get_document_type_by_name(document_type_name).await {
+            Ok(Some(doc_type)) => doc_type,
+            Ok(None) => {
+                return Err(ServiceError::Domain(
+                    DomainError::Validation(ValidationError::custom(&format!(
+                        "Document type '{}' not found in database", document_type_name
+                    )))
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+
+        // 5. Delegate to document service with auto-detected type
         let document = self.document_service.upload_document(
             auth,
             file_data,
             original_filename,
             title,
-            document_type_id,
+            auto_detected_document_type.id, // Use auto-detected type instead of provided one
             goal_id,
             "strategic_goals".to_string(),
             linked_field.clone(),
@@ -684,7 +760,6 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
         goal_id: Uuid,
         files: Vec<(Vec<u8>, String)>,
         title: Option<String>,
-        document_type_id: Uuid,
         sync_priority: SyncPriority,
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
@@ -700,20 +775,69 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
             ));
         }
 
-        // 3. Delegate to document service
-        let documents = self.document_service.bulk_upload_documents(
-            auth,
-            files,
-            title,
-            document_type_id,
-            goal_id,
-            "strategic_goals".to_string(),
-            sync_priority,
-            compression_priority,
-            None,
-        ).await?;
+        // 3. Process each file with auto-detected document type
+        let mut results = Vec::new();
+        
+        for (file_data, filename) in files {
+            // Extract file extension
+            let extension = filename.split('.').last().unwrap_or("").to_lowercase();
+            
+            // Auto-detect document type using existing initialization logic
+            let document_type_name = match crate::domains::document::initialization::get_document_type_for_extension(&extension) {
+                Some(type_name) => type_name,
+                None => {
+                    // Handle unsupported extension - add as error result
+                    results.push(Err(ServiceError::Domain(
+                        DomainError::Validation(ValidationError::custom(&format!(
+                            "Unsupported file type: .{}", extension
+                        )))
+                    )));
+                    continue; // Skip this file, continue with others
+                }
+            };
+            
+            // Get document type ID by name
+            let document_type = match self.document_service.get_document_type_by_name(document_type_name).await {
+                Ok(Some(doc_type)) => doc_type,
+                Ok(None) => {
+                    results.push(Err(ServiceError::Domain(
+                        DomainError::Validation(ValidationError::custom(&format!(
+                            "Document type '{}' not found in database", document_type_name
+                        )))
+                    )));
+                    continue;
+                }
+                Err(e) => {
+                    results.push(Err(e));
+                    continue;
+                }
+            };
 
-        Ok(documents)
+            // Upload individual document with auto-detected type
+            let upload_result = self.document_service.upload_document(
+                auth,
+                file_data,
+                filename.clone(),
+                title.clone(),
+                document_type.id,
+                goal_id,
+                "strategic_goals".to_string(),
+                None, // No specific field linking for bulk uploads
+                sync_priority,
+                compression_priority,
+                None,
+            ).await;
+            
+            results.push(upload_result);
+        }
+
+        // Convert Vec<Result<T, E>> to Result<Vec<T>, ServiceError> but allow partial failures
+        let successful_uploads: Vec<MediaDocumentResponse> = results
+            .into_iter()
+            .filter_map(|result| result.ok())
+            .collect();
+            
+        Ok(successful_uploads)
     }
 
     // Add implementations for new methods here
@@ -959,6 +1083,25 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
             paginated_result.total,
             params,
         ))
+    }
+
+    /// Get filtered strategic goal IDs for bulk selection based on complex filter criteria
+    /// This method is used by the UI for efficient bulk operations
+    async fn get_filtered_goal_ids(
+        &self,
+        filter: crate::domains::strategic_goal::types::StrategicGoalFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>> {
+        // Check permissions first
+        auth.authorize(Permission::ViewStrategicGoals)?;
+
+        // Use repository filter method to get matching IDs
+        let ids = self.repo
+            .find_ids_by_filter(filter)
+            .await
+            .map_err(ServiceError::Domain)?;
+
+        Ok(ids)
     }
 }
 

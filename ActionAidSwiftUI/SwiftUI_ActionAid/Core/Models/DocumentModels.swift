@@ -108,6 +108,7 @@ struct MediaDocumentResponse: Codable, Identifiable {
     let mimeType: String
     let sizeBytes: Int64
     let filePath: String
+    let fieldIdentifier: String?
     let compressionStatus: String
     let blobStatus: String
     let blobKey: String?
@@ -133,6 +134,7 @@ struct MediaDocumentResponse: Codable, Identifiable {
         case mimeType = "mime_type"
         case sizeBytes = "size_bytes"
         case filePath = "file_path"
+        case fieldIdentifier = "field_identifier"
         case compressionStatus = "compression_status"
         case blobStatus = "blob_status"
         case blobKey = "blob_key"

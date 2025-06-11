@@ -38,6 +38,10 @@ struct StrategicGoalsView: View {
     @State private var isInSelectionMode = false
     @State private var selectedItems: Set<String> = []
     
+    // Filter-aware bulk selection state
+    @State private var currentFilter = StrategicGoalFilter.all()
+    @State private var isLoadingFilteredIds = false
+    
     // Stats
     @State private var totalGoals = 0
     @State private var onTrackGoals = 0
@@ -48,6 +52,9 @@ struct StrategicGoalsView: View {
     private var shouldHideTopSection: Bool {
         scrollOffset > 100
     }
+    
+    // MARK: - Table Configuration
+    // Note: tableColumns is defined in StrategicGoalTableRow.swift as an extension
     
     var filteredGoals: [StrategicGoalResponse] {
         goals.filter { goal in
@@ -64,6 +71,38 @@ struct StrategicGoalsView: View {
             
             return matchesSearch && matchesStatus
         }
+    }
+    
+    // Helper to create filter from current UI state
+    private func createCurrentFilter() -> StrategicGoalFilter {
+        var statusIds: [Int64]? = nil
+        if selectedStatus != "all" {
+            switch selectedStatus {
+            case "on_track": statusIds = [1]
+            case "at_risk": statusIds = [2]
+            case "behind": statusIds = [3]
+            case "completed": statusIds = [4]
+            default: break
+            }
+        }
+        
+        let searchTextFilter = searchText.isEmpty ? nil : searchText
+        
+        return StrategicGoalFilter(
+            statusIds: statusIds,
+            responsibleTeams: nil,
+            years: nil,
+            months: nil,
+            userRole: nil,
+            syncPriorities: nil,
+            searchText: searchTextFilter,
+            progressRange: nil,
+            targetValueRange: nil,
+            actualValueRange: nil,
+            dateRange: nil,
+            daysStale: nil,
+            excludeDeleted: true
+        )
     }
     
     var body: some View {
@@ -85,7 +124,7 @@ struct StrategicGoalsView: View {
                 loadGoals()
             })
         }
-        .sheet(item: $selectedGoal) { goal in
+        .fullScreenCover(item: $selectedGoal) { goal in
             GoalDetailView(goal: goal, onUpdate: {
                 loadGoals()
             })
@@ -98,6 +137,12 @@ struct StrategicGoalsView: View {
         .onAppear {
             currentViewStyle = viewStyleManager.getViewStyle(for: "strategic_goals")
             loadGoals()
+        }
+        .onChange(of: searchText) { oldValue, newValue in
+            updateFilterState()
+        }
+        .onChange(of: selectedStatus) { oldValue, newValue in
+            updateFilterState()
         }
     }
     
@@ -233,14 +278,20 @@ struct StrategicGoalsView: View {
             cardContent: { goal in
                 GoalCard(goal: goal)
             },
-            tableColumns: Self.tableColumns,
+            tableColumns: StrategicGoalsView.tableColumns,
             rowContent: { goal, columns in
                 StrategicGoalTableRow(goal: goal, columns: columns)
             },
             domainName: "strategic_goals",
             userRole: authManager.currentUser?.role,
             isInSelectionMode: $isInSelectionMode,
-            selectedItems: $selectedItems
+            selectedItems: $selectedItems,
+            onFilterBasedSelectAll: {
+                // Trigger backend filter-aware selection
+                Task {
+                    await getFilteredGoalIds()
+                }
+            }
         )
     }
     
@@ -291,6 +342,81 @@ struct StrategicGoalsView: View {
         onTrackGoals = goals.filter { $0.statusId == 1 }.count
         atRiskGoals = goals.filter { $0.statusId == 2 }.count
         completedGoals = goals.filter { $0.statusId == 4 }.count
+    }
+    
+    // MARK: - Filter-Aware Bulk Selection
+    
+    /// Get filtered goal IDs for bulk selection based on current UI filters
+    private func getFilteredGoalIds() async {
+        guard !isLoadingFilteredIds else { return }
+        
+        // Update current filter based on UI state
+        currentFilter = createCurrentFilter()
+        
+        // If no filters are applied, don't select anything
+        if currentFilter.isEmpty {
+            await MainActor.run {
+                selectedItems.removeAll()
+            }
+            return
+        }
+        
+        await MainActor.run {
+            isLoadingFilteredIds = true
+        }
+        
+        guard let currentUser = authManager.currentUser else {
+            await MainActor.run {
+                isLoadingFilteredIds = false
+                errorMessage = "User not authenticated."
+                showErrorAlert = true
+            }
+            return
+        }
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+        
+        let result = await ffiHandler.getFilteredIds(filter: currentFilter, auth: authContext)
+        
+        await MainActor.run {
+            isLoadingFilteredIds = false
+            switch result {
+            case .success(let filteredIds):
+                // Only select IDs that are currently visible (intersection with loaded data)
+                let visibleIds = Set(filteredGoals.map(\.id))
+                let filteredVisibleIds = Set(filteredIds).intersection(visibleIds)
+                selectedItems = filteredVisibleIds
+                
+                // If we have selections, enter selection mode
+                if !selectedItems.isEmpty {
+                    isInSelectionMode = true
+                }
+            case .failure(let error):
+                errorMessage = "Failed to get filtered IDs: \(error.localizedDescription)"
+                showErrorAlert = true
+            }
+        }
+    }
+    
+    /// Update filter when UI state changes
+    private func updateFilterState() {
+        // Update current filter based on UI changes
+        currentFilter = createCurrentFilter()
+        
+        // If in selection mode with filters, refresh the selection
+        if isInSelectionMode && !currentFilter.isEmpty {
+            Task {
+                await getFilteredGoalIds()
+            }
+        } else if currentFilter.isEmpty {
+            // Clear selection if no filters
+            selectedItems.removeAll()
+        }
     }
 }
 
@@ -624,10 +750,12 @@ struct GoalDetailView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var authManager: AuthenticationManager
     private let ffiHandler = StrategicGoalFFIHandler()
-    @State private var documents: [GoalDocument] = []
+    private let documentHandler = DocumentFFIHandler()
+    @State private var documents: [MediaDocumentResponse] = []
     @State private var showUploadSheet = false
     @State private var showDeleteConfirmation = false
     @State private var isDeleting = false
+    @State private var isLoadingDocuments = false
     
     var body: some View {
         NavigationView {
@@ -692,8 +820,38 @@ struct GoalDetailView: View {
                         DetailRow(label: "KPI", value: goal.kpi ?? "N/A")
                         DetailRow(label: "Responsible Team", value: goal.responsibleTeam ?? "N/A")
                         DetailRow(label: "Sync Priority", value: goal.syncPriority.rawValue)
+                        
+                        Divider()
+                        
                         DetailRow(label: "Created", value: formatDate(goal.createdAt))
+                        DetailRow(label: "Created By", value: goal.createdByUsername ?? goal.createdByUserId ?? "Unknown")
                         DetailRow(label: "Last Updated", value: formatDate(goal.updatedAt))
+                        DetailRow(label: "Updated By", value: goal.updatedByUsername ?? goal.updatedByUserId ?? "Unknown")
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("Sync Status")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            if let lastSynced = goal.lastSyncedAt {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text("Synced")
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                        .foregroundColor(.green)
+                                    Text(formatDate(lastSynced))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            } else {
+                                Text("Untracked")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(.orange)
+                            }
+                        }
                     }
                     .padding()
                     .background(Color(.systemGray6))
@@ -711,15 +869,25 @@ struct GoalDetailView: View {
                             }
                         }
                         
-                        if documents.isEmpty {
+                        if isLoadingDocuments {
+                            HStack {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                Text("Loading documents...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                            }
+                            .padding(.vertical, 20)
+                        } else if documents.isEmpty {
                             Text("No documents uploaded")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 20)
                         } else {
-                            ForEach(documents) { doc in
-                                DocumentRow(document: doc)
+                            ForEach(documents, id: \.id) { doc in
+                                MediaDocumentRow(document: doc)
                             }
                         }
                     }
@@ -749,7 +917,12 @@ struct GoalDetailView: View {
                 }
             }
             .sheet(isPresented: $showUploadSheet) {
-                DocumentUploadSheet(goalId: goal.id)
+                DocumentUploadSheet(goalId: goal.id, onUploadComplete: {
+                    loadDocuments()
+                })
+            }
+            .onAppear {
+                loadDocuments()
             }
             .alert("Delete Goal", isPresented: $showDeleteConfirmation) {
                 Button("Cancel", role: .cancel) { }
@@ -780,6 +953,45 @@ struct GoalDetailView: View {
             return displayFormatter.string(from: date)
         }
         return dateString
+    }
+    
+    private func loadDocuments() {
+        isLoadingDocuments = true
+        
+        Task {
+            guard let currentUser = authManager.currentUser else {
+                await MainActor.run {
+                    isLoadingDocuments = false
+                }
+                return
+            }
+            
+            let authContext = AuthCtxDto(
+                userId: currentUser.userId,
+                role: currentUser.role,
+                deviceId: authManager.getDeviceId(),
+                offlineMode: false
+            )
+            
+            let result = await documentHandler.listDocumentsByEntity(
+                relatedTable: "strategic_goals",
+                relatedId: goal.id,
+                pagination: PaginationDto(page: 1, perPage: 50),
+                include: [.documentType],
+                auth: authContext
+            )
+            
+            await MainActor.run {
+                isLoadingDocuments = false
+                switch result {
+                case .success(let paginatedResult):
+                    documents = paginatedResult.items
+                case .failure(let error):
+                    print("Failed to load documents: \(error)")
+                    documents = []
+                }
+            }
+        }
     }
     
     private func deleteGoal() {
@@ -877,58 +1089,53 @@ struct Badge: View {
 }
 
 
-// MARK: - Document Models & Views (To be refactored or kept as is)
-struct GoalDocument: Identifiable {
-    let id: String
-    let filename: String
-    let documentTypeId: String
-    let documentTypeName: String
-    let linkedField: String?
-    let fileSize: Int64
-    let uploadDate: Date
-    let compressionStatus: String?
-}
+// MARK: - Document Models & Views
 
-// MARK: - Document Row
-struct DocumentRow: View {
-    let document: GoalDocument
+// MARK: - Media Document Row
+struct MediaDocumentRow: View {
+    let document: MediaDocumentResponse
     
     var body: some View {
         HStack {
-            Image(systemName: fileIcon(for: document.filename))
+            Image(systemName: fileIcon(for: document.originalFilename))
                 .font(.title3)
-                .foregroundColor(.blue)
+                .foregroundColor(document.isAvailableLocally ?? false ? .blue : .gray)
                 .frame(width: 40)
             
             VStack(alignment: .leading, spacing: 2) {
-                Text(document.filename)
+                Text(document.title ?? document.originalFilename)
                     .font(.subheadline)
                     .lineLimit(1)
                 
                 HStack(spacing: 8) {
-                    Text(document.documentTypeName)
+                    Text(document.typeName ?? "Document")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     
-                    if let field = document.linkedField {
+                    if let field = document.fieldIdentifier {
                         Text("• Linked to \(field)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
                     
-                    Text("• \(formatFileSize(document.fileSize))")
+                    Text("• \(formatFileSize(document.sizeBytes))")
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                    
+                    if !(document.isAvailableLocally ?? false) {
+                        Text("• Cloud")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
                 }
             }
             
             Spacer()
             
-            if let status = document.compressionStatus {
-                CompressionBadge(status: status)
-            }
+            CompressionBadge(status: document.compressionStatus)
         }
         .padding(.vertical, 8)
+        .opacity(document.hasError ?? false ? 0.5 : 1.0)
     }
     
     private func fileIcon(for filename: String) -> String {
@@ -938,6 +1145,8 @@ struct DocumentRow: View {
         case "doc", "docx": return "doc.richtext.fill"
         case "jpg", "jpeg", "png": return "photo.fill"
         case "xls", "xlsx": return "tablecells.fill"
+        case "mp4", "mov": return "video.fill"
+        case "mp3", "m4a": return "music.note"
         default: return "doc.fill"
         }
     }
@@ -974,11 +1183,18 @@ struct CompressionBadge: View {
 // MARK: - Document Upload Sheet
 struct DocumentUploadSheet: View {
     let goalId: String
+    let onUploadComplete: () -> Void
     @Environment(\.dismiss) var dismiss
-    @State private var selectedDocumentType = ""
+    @EnvironmentObject var authManager: AuthenticationManager
+    
     @State private var documentTitle = ""
     @State private var linkedField = ""
-    @State private var priority = "Normal"
+    @State private var priority: SyncPriority = .normal
+    @State private var selectedFiles: [DocumentFile] = []
+    @State private var showFilePicker = false
+    @State private var isUploading = false
+    @State private var uploadResults: [UploadResult] = []
+    @State private var errorMessage: String?
     
     // Strategic Goal document-linkable fields based on DocumentLinkable implementation
     private let linkableFields = [
@@ -992,49 +1208,164 @@ struct DocumentUploadSheet: View {
         ("baseline_data", "Baseline Data")
     ]
     
+    // Computed properties for upload mode detection
+    private var isSingleUpload: Bool {
+        selectedFiles.count == 1
+    }
+    
+    private var isBulkUpload: Bool {
+        selectedFiles.count > 1
+    }
+    
+    private var uploadModeDescription: String {
+        if selectedFiles.isEmpty {
+            return "No files selected"
+        } else if isSingleUpload {
+            return "Single file upload"
+        } else {
+            return "Bulk upload (\(selectedFiles.count) files)"
+        }
+    }
+    
     var body: some View {
         NavigationView {
             Form {
                 Section("Document Information") {
-                    TextField("Document Title", text: $documentTitle)
+                    TextField("Shared Title (Optional)", text: $documentTitle)
+                        .help("This title will be applied to all selected documents")
                     
-                    Picker("Document Type", selection: $selectedDocumentType) {
-                        Text("Select Type").tag("")
-                        Text("Strategic Plan").tag("strategic_plan")
-                        Text("Progress Report").tag("progress_report")
-                        Text("Evidence").tag("evidence")
-                        Text("Impact Assessment").tag("impact_assessment")
-                        Text("Theory of Change").tag("theory_of_change")
-                        Text("Baseline Data").tag("baseline_data")
-                        Text("Supporting Documentation").tag("supporting_documentation")
+                    // Upload mode indicator
+                    if !selectedFiles.isEmpty {
+                        HStack {
+                            Image(systemName: isSingleUpload ? "doc" : "doc.on.doc")
+                                .foregroundColor(isSingleUpload ? .blue : .green)
+                            Text(uploadModeDescription)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
                     }
                     
-                    Picker("Link to Field", selection: $linkedField) {
-                        ForEach(linkableFields, id: \.0) { field in
-                            Text(field.1).tag(field.0)
+                    // Linked field - only for single uploads, disabled for bulk
+                    if isSingleUpload {
+                        Picker("Link to Field", selection: $linkedField) {
+                            ForEach(linkableFields, id: \.0) { field in
+                                Text(field.1).tag(field.0)
+                            }
+                        }
+                        .help("Single uploads can be linked to specific strategic goal fields")
+                    } else if isBulkUpload {
+                        HStack {
+                            Text("Link to Field")
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("Disabled for bulk upload")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
                         }
                     }
                     
                     Picker("Priority", selection: $priority) {
-                        Text("Low").tag("Low")
-                        Text("Normal").tag("Normal")
-                        Text("High").tag("High")
+                        Text("Low").tag(SyncPriority.low)
+                        Text("Normal").tag(SyncPriority.normal)
+                        Text("High").tag(SyncPriority.high)
                     }
                 }
                 
-                Section("Upload") {
-                    Button(action: selectDocument) {
-                        Label("Select Document", systemImage: "doc.badge.plus")
+                Section("File Selection") {
+                    Button(action: { showFilePicker = true }) {
+                        Label("Select Documents", systemImage: "doc.badge.plus")
+                    }
+                    
+                    if !selectedFiles.isEmpty {
+                        ForEach(selectedFiles) { file in
+                            HStack {
+                                Image(systemName: fileIcon(for: file.name))
+                                    .foregroundColor(isSingleUpload ? .blue : .green)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(file.name)
+                                        .font(.subheadline)
+                                    HStack {
+                                        Text("\(formatFileSize(file.size)) • \(file.detectedType)")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        
+                                        if isSingleUpload && !linkedField.isEmpty {
+                                            Text("• Will link to \(linkableFields.first { $0.0 == linkedField }?.1 ?? linkedField)")
+                                                .font(.caption2)
+                                                .foregroundColor(.blue)
+                                        }
+                                    }
+                                }
+                                
+                                Spacer()
+                                
+                                Button(action: {
+                                    selectedFiles.removeAll { $0.id == file.id }
+                                }) {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundColor(.red)
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if !uploadResults.isEmpty {
+                    Section("Upload Results") {
+                        ForEach(uploadResults) { result in
+                            HStack {
+                                Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                    .foregroundColor(result.success ? .green : .red)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(result.filename)
+                                        .font(.subheadline)
+                                    Text(result.message)
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                
+                                Spacer()
+                            }
+                        }
                     }
                 }
                 
                 Section {
-                    Text("Documents can be linked to specific fields for better organization and validation.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    if isSingleUpload {
+                        Text("Document type is automatically detected from file extension. Field linking allows you to associate this document with a specific strategic goal field.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else if isBulkUpload {
+                        Text("Document types are automatically detected from file extensions. Bulk uploads are processed efficiently but cannot be linked to specific fields.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Document types are automatically detected from file extensions. Select files to begin.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                // Validation messages
+                if isSingleUpload && linkedField.isEmpty {
+                    Section {
+                        Text("Please select a field to link this document to. Single uploads must be linked to a strategic goal field.")
+                            .foregroundColor(.orange)
+                            .font(.caption)
+                    }
+                }
+                
+                if let error = errorMessage {
+                    Section {
+                        Text(error)
+                            .foregroundColor(.red)
+                            .font(.caption)
+                    }
                 }
             }
-            .navigationTitle("Upload Document")
+            .navigationTitle("Upload Documents")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -1042,22 +1373,252 @@ struct DocumentUploadSheet: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Upload") {
-                        uploadDocument()
+                        uploadDocuments()
                     }
-                    .disabled(documentTitle.isEmpty || selectedDocumentType.isEmpty)
+                    .disabled(selectedFiles.isEmpty || isUploading || (isSingleUpload && linkedField.isEmpty))
+                }
+            }
+            .fileImporter(
+                isPresented: $showFilePicker,
+                allowedContentTypes: [
+                    .pdf, .plainText, .rtf, .html,
+                    .jpeg, .png, .heic, .gif, .webP,
+                    .quickTimeMovie, .mpeg4Movie, .video,
+                    .mp3, .wav, .aiff, .audio,
+                    .zip, .gzip,
+                    .spreadsheet, .presentation,
+                    .data, .item // Fallback for other types
+                ],
+                allowsMultipleSelection: true
+            ) { result in
+                handleFileSelection(result)
+            }
+            .disabled(isUploading)
+            .onChange(of: selectedFiles.count) { oldCount, newCount in
+                // Clear linked field when switching from single to bulk mode
+                if oldCount == 1 && newCount > 1 {
+                    linkedField = ""
+                }
+            }
+            .overlay {
+                if isUploading {
+                    Color.black.opacity(0.3)
+                        .ignoresSafeArea()
+                    VStack {
+                        ProgressView()
+                        Text("Uploading documents...")
+                            .foregroundColor(.white)
+                    }
                 }
             }
         }
     }
     
-    private func selectDocument() {
-        // TODO: Implement document picker
-        print("Select document for goal: \(goalId)")
+    private func handleFileSelection(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            var newFiles: [DocumentFile] = []
+            
+            for url in urls {
+                guard url.startAccessingSecurityScopedResource() else { continue }
+                defer { url.stopAccessingSecurityScopedResource() }
+                
+                do {
+                    let data = try Data(contentsOf: url)
+                    let filename = url.lastPathComponent
+                    let fileSize = data.count
+                    let detectedType = detectDocumentType(from: filename)
+                    
+                    let file = DocumentFile(
+                        name: filename,
+                        data: data,
+                        size: fileSize,
+                        detectedType: detectedType
+                    )
+                    newFiles.append(file)
+                } catch {
+                    print("Error reading file \(url.lastPathComponent): \(error)")
+                }
+            }
+            
+            selectedFiles.append(contentsOf: newFiles)
+            
+        case .failure(let error):
+            errorMessage = "Failed to select files: \(error.localizedDescription)"
+        }
     }
     
-    private func uploadDocument() {
-        // TODO: Implement document upload
-        print("Upload document - Title: \(documentTitle), Type: \(selectedDocumentType), Field: \(linkedField), Priority: \(priority)")
-        dismiss()
+    private func detectDocumentType(from filename: String) -> String {
+        let fileExtension = (filename as NSString).pathExtension.lowercased()
+        
+        // Map extensions to user-friendly type names
+        switch fileExtension {
+        case "pdf": return "Document"
+        case "doc", "docx": return "Document"
+        case "txt", "md": return "Document"
+        case "jpg", "jpeg", "png", "heic", "heif": return "Image"
+        case "mp4", "mov", "avi": return "Video"
+        case "mp3", "m4a", "wav": return "Audio"
+        case "xlsx", "xls", "csv": return "Spreadsheet"
+        case "pptx", "ppt": return "Presentation"
+        case "zip", "rar", "7z": return "Archive"
+        case "json", "xml", "yaml": return "Data"
+        case "html", "css", "js", "swift": return "Code"
+        default: return "Unknown (\(fileExtension))"
+        }
+    }
+    
+    private func uploadDocuments() {
+        isUploading = true
+        uploadResults = []
+        errorMessage = nil
+        
+        Task {
+            guard let currentUser = authManager.currentUser else {
+                await MainActor.run {
+                    self.errorMessage = "User not authenticated."
+                    self.isUploading = false
+                }
+                return
+            }
+            
+            let authContext = AuthContextPayload(
+                user_id: currentUser.userId,
+                role: currentUser.role,
+                device_id: authManager.getDeviceId(),
+                offline_mode: false
+            )
+            
+            let ffiHandler = StrategicGoalFFIHandler()
+            
+            if isSingleUpload {
+                // Single upload with field linking
+                let file = selectedFiles[0]
+                let result = await ffiHandler.uploadDocument(
+                    goalId: goalId,
+                    fileData: file.data,
+                    originalFilename: file.name,
+                    title: documentTitle.isEmpty ? nil : documentTitle,
+                    documentTypeId: "00000000-0000-0000-0000-000000000000", // Auto-detection placeholder
+                    linkedField: linkedField.isEmpty ? nil : linkedField,
+                    syncPriority: priority,
+                    compressionPriority: .normal,
+                    auth: authContext
+                )
+                
+                await MainActor.run {
+                    self.isUploading = false
+                    
+                    switch result {
+                    case .success(let document):
+                        self.uploadResults = [UploadResult(
+                            filename: document.originalFilename,
+                            success: true,
+                            message: "Uploaded successfully as \(document.typeName ?? "Document")" + 
+                                    (linkedField.isEmpty ? "" : " (linked to \(linkableFields.first { $0.0 == linkedField }?.1 ?? linkedField))")
+                        )]
+                        
+                        onUploadComplete()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            dismiss()
+                        }
+                        
+                    case .failure(let error):
+                        self.errorMessage = "Upload failed: \(error.localizedDescription)"
+                        self.uploadResults = [UploadResult(
+                            filename: file.name,
+                            success: false,
+                            message: "Failed to upload"
+                        )]
+                    }
+                }
+            } else {
+                // Bulk upload (no field linking)
+                let files = selectedFiles.map { file in
+                    (file.data, file.name)
+                }
+                
+                let result = await ffiHandler.bulkUploadDocuments(
+                    goalId: goalId,
+                    files: files,
+                    title: documentTitle.isEmpty ? nil : documentTitle,
+                    documentTypeId: "00000000-0000-0000-0000-000000000000", // Auto-detection placeholder
+                    syncPriority: priority,
+                    compressionPriority: .normal,
+                    auth: authContext
+                )
+                
+                await MainActor.run {
+                    self.isUploading = false
+                    
+                    switch result {
+                    case .success(let documents):
+                        self.uploadResults = documents.map { doc in
+                            UploadResult(
+                                filename: doc.originalFilename,
+                                success: true,
+                                message: "Uploaded successfully as \(doc.typeName ?? "Document")"
+                            )
+                        }
+                        
+                        if !uploadResults.isEmpty {
+                            onUploadComplete()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                dismiss()
+                            }
+                        }
+                        
+                    case .failure(let error):
+                        self.errorMessage = "Upload failed: \(error.localizedDescription)"
+                        self.uploadResults = selectedFiles.map { file in
+                            UploadResult(
+                                filename: file.name,
+                                success: false,
+                                message: "Failed to upload"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func fileIcon(for filename: String) -> String {
+        let ext = (filename as NSString).pathExtension.lowercased()
+        switch ext {
+        case "pdf": return "doc.text.fill"
+        case "doc", "docx": return "doc.richtext.fill"
+        case "jpg", "jpeg", "png": return "photo.fill"
+        case "xls", "xlsx": return "tablecells.fill"
+        case "mp4", "mov": return "video.fill"
+        case "mp3", "m4a": return "music.note"
+        default: return "doc.fill"
+        }
+    }
+    
+    private func formatFileSize(_ bytes: Int) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(bytes))
     }
 }
+
+// MARK: - Supporting Models for Document Upload
+struct DocumentFile: Identifiable {
+    let id = UUID()
+    let name: String
+    let data: Data
+    let size: Int
+    let detectedType: String
+}
+
+struct UploadResult: Identifiable {
+    let id = UUID()
+    let filename: String
+    let success: Bool
+    let message: String
+}
+
+// MARK: - Strategic Goal Table Row
+// Note: StrategicGoalTableRow is defined in Core/Components/StrategicGoalTableRow.swift

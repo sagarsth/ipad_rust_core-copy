@@ -91,6 +91,7 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
     let rowContent: (Item, [TableColumn]) -> RowContent
     let domainName: String
     let userRole: String? // Add user role for button visibility
+    let onFilterBasedSelectAll: (() -> Void)? // Callback for backend filter selection
     
     @State private var groupedItems: [(monthYear: String, items: [Item])] = []
     @State private var showColumnCustomizer = false
@@ -149,7 +150,8 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
         domainName: String,
         userRole: String?,
         isInSelectionMode: Binding<Bool>,
-        selectedItems: Binding<Set<String>>
+        selectedItems: Binding<Set<String>>,
+        onFilterBasedSelectAll: (() -> Void)? = nil
     ) {
         self.items = items
         self.viewStyle = viewStyle
@@ -162,6 +164,7 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
         self.userRole = userRole
         self._isInSelectionMode = isInSelectionMode
         self._selectedItems = selectedItems
+        self.onFilterBasedSelectAll = onFilterBasedSelectAll
     }
     
     var body: some View {
@@ -270,7 +273,7 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
         VStack(spacing: 8) {
             // Main controls row
             HStack(spacing: 8) {
-                // Select All button
+                // Select All / Filter Selection button
                 Button(action: {
                     if isSelectAllExplicitlyPressed {
                         // If select all was explicitly pressed, clear everything
@@ -279,12 +282,18 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
                         selectedMonths.removeAll()
                         isSelectAllExplicitlyPressed = false
                     } else {
-                        // When selecting all, clear year/month filters and select everything
-                        selectedYears.removeAll()
-                        selectedMonths.removeAll()
-                        let allItemIds = groupedItems.flatMap { $0.items.map { String(describing: $0.id) } }
-                        selectedItems = Set(allItemIds)
-                        isSelectAllExplicitlyPressed = true
+                        // Check if we have filters - if so, delegate to parent for backend filtering
+                        if hasActiveFilters() {
+                            // Trigger backend filter selection via callback
+                            onFilterBasedSelectAll?()
+                        } else {
+                            // When selecting all without filters, select everything visible
+                            selectedYears.removeAll()
+                            selectedMonths.removeAll()
+                            let allItemIds = groupedItems.flatMap { $0.items.map { String(describing: $0.id) } }
+                            selectedItems = Set(allItemIds)
+                            isSelectAllExplicitlyPressed = true
+                        }
                     }
                 }) {
                     VStack(spacing: 2) {
@@ -494,6 +503,14 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
     }
     
     // MARK: - Helper Methods for Advanced Selection
+    
+    /// Check if any filters are currently active (UI-based or backend-based)
+    private func hasActiveFilters() -> Bool {
+        // Check for date filters
+        return !selectedYears.isEmpty || !selectedMonths.isEmpty
+        // Note: Backend filters (search, status, etc.) will be handled by the parent callback
+    }
+    
     private func getFilteredItemIds() -> [String] {
         var filteredItems: [Item] = []
         let currentYear = Calendar.current.component(.year, from: Date())
