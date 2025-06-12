@@ -188,6 +188,59 @@ struct BulkUploadDocumentsRequest: Codable {
     }
 }
 
+// MARK: - iOS Optimized Path-Based Upload Requests (NO BASE64!)
+
+struct UploadDocumentFromPathRequest: Codable {
+    let goalId: String
+    let filePath: String               // NO BASE64! Just the file path
+    let originalFilename: String
+    let title: String?
+    let documentTypeId: String
+    let linkedField: String?
+    let syncPriority: SyncPriority
+    let compressionPriority: CompressionPriority?
+    let auth: AuthContextPayload
+    
+    enum CodingKeys: String, CodingKey {
+        case title, auth
+        case goalId = "goal_id"
+        case filePath = "file_path"      // Changed from file_data to file_path
+        case originalFilename = "original_filename"
+        case documentTypeId = "document_type_id"
+        case linkedField = "linked_field"
+        case syncPriority = "sync_priority"
+        case compressionPriority = "compression_priority"
+    }
+}
+
+struct BulkUploadDocumentsFromPathsRequest: Codable {
+    struct FilePath: Codable {
+        let filePath: String             // NO BASE64! Just the file path
+        let filename: String
+        
+        enum CodingKeys: String, CodingKey {
+            case filename
+            case filePath = "file_path"  // Changed from file_data to file_path
+        }
+    }
+    let goalId: String
+    let filePaths: [FilePath]            // Array of paths instead of data
+    let title: String?
+    let documentTypeId: String
+    let syncPriority: SyncPriority
+    let compressionPriority: CompressionPriority?
+    let auth: AuthContextPayload
+    
+    enum CodingKeys: String, CodingKey {
+        case title, auth
+        case goalId = "goal_id"
+        case filePaths = "file_paths"    // Changed from files to file_paths
+        case documentTypeId = "document_type_id"
+        case syncPriority = "sync_priority"
+        case compressionPriority = "compression_priority"
+    }
+}
+
 struct FindByStatusRequest: Codable {
     let statusId: Int
     let pagination: PaginationDto?
@@ -275,9 +328,12 @@ struct StrategicGoalResponse: Codable, Identifiable, MonthGroupable, Equatable {
     let lastSyncedAt: String?
     let createdByUsername: String?
     let updatedByUsername: String?
+    let documentUploadErrors: [String]?
+    let projectCount: Int?
+    let documentCounts: Int?
     
     enum CodingKeys: String, CodingKey {
-        case id, outcome, kpi
+        case id, kpi, outcome
         case objectiveCode = "objective_code"
         case targetValue = "target_value"
         case actualValue = "actual_value"
@@ -292,6 +348,23 @@ struct StrategicGoalResponse: Codable, Identifiable, MonthGroupable, Equatable {
         case lastSyncedAt = "last_synced_at"
         case createdByUsername = "created_by_username"
         case updatedByUsername = "updated_by_username"
+        case documentUploadErrors = "document_upload_errors"
+        case projectCount = "project_count"
+        case documentCounts = "document_counts"
+    }
+
+    var displayLastSyncedAt: String {
+        guard let syncedAt = lastSyncedAt, let date = ISO8601DateFormatter().date(from: syncedAt) else {
+            return "Not synced yet"
+        }
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+    
+    var hasDocuments: Bool {
+        return (documentCounts ?? 0) > 0
     }
 }
 
@@ -301,9 +374,90 @@ struct CreateWithDocumentsResponse: Codable {
     // let documentResults: [Result<MediaDocumentResponse, String>]
 }
 
-struct DeleteResponse: Codable {
-    let deleted: Bool
-    let message: String
+// Updated to handle actual Rust DeleteResult enum
+enum DeleteResponse: Codable {
+    case hardDeleted
+    case softDeleted(dependencies: [String])
+    case dependenciesPrevented(dependencies: [String])
+    
+    enum CodingKeys: String, CodingKey {
+        case hardDeleted = "HardDeleted"
+        case softDeleted = "SoftDeleted"
+        case dependenciesPrevented = "DependenciesPrevented"
+    }
+    
+    init(from decoder: Decoder) throws {
+        // First try to decode as a simple string (for HardDeleted)
+        if let stringValue = try? decoder.singleValueContainer().decode(String.self) {
+            switch stringValue {
+            case "HardDeleted":
+                self = .hardDeleted
+                return
+            default:
+                throw DecodingError.dataCorruptedError(
+                    in: try decoder.singleValueContainer(), 
+                    debugDescription: "Unknown simple DeleteResult: \(stringValue)"
+                )
+            }
+        }
+        
+        // Then try to decode as a keyed container (for SoftDeleted/DependenciesPrevented)
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        if let softDeletedData = try? container.decode([String: [String]].self, forKey: .softDeleted) {
+            self = .softDeleted(dependencies: softDeletedData["dependencies"] ?? [])
+        } else if let preventedData = try? container.decode([String: [String]].self, forKey: .dependenciesPrevented) {
+            self = .dependenciesPrevented(dependencies: preventedData["dependencies"] ?? [])
+        } else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .hardDeleted, 
+                in: container, 
+                debugDescription: "Unable to decode DeleteResult"
+            )
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .hardDeleted:
+            var container = encoder.singleValueContainer()
+            try container.encode("HardDeleted")
+        case .softDeleted(let dependencies):
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(["dependencies": dependencies], forKey: .softDeleted)
+        case .dependenciesPrevented(let dependencies):
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(["dependencies": dependencies], forKey: .dependenciesPrevented)
+        }
+    }
+    
+    // Helper properties for UI
+    var wasDeleted: Bool {
+        switch self {
+        case .hardDeleted, .softDeleted: return true
+        case .dependenciesPrevented: return false
+        }
+    }
+    
+    var isHardDeleted: Bool {
+        if case .hardDeleted = self { return true }
+        return false
+    }
+    
+    var displayMessage: String {
+        switch self {
+        case .hardDeleted:
+            return "Goal permanently deleted successfully"
+        case .softDeleted(let dependencies):
+            if dependencies.isEmpty {
+                return "Goal archived successfully"
+            } else {
+                return "Goal archived due to dependencies: \(dependencies.joined(separator: ", "))"
+            }
+        case .dependenciesPrevented(let dependencies):
+            return "Could not delete goal due to dependencies: \(dependencies.joined(separator: ", "))"
+        }
+    }
 }
 
 struct StatusDistributionResponse: Codable {
@@ -409,7 +563,7 @@ struct StrategicGoalFilter: Codable {
     }
     
     static func byStatus(_ statusIds: [Int64]) -> StrategicGoalFilter {
-        var filter = StrategicGoalFilter.all()
+        let filter = StrategicGoalFilter.all()
         return StrategicGoalFilter(
             statusIds: statusIds,
             responsibleTeams: filter.responsibleTeams,
@@ -428,7 +582,7 @@ struct StrategicGoalFilter: Codable {
     }
     
     static func byDateParts(years: [Int32]?, months: [Int32]?) -> StrategicGoalFilter {
-        var filter = StrategicGoalFilter.all()
+        let filter = StrategicGoalFilter.all()
         return StrategicGoalFilter(
             statusIds: filter.statusIds,
             responsibleTeams: filter.responsibleTeams,

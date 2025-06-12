@@ -63,7 +63,7 @@ int32_t hash_password(const char*, char**);
 void free_string(char*);
 
 // ============================================================================
-// COMPRESSION FUNCTIONS (18 functions)
+// COMPRESSION FUNCTIONS (21 functions)
 // ============================================================================
 
 int32_t compression_compress_document(const char*, char**);
@@ -84,6 +84,9 @@ int32_t compression_retry_all_failed(char**);
 int32_t compression_process_queue_now(void);
 int32_t compression_get_supported_methods(const char*, char**);
 int32_t compression_get_document_history(const char*, char**);
+int32_t compression_debug_info(char**);
+int32_t compression_manual_trigger(const char*, char**);
+int32_t compression_reset_stuck_jobs(const char*, char**);
 
 // ============================================================================
 // CORE FUNCTIONS (7 functions)
@@ -98,7 +101,7 @@ char* get_last_error(void);
 int32_t set_ios_storage_path(const char*);
 
 // ============================================================================
-// DOCUMENT FUNCTIONS (24 functions)
+// DOCUMENT FUNCTIONS (26 functions)
 // ============================================================================
 
 int32_t document_type_create(const char*, char**);
@@ -124,6 +127,8 @@ int32_t document_get_counts_by_entities(const char*, char**);
 int32_t document_bulk_update_sync_priority(const char*, char**);
 int32_t document_get_versions(const char*, char**);
 int32_t document_get_access_logs(const char*, char**);
+int32_t document_upload_from_path(const char*, char**);
+int32_t document_bulk_upload_from_paths(const char*, char**);
 void document_free(char*);
 
 // ============================================================================
@@ -281,7 +286,7 @@ int32_t project_get_document_references(const char*, char**);
 void project_free(char*);
 
 // ============================================================================
-// STRATEGIC_GOAL FUNCTIONS (17 functions)
+// STRATEGIC_GOAL FUNCTIONS (19 functions)
 // ============================================================================
 
 int32_t strategic_goal_create(const char*, char**);
@@ -292,6 +297,8 @@ int32_t strategic_goal_update(const char*, char**);
 int32_t strategic_goal_delete(const char*, char**);
 int32_t strategic_goal_upload_document(const char*, char**);
 int32_t strategic_goal_bulk_upload_documents(const char*, char**);
+int32_t strategic_goal_upload_document_from_path(const char*, char**);
+int32_t strategic_goal_bulk_upload_documents_from_paths(const char*, char**);
 int32_t strategic_goal_find_by_status(const char*, char**);
 int32_t strategic_goal_find_by_team(const char*, char**);
 int32_t strategic_goal_find_by_user_role(const char*, char**);

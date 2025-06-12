@@ -54,10 +54,10 @@ struct CoreInitializationView: View {
             try await coreHandler.initializeLibrary(storagePath: storagePath)
             
             statusMessage = "Creating default accounts..."
-            _ = try await authHandler.initializeDefaultAccounts(token: "init_setup")
+            _ = await authHandler.initializeDefaultAccounts(token: "init_setup")
 
             statusMessage = "Loading test data..."
-            _ = try await authHandler.initializeTestData(token: "init_setup")
+            _ = await authHandler.initializeTestData(token: "init_setup")
             
             statusMessage = "Logging in as administrator..."
             let credentials = Credentials(email: "admin@example.com", password: "Admin123!")

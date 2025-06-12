@@ -484,15 +484,15 @@ pub unsafe extern "C" fn strategic_goal_upload_document(payload_json: *const c_c
     })
 }
 
-/// Bulk upload multiple documents for a strategic goal (with auto-detection)
+/// Bulk upload documents to a strategic goal (legacy base64 method)
 /// Expected JSON payload:
 /// {
 ///   "goal_id": "uuid",
 ///   "files": [{"file_data": "base64", "filename": "string"}, ...],
 ///   "title": "optional_string",
-///   "document_type_id": "uuid", // IGNORED - document types auto-detected from file extensions
-///   "sync_priority": "HIGH|NORMAL|LOW",
-///   "compression_priority": "HIGH|NORMAL|LOW",
+///   "document_type_id": "uuid",
+///   "sync_priority": "low|normal|high",
+///   "compression_priority": "low|normal|high",
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
@@ -521,38 +521,192 @@ pub unsafe extern "C" fn strategic_goal_bulk_upload_documents(payload_json: *con
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
         
-        // Decode all files
-        let mut files = Vec::new();
-        for file in p.files {
-            let data = base64::decode(&file.file_data)
-                .map_err(|_| FFIError::invalid_argument("invalid base64 file data"))?;
-            files.push((data, file.filename));
-        }
-        
-        let goal_id = Uuid::parse_str(&p.goal_id)
+        let goal_uuid = Uuid::parse_str(&p.goal_id)
             .map_err(|_| FFIError::invalid_argument("invalid goal_id"))?;
-        let document_type_id = Uuid::parse_str(&p.document_type_id)
+        let doc_type_uuid = Uuid::parse_str(&p.document_type_id)
             .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
         
         let sync_priority = SyncPriority::from_str(&p.sync_priority)
             .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
-        let compression_priority = p.compression_priority.as_ref()
-            .map(|s| CompressionPriority::from_str(s))
-            .transpose()
-            .map_err(|_| FFIError::invalid_argument("invalid compression_priority"))?;
+        let compression_priority = if let Some(cp) = p.compression_priority {
+            CompressionPriority::from_str(&cp)
+                .map_err(|_| FFIError::invalid_argument("invalid compression_priority"))?
+        } else {
+            CompressionPriority::Normal
+        };
         
-        let auth: AuthContext = p.auth.try_into()?;
+        // Decode base64 files
+        let mut files_data = Vec::new();
+        for file in p.files {
+            let file_bytes = base64::decode(&file.file_data)
+                .map_err(|_| FFIError::invalid_argument("invalid base64 in file_data"))?;
+            files_data.push((file_bytes, file.filename));
+        }
+        
         let svc = globals::get_strategic_goal_service()?;
-        
         let documents = block_on_async(svc.bulk_upload_documents_for_goal(
-            goal_id,
-            files,
+            goal_uuid,
+            files_data,
             p.title,
+            sync_priority,
+            Some(compression_priority),
+            &auth,
+        ))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&documents)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Upload a single document to a strategic goal using file path (iOS optimized)
+/// Expected JSON payload:
+/// {
+///   "goal_id": "uuid",
+///   "file_path": "/path/to/file",
+///   "original_filename": "string",
+///   "title": "optional_string",
+///   "document_type_id": "uuid",
+///   "linked_field": "optional_string",
+///   "sync_priority": "low|normal|high",
+///   "compression_priority": "low|normal|high",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strategic_goal_upload_document_from_path(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            goal_id: String,
+            file_path: String,
+            original_filename: String,
+            title: Option<String>,
+            document_type_id: String,
+            linked_field: Option<String>,
+            sync_priority: String,
+            compression_priority: Option<String>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        let goal_uuid = Uuid::parse_str(&p.goal_id)
+            .map_err(|_| FFIError::invalid_argument("invalid goal_id"))?;
+        let doc_type_uuid = Uuid::parse_str(&p.document_type_id)
+            .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
+        
+        let sync_priority = SyncPriority::from_str(&p.sync_priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+        let compression_priority = if let Some(cp) = p.compression_priority {
+            CompressionPriority::from_str(&cp)
+                .map_err(|_| FFIError::invalid_argument("invalid compression_priority"))?
+        } else {
+            CompressionPriority::Normal
+        };
+        
+        let svc = globals::get_strategic_goal_service()?;
+        let document = block_on_async(svc.upload_document_from_path(
+            goal_uuid,
+            &p.file_path,
+            &p.original_filename,
+            p.title,
+            doc_type_uuid,
+            p.linked_field,
             sync_priority,
             compression_priority,
             &auth,
-        )).map_err(FFIError::from_service_error)?;
+        ))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&document)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Bulk upload documents to a strategic goal using file paths (iOS optimized)
+/// Expected JSON payload:
+/// {
+///   "goal_id": "uuid",
+///   "file_paths": [{"file_path": "/path/to/file", "filename": "string"}, ...],
+///   "title": "optional_string",
+///   "document_type_id": "uuid",
+///   "sync_priority": "low|normal|high",
+///   "compression_priority": "low|normal|high",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strategic_goal_bulk_upload_documents_from_paths(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct FilePathData {
+            file_path: String,
+            filename: String,
+        }
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            goal_id: String,
+            file_paths: Vec<FilePathData>,
+            title: Option<String>,
+            document_type_id: String,
+            sync_priority: String,
+            compression_priority: Option<String>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        let goal_uuid = Uuid::parse_str(&p.goal_id)
+            .map_err(|_| FFIError::invalid_argument("invalid goal_id"))?;
+        let doc_type_uuid = Uuid::parse_str(&p.document_type_id)
+            .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
+        
+        let sync_priority = SyncPriority::from_str(&p.sync_priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+        let compression_priority = if let Some(cp) = p.compression_priority {
+            CompressionPriority::from_str(&cp)
+                .map_err(|_| FFIError::invalid_argument("invalid compression_priority"))?
+        } else {
+            CompressionPriority::Normal
+        };
+        
+        // Convert file paths
+        let file_paths: Vec<(String, String)> = p.file_paths
+            .into_iter()
+            .map(|fp| (fp.file_path, fp.filename))
+            .collect();
+        
+        let svc = globals::get_strategic_goal_service()?;
+        let documents = block_on_async(svc.bulk_upload_documents_from_paths(
+            goal_uuid,
+            file_paths,
+            p.title,
+            doc_type_uuid,
+            sync_priority,
+            compression_priority,
+            &auth,
+        ))
+            .map_err(FFIError::from_service_error)?;
         
         let json_resp = serde_json::to_string(&documents)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
@@ -569,9 +723,9 @@ pub unsafe extern "C" fn strategic_goal_bulk_upload_documents(payload_json: *con
 /// Find strategic goals by status
 /// Expected JSON payload:
 /// {
-///   "status_id": i64,
+///   "status_id": 1,
 ///   "pagination": { PaginationDto },
-///   "include": [StrategicGoalIncludeDto, ...],
+///   "include": [StrategicGoalIncludeDto],
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]

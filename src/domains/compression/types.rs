@@ -21,6 +21,9 @@ pub enum CompressionMethod {
     /// Office document optimization
     OfficeOptimize,
     
+    /// Video container optimization and metadata removal
+    VideoOptimize,
+    
     /// No compression
     None,
 }
@@ -32,6 +35,7 @@ impl CompressionMethod {
             CompressionMethod::Lossy => "lossy",
             CompressionMethod::PdfOptimize => "pdf_optimize",
             CompressionMethod::OfficeOptimize => "office_optimize",
+            CompressionMethod::VideoOptimize => "video_optimize",
             CompressionMethod::None => "none",
         }
     }
@@ -45,6 +49,7 @@ impl FromStr for CompressionMethod {
             "lossy" => Ok(CompressionMethod::Lossy),
             "pdf_optimize" => Ok(CompressionMethod::PdfOptimize),
             "office_optimize" => Ok(CompressionMethod::OfficeOptimize),
+            "video_optimize" => Ok(CompressionMethod::VideoOptimize),
             "none" => Ok(CompressionMethod::None),
             _ => Err(DomainError::Validation(ValidationError::custom(
                 &format!("Invalid compression method: {}", s)

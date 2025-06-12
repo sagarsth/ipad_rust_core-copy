@@ -141,12 +141,26 @@ impl CompressionWorker {
                                 let job_handle = tokio::spawn(async move {
                                     println!("🔄 [COMPRESSION_JOB] Processing document {}", document_id);
                                     
-                                    // Process the document
+                                    // Process the document with timeout to prevent infinite hangs
                                     let start_time = std::time::Instant::now();
-                                    let result = service.compress_document(document_id, None).await;
+                                    
+                                    // Add 60-second timeout to prevent jobs from hanging forever
+                                    let result = tokio::time::timeout(
+                                        std::time::Duration::from_secs(60), 
+                                        service.compress_document(document_id, None)
+                                    ).await;
+                                    
                                     let duration = start_time.elapsed();
                                     
-                                    match result {
+                                    let final_result = match result {
+                                        Ok(compression_result) => compression_result,
+                                        Err(_timeout_error) => {
+                                            println!("⏰ [COMPRESSION_JOB] TIMEOUT after 60s for document {}", document_id);
+                                            Err(ServiceError::Domain(DomainError::Internal("Compression timed out after 60 seconds".to_string())))
+                                        }
+                                    };
+                                    
+                                    match final_result {
                                         Ok(compression_result) => {
                                             // Validate compression effectiveness (95% threshold)
                                             let size_threshold = (compression_result.original_size as f32 * 0.95) as i64;
@@ -186,6 +200,23 @@ impl CompressionWorker {
                                             // Compression failed - error already logged in service
                                             println!("❌ [COMPRESSION_JOB] Document {} compression failed after {:?}: {:?}", 
                                                      document_id, duration, e);
+                                            
+                                            // CRITICAL FIX: Ensure queue status gets updated on failure
+                                            if let Some(queue_entry) = repo.get_queue_entry_by_document_id(document_id).await
+                                                .map_err(|e| println!("⚠️ [COMPRESSION_JOB] Failed to get queue entry: {:?}", e))
+                                                .unwrap_or(None) 
+                                            {
+                                                let error_msg = format!("Compression failed: {:?}", e);
+                                                if let Err(update_err) = repo.update_queue_entry_status(
+                                                    queue_entry.id,
+                                                    "failed",
+                                                    Some(&error_msg)
+                                                ).await {
+                                                    println!("❌ [COMPRESSION_JOB] Failed to update queue status: {:?}", update_err);
+                                                } else {
+                                                    println!("📝 [COMPRESSION_JOB] Updated queue status to failed for document {}", document_id);
+                                                }
+                                            }
                                         }
                                     }
                                     

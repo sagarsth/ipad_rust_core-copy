@@ -145,7 +145,7 @@ pub struct DocumentAccessLog {
 pub enum CompressionStatus {
     #[default] // Default for new records
     Pending,
-    InProgress, // ADDED
+    Processing, // RENAMED from InProgress to match DB constraint
     Completed,  // RENAMED from Compressed
     Failed,
     Skipped,    // e.g., file type not compressible or already small
@@ -154,11 +154,11 @@ pub enum CompressionStatus {
 impl CompressionStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
-            CompressionStatus::Pending => "PENDING",
-            CompressionStatus::InProgress => "IN_PROGRESS",
-            CompressionStatus::Completed => "COMPLETED",
-            CompressionStatus::Failed => "FAILED",
-            CompressionStatus::Skipped => "SKIPPED",
+            CompressionStatus::Pending => "pending",        // Match DB constraint exactly
+            CompressionStatus::Processing => "processing",  // Match DB constraint exactly
+            CompressionStatus::Completed => "completed",    // Match DB constraint exactly
+            CompressionStatus::Failed => "failed",          // Match DB constraint exactly
+            CompressionStatus::Skipped => "skipped",        // Not in DB constraint but used for logic
         }
     }
 }
@@ -168,7 +168,8 @@ impl FromStr for CompressionStatus {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
             "PENDING" => Ok(CompressionStatus::Pending),
-            "IN_PROGRESS" => Ok(CompressionStatus::InProgress),
+            "IN_PROGRESS" => Ok(CompressionStatus::Processing), // Legacy support
+            "PROCESSING" => Ok(CompressionStatus::Processing),
             "COMPLETED" | "COMPRESSED" => Ok(CompressionStatus::Completed), // Allow old value
             "FAILED" => Ok(CompressionStatus::Failed),
             "SKIPPED" => Ok(CompressionStatus::Skipped),

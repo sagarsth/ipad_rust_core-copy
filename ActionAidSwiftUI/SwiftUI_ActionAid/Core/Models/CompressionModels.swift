@@ -120,6 +120,14 @@ struct GetSupportedMethodsRequest: Codable {
     }
 }
 
+struct ResetStuckJobsRequest: Codable {
+    let timeoutMinutes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case timeoutMinutes = "timeout_minutes"
+    }
+}
+
 // MARK: - Response Payloads
 
 struct CompressionResultResponse: Codable {
@@ -278,5 +286,13 @@ struct DocumentHistoryResponse: Codable {
         case errorMessage = "error_message"
         case queuedAt = "queued_at"
         case queueUpdatedAt = "queue_updated_at"
+    }
+}
+
+struct ResetStuckJobsResponse: Codable {
+    let resetCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case resetCount = "reset_count"
     }
 } 

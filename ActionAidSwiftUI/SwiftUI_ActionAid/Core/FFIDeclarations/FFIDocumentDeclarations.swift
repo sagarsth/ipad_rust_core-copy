@@ -143,4 +143,17 @@ func document_get_access_logs(
 func document_register_in_use(_ payload_json: UnsafePointer<CChar>) -> CInt
 
 @_silgen_name("document_unregister_in_use")
-func document_unregister_in_use(_ payload_json: UnsafePointer<CChar>) -> CInt 
+func document_unregister_in_use(_ payload_json: UnsafePointer<CChar>) -> CInt
+
+// MARK: - iOS Optimized Path-Based Upload Functions (NO BASE64!)
+@_silgen_name("document_upload_from_path")
+func document_upload_from_path(
+    _ payload_json: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
+@_silgen_name("document_bulk_upload_from_paths")
+func document_bulk_upload_from_paths(
+    _ payload_json: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt 

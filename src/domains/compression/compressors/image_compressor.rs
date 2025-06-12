@@ -10,6 +10,7 @@ use super::Compressor;
 use crate::domains::compression::types::CompressionMethod;
 
 /// Image compressor using the `image` crate for lossy/lossless compression
+/// Enhanced with HEIC, WebP, and additional format support
 #[derive(Clone)]
 pub struct ImageCompressor;
 
@@ -17,9 +18,12 @@ pub struct ImageCompressor;
 impl Compressor for ImageCompressor {
     async fn can_handle(&self, mime_type: &str, extension: Option<&str>) -> bool {
         matches!(mime_type, 
-            "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/tiff"
+            "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/tiff" | 
+            "image/bmp" | "image/heic" | "image/heif" | "image/avif"
         ) || matches!(extension, 
-            Some("jpg") | Some("jpeg") | Some("png") | Some("gif") | Some("webp") | Some("tif") | Some("tiff")
+            Some("jpg") | Some("jpeg") | Some("png") | Some("gif") | Some("webp") | 
+            Some("tif") | Some("tiff") | Some("bmp") | Some("heic") | Some("heif") | 
+            Some("avif") | Some("svg")
         )
     }
     
@@ -41,24 +45,24 @@ impl Compressor for ImageCompressor {
         // Skip EXIF and color space processing for better performance
         // Process the image directly for faster compression
         let compressed_data = task::spawn_blocking(move || -> DomainResult<Vec<u8>> {
-            let img = image::load_from_memory(&data)
-                .map_err(|e| DomainError::Internal(format!("Failed to load image: {}", e)))?;
+            // Try to load the image, with special handling for HEIC
+            let img = load_image_with_heic_support(&data)?;
             
-            // Determine format and compression method
-            let format = ImageFormat::Jpeg; // Always output as JPEG for better compression
+            // Determine optimal output format based on input and compression method
+            let output_format = determine_optimal_format(&data, method, quality)?;
             
             match method {
                 CompressionMethod::Lossy => {
-                    compress_lossy_improved(img, format, quality)
+                    compress_lossy_improved(img, output_format, quality)
                 },
                 CompressionMethod::Lossless => {
                     // For lossless, use PNG with high compression
                     compress_lossless_improved(img, ImageFormat::Png, quality.clamp(1, 9))
                 },
                 _ => {
-                    // No compression, just re-encode
+                    // No compression, just re-encode in optimal format
                     let mut output = Vec::new();
-                    img.write_to(&mut Cursor::new(&mut output), format)
+                    img.write_to(&mut Cursor::new(&mut output), output_format)
                         .map_err(|e| DomainError::Internal(format!("Failed to encode image: {}", e)))?;
                     Ok(output)
                 }
@@ -91,15 +95,16 @@ fn compress_lossy_improved(img: DynamicImage, format: ImageFormat, quality: u8) 
                 .map_err(|e| DomainError::Internal(format!("PNG->JPEG encoding error: {}", e)))?;
         },
         ImageFormat::WebP => {
+            // NOTE: This code IS ACTIVE when the "webp" feature is enabled (which it is by default)
+            // IDE warnings about "inactive code" are false positives due to feature detection issues
             #[cfg(feature = "webp")]
             {
                 // Use lossy WebP compression
                 let quality = (quality as f32) / 100.0;
-                webp::Encoder::from_image(&img)
+                let webp_data = webp::Encoder::from_image(&img)
                     .map_err(|e| DomainError::Internal(format!("WebP encoding error: {}", e)))?
-                    .encode_lossy(quality)
-                    .write_to(&mut output)
-                    .map_err(|e| DomainError::Internal(format!("WebP encoding error: {}", e)))?;
+                    .encode(quality);
+                output.extend_from_slice(&webp_data);
             }
             #[cfg(not(feature = "webp"))]
             {
@@ -152,14 +157,15 @@ fn compress_lossless_improved(img: DynamicImage, format: ImageFormat, quality: u
                 .map_err(|e| DomainError::Internal(format!("PNG encoding error: {}", e)))?;
         },
         ImageFormat::WebP => {
+            // NOTE: This code IS ACTIVE when the "webp" feature is enabled (which it is by default)
+            // IDE warnings about "inactive code" are false positives due to feature detection issues
             #[cfg(feature = "webp")]
             {
                 // Use lossless WebP compression
-                webp::Encoder::from_image(&img)
+                let webp_data = webp::Encoder::from_image(&img)
                     .map_err(|e| DomainError::Internal(format!("WebP encoding error: {}", e)))?
-                    .encode_lossless()
-                    .write_to(&mut output)
-                    .map_err(|e| DomainError::Internal(format!("WebP encoding error: {}", e)))?;
+                    .encode_lossless();
+                output.extend_from_slice(&webp_data);
             }
             #[cfg(not(feature = "webp"))]
             {
@@ -203,4 +209,126 @@ pub async fn convert_to_srgb(data: &[u8]) -> DomainResult<Vec<u8>> {
     // For performance, skip complex color space conversion for now
     println!("🎨 [IMAGE_COMPRESSOR] Skipping color space conversion for performance");
     Ok(data.to_vec())
+}
+
+/// Load image with HEIC support fallback
+fn load_image_with_heic_support(data: &[u8]) -> DomainResult<DynamicImage> {
+    // First try standard image loading
+    match image::load_from_memory(data) {
+        Ok(img) => Ok(img),
+        Err(e) => {
+            // Check if this might be a HEIC file
+            if is_heic_data(data) {
+                load_heic_image(data)
+            } else {
+                Err(DomainError::Internal(format!("Failed to load image: {}", e)))
+            }
+        }
+    }
+}
+
+/// Check if data appears to be HEIC format
+fn is_heic_data(data: &[u8]) -> bool {
+    if data.len() < 12 {
+        return false;
+    }
+    
+    // Check for HEIC file signature
+    // HEIC files typically start with specific byte patterns
+    data.len() > 8 && (
+        &data[4..8] == b"ftyp" && (
+            &data[8..12] == b"heic" || 
+            &data[8..12] == b"heix" ||
+            &data[8..12] == b"hevc" ||
+            &data[8..12] == b"hevx"
+        )
+    )
+}
+
+/// Load HEIC image using libheif (when available)
+fn load_heic_image(data: &[u8]) -> DomainResult<DynamicImage> {
+    #[cfg(feature = "heic")]
+    {
+        use libheif_rs::{HeifContext, ColorSpace, Chroma};
+        
+        let ctx = HeifContext::read_from_bytes(data)
+            .map_err(|e| DomainError::Internal(format!("Failed to read HEIC: {}", e)))?;
+        
+        let handle = ctx.primary_image_handle()
+            .map_err(|e| DomainError::Internal(format!("Failed to get HEIC handle: {}", e)))?;
+        
+        let image = handle.decode(ColorSpace::Rgb(Chroma::Rgb), None)
+            .map_err(|e| DomainError::Internal(format!("Failed to decode HEIC: {}", e)))?;
+        
+        let width = image.width();
+        let height = image.height();
+        let planes = image.planes();
+        let plane = &planes.y.unwrap();
+        
+        // Convert to RGB image
+        let rgb_data: Vec<u8> = plane.data.chunks(3)
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        
+        let img_buffer = image::RgbImage::from_raw(width, height, rgb_data)
+            .ok_or_else(|| DomainError::Internal("Failed to create RGB image from HEIC".to_string()))?;
+        
+        Ok(DynamicImage::ImageRgb8(img_buffer))
+    }
+    
+    #[cfg(not(feature = "heic"))]
+    {
+        println!("⚠️ [IMAGE_COMPRESSOR] HEIC file detected but HEIC feature not enabled");
+        Err(DomainError::Internal("HEIC format not supported in this build".to_string()))
+    }
+}
+
+/// Determine optimal output format based on input and compression settings
+fn determine_optimal_format(data: &[u8], method: CompressionMethod, quality: u8) -> DomainResult<ImageFormat> {
+    // Detect input format
+    let input_format = image::guess_format(data)
+        .unwrap_or(ImageFormat::Jpeg); // Default to JPEG
+    
+    match method {
+        CompressionMethod::Lossy => {
+            match input_format {
+                ImageFormat::Png => {
+                    // For PNG, use WebP if available, otherwise JPEG
+                    #[cfg(feature = "webp")]
+                    { Ok(ImageFormat::WebP) }
+                    #[cfg(not(feature = "webp"))]
+                    { Ok(ImageFormat::Jpeg) }
+                },
+                ImageFormat::WebP => Ok(ImageFormat::WebP),
+                _ => Ok(ImageFormat::Jpeg), // JPEG is most compatible for lossy
+            }
+        },
+        CompressionMethod::Lossless => {
+            match input_format {
+                ImageFormat::Jpeg => Ok(ImageFormat::Png), // Convert JPEG to PNG for lossless
+                ImageFormat::WebP => Ok(ImageFormat::WebP), // Keep WebP for lossless
+                _ => Ok(ImageFormat::Png), // PNG is best for lossless
+            }
+        },
+        _ => Ok(input_format), // Keep original format for no compression
+    }
+}
+
+/// Enhanced format detection including HEIC
+pub fn detect_image_format(data: &[u8]) -> Option<&'static str> {
+    if let Ok(format) = image::guess_format(data) {
+        match format {
+            ImageFormat::Jpeg => Some("jpeg"),
+            ImageFormat::Png => Some("png"),
+            ImageFormat::WebP => Some("webp"),
+            ImageFormat::Gif => Some("gif"),
+            ImageFormat::Tiff => Some("tiff"),
+            ImageFormat::Bmp => Some("bmp"),
+            _ => Some("image"),
+        }
+    } else if is_heic_data(data) {
+        Some("heic")
+    } else {
+        None
+    }
 }

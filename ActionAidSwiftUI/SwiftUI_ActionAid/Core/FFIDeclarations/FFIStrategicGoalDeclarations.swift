@@ -62,6 +62,19 @@ func strategic_goal_bulk_upload_documents(
     _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
 ) -> CInt
 
+// MARK: - iOS Optimized Path-Based Upload (NO BASE64!)
+@_silgen_name("strategic_goal_upload_document_from_path")
+func strategic_goal_upload_document_from_path(
+    _ payload_json: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
+@_silgen_name("strategic_goal_bulk_upload_documents_from_paths")
+func strategic_goal_bulk_upload_documents_from_paths(
+    _ payload_json: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
 // MARK: - Query Operations
 @_silgen_name("strategic_goal_find_by_status")
 func strategic_goal_find_by_status(

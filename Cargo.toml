@@ -11,15 +11,15 @@ crate-type = ["staticlib"]
 
 
 # Compression libraries
-image = { version = "0.24.6", default-features = false, features = ["jpeg", "png"] }
+image = { version = "0.24.6", default-features = false, features = ["jpeg", "png", "gif", "webp", "tiff", "bmp"] }
 zip = "0.6.6"
 tempfile = "3.7.0"
 kamadak-exif = "0.5.5"  # For EXIF metadata stripping (correct crate name)
 lopdf = "0.36.0"  # Pure Rust PDF compression (Ghostscript alternative)
 
-# Optional WebP support
-webp = { version = "0.2.5", optional = true }
-
+# Enhanced format support
+webp = { version = "0.2.5", optional = true }  # WebP support for better compression
+libheif-rs = { version = "0.21.0", optional = true }  # HEIC/HEIF support
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -31,7 +31,7 @@ refinery = { version = "0.8.16", features = ["rusqlite"] }
 
 # Async runtime
 tokio = { version = "1.44.1", features = ["full"] }
-futures = "0.3"
+futures = "0.3" 
 async-trait = "0.1.88"
 
 # UUID and time
@@ -87,8 +87,10 @@ paste = "1"
 
 
 [features]
-default = []
+default = ["webp"]
 webp = ["dep:webp"]
+heic = ["dep:libheif-rs"]
+full-formats = ["webp", "heic"]
 
 [profile.release]
 lto = false

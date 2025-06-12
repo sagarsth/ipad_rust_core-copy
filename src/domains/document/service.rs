@@ -194,6 +194,38 @@ pub trait DocumentService:
         user_id: Uuid,
         device_id: Uuid,
     ) -> ServiceResult<()>;
+
+    // --- iOS Optimized Path-Based Upload Methods ---
+    
+    /// Upload document from local file path (iOS optimized - no Base64 encoding)
+    async fn upload_document_from_path(
+        &self,
+        auth: &AuthContext,
+        file_path: String,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        related_entity_id: Uuid,
+        related_entity_type: String,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        temp_related_id: Option<Uuid>,
+    ) -> ServiceResult<MediaDocumentResponse>;
+
+    /// Bulk upload documents from file paths (iOS optimized - no Base64 encoding)
+    async fn bulk_upload_documents_from_paths(
+        &self,
+        auth: &AuthContext,
+        file_paths: Vec<(String, String)>, // (path, filename)
+        title: Option<String>,
+        document_type_id: Uuid,
+        related_entity_id: Uuid,
+        related_entity_type: String,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        temp_related_id: Option<Uuid>,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>>;
 }
 
 // --- Service Implementation ---
@@ -720,8 +752,12 @@ impl DocumentService for DocumentServiceImpl {
         println!("   📊 File size: {} bytes", file_data.len());
         println!("   🆔 Entity ID: {}", related_entity_id);
         println!("   🏷️ Entity type: {}", related_entity_type);
+        println!("   🗜️ Compression priority: {:?}", compression_priority);
         
         let doc_type = self.doc_type_repo.find_by_id(document_type_id).await?;
+        println!("📄 [DOC_SERVICE] Document type found: {} (compression: {}, method: {:?})", 
+                doc_type.name, doc_type.compression_level, doc_type.compression_method);
+        
         let entity_or_temp_id_str = if let Some(temp_id) = temp_related_id {
             temp_id.to_string()
         } else {
@@ -787,16 +823,40 @@ impl DocumentService for DocumentServiceImpl {
                 println!("📄 [DOC_SERVICE] About to queue for compression:");
                 println!("   🔄 Final compression priority: {:?}", final_compression_priority);
                 println!("   📄 Document ID: {}", created_doc.id);
+                println!("   📏 File size: {} bytes (min for compression: {})", 
+                        size_bytes, doc_type.min_size_for_compression.unwrap_or(0));
                 
-                if let Err(e) = self.compression_service
-                    .queue_document_for_compression(created_doc.id, final_compression_priority)
-                    .await
-                {
-                    println!("❌ [DOC_SERVICE] Failed to queue document {} for compression: {:?}", created_doc.id, e);
-                    eprintln!("Failed to queue document {} for compression: {:?}", created_doc.id, e);
+                // Check if file is large enough for compression
+                let should_compress = size_bytes as i64 >= doc_type.min_size_for_compression.unwrap_or(0);
+                println!("   🤔 Should compress? {} (file: {} >= min: {})", 
+                        should_compress, size_bytes, doc_type.min_size_for_compression.unwrap_or(0));
+                
+                if should_compress {
+                    match self.compression_service
+                        .queue_document_for_compression(created_doc.id, final_compression_priority)
+                        .await
+                    {
+                        Ok(()) => {
+                            println!("✅ [DOC_SERVICE] Successfully queued document {} for compression", created_doc.id);
+                        },
+                        Err(e) => {
+                            println!("❌ [DOC_SERVICE] Failed to queue document {} for compression: {:?}", created_doc.id, e);
+                            eprintln!("Failed to queue document {} for compression: {:?}", created_doc.id, e);
+                        }
+                    }
                 } else {
-                    println!("✅ [DOC_SERVICE] Successfully queued document {} for compression", created_doc.id);
+                    println!("⏭️ [DOC_SERVICE] File too small for compression, marking as skipped");
+                    // Update status to skipped
+                    if let Err(e) = self.media_doc_repo.update_compression_status(
+                        created_doc.id, 
+                        CompressionStatus::Skipped, 
+                        None, 
+                        None
+                    ).await {
+                        println!("⚠️ [DOC_SERVICE] Failed to update compression status to skipped: {:?}", e);
+                    }
                 }
+                
                 let mut response = MediaDocumentResponse::from_doc(&created_doc, Some(doc_type.name));
                 response = self.enrich_response(response, None).await?;
                 Ok(response)
@@ -925,7 +985,7 @@ impl DocumentService for DocumentServiceImpl {
                         let details = Some(format!("File exists but is locked/inaccessible: {}", e));
                         let new_log = NewDocumentAccessLog { document_id: id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptDownload.as_str().to_string(), details };
                         if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log locked download attempt for {}: {:?}", id, log_err); }
-                        if doc.compression_status == CompressionStatus::InProgress.as_str() { Err(ServiceError::Ui("Document is currently being compressed. Please try again shortly.".to_string())) } else { Err(ServiceError::Ui("Cannot access document file. It may be in use.".to_string())) }
+                        if doc.compression_status == CompressionStatus::Processing.as_str() { Err(ServiceError::Ui("Document is currently being compressed. Please try again shortly.".to_string())) } else { Err(ServiceError::Ui("Cannot access document file. It may be in use.".to_string())) }
                     }
                 }
             },
@@ -955,7 +1015,7 @@ impl DocumentService for DocumentServiceImpl {
         }
 
         // *** ADDED: Check compression status ***
-        if doc.compression_status == CompressionStatus::InProgress.as_str() {
+        if doc.compression_status == CompressionStatus::Processing.as_str() {
             // Log attempt to view while compressing
             let new_log = NewDocumentAccessLog { document_id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptView.as_str().to_string(), details: Some("Attempted view during compression".to_string()) };
             if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log view attempt during compression for {}: {:?}", document_id, log_err); }
@@ -1088,7 +1148,7 @@ impl DocumentService for DocumentServiceImpl {
              return Err(ServiceError::Domain(e));
         }
         
-        if doc_to_delete.compression_status == CompressionStatus::InProgress.as_str() {
+        if doc_to_delete.compression_status == CompressionStatus::Processing.as_str() {
             if let Err(e) = self.compression_service.cancel_compression(id).await { eprintln!("Failed to cancel compression for deleted document {}: {:?}", id, e); }
         }
         
@@ -1256,6 +1316,114 @@ impl DocumentService for DocumentServiceImpl {
             doc_id_str, user_id_str, device_id_str
         ).execute(&self.pool).await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
         Ok(())
+    }
+
+    // --- iOS Optimized Path-Based Upload Method Implementations ---
+
+    async fn upload_document_from_path(
+        &self,
+        auth: &AuthContext,
+        file_path: String,
+        original_filename: String,
+        title: Option<String>,
+        document_type_id: Uuid,
+        related_entity_id: Uuid,
+        related_entity_type: String,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        temp_related_id: Option<Uuid>,
+    ) -> ServiceResult<MediaDocumentResponse> {
+        println!("🚀 [DOCUMENT_SERVICE] Processing upload from path: {}", file_path);
+        
+        // 1. Read file from path (fast, no Base64 overhead)
+        let file_data = match fs::read(&file_path).await {
+            Ok(data) => {
+                println!("✅ [DOCUMENT_SERVICE] File read successfully: {} bytes", data.len());
+                data
+            },
+            Err(e) => {
+                println!("❌ [DOCUMENT_SERVICE] Failed to read file {}: {}", file_path, e);
+                return Err(ServiceError::Domain(DomainError::Internal(
+                    format!("Failed to read file from path {}: {}", file_path, e)
+                )));
+            }
+        };
+
+        // 2. Clean up the temporary file (convert copy->move operation)
+        if let Err(e) = fs::remove_file(&file_path).await {
+            println!("⚠️ [DOCUMENT_SERVICE] Failed to clean up temp file {}: {}", file_path, e);
+            // Don't fail the upload, just log the warning
+        } else {
+            println!("🧹 [DOCUMENT_SERVICE] Cleaned up temp file: {}", file_path);
+        }
+
+        // 3. Delegate to existing upload_document method (reuse all existing logic)
+        self.upload_document(
+            auth,
+            file_data,
+            original_filename,
+            title,
+            document_type_id,
+            related_entity_id,
+            related_entity_type,
+            linked_field,
+            sync_priority,
+            compression_priority,
+            temp_related_id,
+        ).await
+    }
+
+    async fn bulk_upload_documents_from_paths(
+        &self,
+        auth: &AuthContext,
+        file_paths: Vec<(String, String)>,
+        title: Option<String>,
+        document_type_id: Uuid,
+        related_entity_id: Uuid,
+        related_entity_type: String,
+        sync_priority: SyncPriority,
+        compression_priority: Option<CompressionPriority>,
+        temp_related_id: Option<Uuid>,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>> {
+        println!("🚀 [DOCUMENT_SERVICE] Processing bulk upload from {} paths", file_paths.len());
+        
+        // Read all files and clean up paths
+        let mut files_data = Vec::new();
+        for (path, filename) in file_paths {
+            match fs::read(&path).await {
+                Ok(data) => {
+                    println!("✅ [DOCUMENT_SERVICE] Read file {}: {} bytes", filename, data.len());
+                    files_data.push((data, filename));
+                    
+                    // Clean up temp file immediately after reading
+                    if let Err(e) = fs::remove_file(&path).await {
+                        println!("⚠️ [DOCUMENT_SERVICE] Failed to clean up temp file {}: {}", path, e);
+                    } else {
+                        println!("🧹 [DOCUMENT_SERVICE] Cleaned up temp file: {}", path);
+                    }
+                },
+                Err(e) => {
+                    println!("❌ [DOCUMENT_SERVICE] Failed to read file {}: {}", path, e);
+                    return Err(ServiceError::Domain(DomainError::Internal(
+                        format!("Failed to read file from path {}: {}", path, e)
+                    )));
+                }
+            }
+        }
+
+        // Delegate to existing bulk_upload_documents method (reuse all existing logic)
+        self.bulk_upload_documents(
+            auth,
+            files_data,
+            title,
+            document_type_id,
+            related_entity_id,
+            related_entity_type,
+            sync_priority,
+            compression_priority,
+            temp_related_id,
+        ).await
     }
 }
 

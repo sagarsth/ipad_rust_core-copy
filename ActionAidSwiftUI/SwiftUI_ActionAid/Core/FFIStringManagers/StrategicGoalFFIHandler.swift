@@ -177,6 +177,63 @@ class StrategicGoalFFIHandler {
         return await executeOperation(payload: payload, ffiCall: strategic_goal_bulk_upload_documents)
     }
 
+    // MARK: - iOS Optimized Upload Methods (NO BASE64 ENCODING!)
+    
+    /// Upload single document from file path (iOS optimized - eliminates Base64 overhead)
+    func uploadDocumentFromPath(
+        goalId: String,
+        filePath: String,
+        originalFilename: String,
+        title: String?,
+        documentTypeId: String,
+        linkedField: String?,
+        syncPriority: SyncPriority,
+        compressionPriority: CompressionPriority?,
+        auth: AuthContextPayload
+    ) async -> Result<MediaDocumentResponse, Error> {
+        let payload = UploadDocumentFromPathRequest(
+            goalId: goalId,
+            filePath: filePath,                    // Just the path, no Base64!
+            originalFilename: originalFilename,
+            title: title,
+            documentTypeId: documentTypeId,
+            linkedField: linkedField,
+            syncPriority: syncPriority,
+            compressionPriority: compressionPriority,
+            auth: auth
+        )
+        
+        print("🚀 [StrategicGoalFFIHandler] Uploading from path: \(filePath)")
+        return await executeOperation(payload: payload, ffiCall: strategic_goal_upload_document_from_path)
+    }
+    
+    /// Bulk upload documents from file paths (iOS optimized - eliminates Base64 overhead)
+    func bulkUploadDocumentsFromPaths(
+        goalId: String,
+        filePaths: [(String, String)], // (path, filename)
+        title: String?,
+        documentTypeId: String,
+        syncPriority: SyncPriority,
+        compressionPriority: CompressionPriority?,
+        auth: AuthContextPayload
+    ) async -> Result<[MediaDocumentResponse], Error> {
+        let filePathPayloads = filePaths.map { 
+            BulkUploadDocumentsFromPathsRequest.FilePath(filePath: $0.0, filename: $0.1) 
+        }
+        let payload = BulkUploadDocumentsFromPathsRequest(
+            goalId: goalId,
+            filePaths: filePathPayloads,           // Array of paths, no Base64!
+            title: title,
+            documentTypeId: documentTypeId,
+            syncPriority: syncPriority,
+            compressionPriority: compressionPriority,
+            auth: auth
+        )
+        
+        print("🚀 [StrategicGoalFFIHandler] Bulk uploading from \(filePaths.count) paths")
+        return await executeOperation(payload: payload, ffiCall: strategic_goal_bulk_upload_documents_from_paths)
+    }
+
     // MARK: - Queries
     
     func findByStatus(statusId: Int, pagination: PaginationDto?, include: [StrategicGoalInclude]?, auth: AuthContextPayload) async -> Result<PaginatedResult<StrategicGoalResponse>, Error> {

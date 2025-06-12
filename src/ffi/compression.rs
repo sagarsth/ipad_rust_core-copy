@@ -35,6 +35,9 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use crate::domains::compression::service::CompressionService;
+use sqlx::Row;
+
 
 // -----------------------------------------------------------------------------
 // DTO Types for JSON Deserialization -------------------------------------------
@@ -597,6 +600,35 @@ pub unsafe extern "C" fn compression_get_supported_methods(payload_json: *const 
                     "default_quality": 90
                 }));
             },
+            "image/heic" | "image/heif" => {
+                methods.push(serde_json::json!({
+                    "method": "lossy",
+                    "recommended": true,
+                    "quality_range": [0, 100],
+                    "default_quality": 80,
+                    "note": "HEIC converted to JPEG/WebP for compatibility"
+                }));
+                methods.push(serde_json::json!({
+                    "method": "lossless",
+                    "recommended": false,
+                    "quality_range": [0, 9],
+                    "default_quality": 8
+                }));
+            },
+            "image/webp" | "image/bmp" | "image/tiff" => {
+                methods.push(serde_json::json!({
+                    "method": "lossy",
+                    "recommended": true,
+                    "quality_range": [0, 100],
+                    "default_quality": 85
+                }));
+                methods.push(serde_json::json!({
+                    "method": "lossless",
+                    "recommended": false,
+                    "quality_range": [0, 9],
+                    "default_quality": 6
+                }));
+            },
             "application/pdf" => {
                 methods.push(serde_json::json!({
                     "method": "pdf_optimize",
@@ -609,6 +641,22 @@ pub unsafe extern "C" fn compression_get_supported_methods(payload_json: *const 
                 methods.push(serde_json::json!({
                     "method": "office_optimize",
                     "recommended": true
+                }));
+            },
+            mime if mime.starts_with("video/") => {
+                methods.push(serde_json::json!({
+                    "method": "video_optimize",
+                    "recommended": true,
+                    "quality_range": [0, 10],
+                    "default_quality": 4,
+                    "note": "Container optimization and metadata removal"
+                }));
+                methods.push(serde_json::json!({
+                    "method": "lossless",
+                    "recommended": false,
+                    "quality_range": [0, 9],
+                    "default_quality": 3,
+                    "note": "Generic compression (may not be effective)"
                 }));
             },
             _ => {
@@ -721,6 +769,179 @@ pub unsafe extern "C" fn compression_get_document_history(payload_json: *const c
         })?;
         
         Ok(history)
+    });
+    
+    if !result.is_null() {
+        *result = json_result;
+    }
+    if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
+}
+
+/// Get comprehensive compression debug information
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_debug_info(result: *mut *mut c_char) -> c_int {
+    let json_result = handle_json_result(|| -> FFIResult<serde_json::Value> {
+        crate::ffi::block_on_async(async {
+            let compression_service = globals::get_compression_service().map_err(|e| {
+                crate::errors::ServiceError::Domain(crate::errors::DomainError::Internal(e.to_string()))
+            })?.clone();
+            let pool = globals::get_db_pool().map_err(|e| {
+                crate::errors::ServiceError::Domain(crate::errors::DomainError::Internal(e.to_string()))
+            })?;
+            
+            let mut debug_info = Vec::new();
+            
+            // Get queue status
+            match compression_service.get_compression_queue_status().await {
+                Ok(queue_status) => {
+                    debug_info.push(format!("📊 QUEUE STATUS:"));
+                    debug_info.push(format!("   • Pending: {}", queue_status.pending_count));
+                    debug_info.push(format!("   • Processing: {}", queue_status.processing_count));
+                    debug_info.push(format!("   • Completed: {}", queue_status.completed_count));
+                    debug_info.push(format!("   • Failed: {}", queue_status.failed_count));
+                    debug_info.push(format!("   • Skipped: {}", queue_status.skipped_count));
+                },
+                Err(e) => debug_info.push(format!("❌ Failed to get queue status: {:?}", e)),
+            }
+            
+            // Get compression stats
+            match compression_service.get_compression_stats().await {
+                Ok(stats) => {
+                    debug_info.push(format!("\n📈 COMPRESSION STATS:"));
+                    debug_info.push(format!("   • Total files compressed: {}", stats.total_files_compressed));
+                    debug_info.push(format!("   • Files pending: {}", stats.total_files_pending));
+                    debug_info.push(format!("   • Files failed: {}", stats.total_files_failed));
+                    debug_info.push(format!("   • Files skipped: {}", stats.total_files_skipped));
+                    debug_info.push(format!("   • Original size: {} MB", stats.total_original_size / 1024 / 1024));
+                    debug_info.push(format!("   • Compressed size: {} MB", stats.total_compressed_size / 1024 / 1024));
+                    debug_info.push(format!("   • Space saved: {} MB", stats.space_saved / 1024 / 1024));
+                    if let Some(last_compression) = stats.last_compression_date {
+                        debug_info.push(format!("   • Last compression: {}", last_compression));
+                    } else {
+                        debug_info.push(format!("   • Last compression: Never"));
+                    }
+                },
+                Err(e) => debug_info.push(format!("❌ Failed to get compression stats: {:?}", e)),
+            }
+            
+            let result_json = serde_json::json!({
+                "status": "success",
+                "debug_info": debug_info.join("\n")
+            });
+            
+            Ok::<serde_json::Value, crate::errors::ServiceError>(result_json)
+        }).map_err(|e| to_ffi_error(e))
+    });
+    
+    if !result.is_null() {
+        *result = json_result;
+    }
+    if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
+}
+
+
+/// Manually trigger compression for a document (for debugging)
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_manual_trigger(payload: *const c_char, result: *mut *mut c_char) -> c_int {
+    let json_result = handle_json_result(|| -> FFIResult<serde_json::Value> {
+        let request: DocumentIdRequest = parse_json_input(payload)?;
+        let document_id = Uuid::parse_str(&request.document_id)
+            .map_err(|_| FFIError::new(ErrorCode::InvalidArgument, "Invalid document_id UUID"))?;
+        
+        let service = globals::get_compression_service()?.clone();
+        
+        crate::ffi::block_on_async(async move {
+            let result = service.compress_document(document_id, None).await
+                .map_err(|e| to_ffi_error(e))?;
+            
+            Ok(serde_json::json!({
+                "status": "success",
+                "document_id": result.document_id,
+                "original_size": result.original_size,
+                "compressed_size": result.compressed_size,
+                "compressed_file_path": result.compressed_file_path,
+                "space_saved_bytes": result.space_saved_bytes,
+                "space_saved_percentage": result.space_saved_percentage,
+                "method_used": result.method_used.as_str(),
+                "quality_level": result.quality_level,
+                "duration_ms": result.duration_ms
+            }))
+        })
+    });
+    
+    if !result.is_null() {
+        *result = json_result;
+    }
+    if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
+}
+
+/// Reset stuck compression jobs (processing for more than specified minutes)
+/// Input: {"timeout_minutes": 30}
+/// Output: {"reset_count": number} JSON
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_reset_stuck_jobs(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    let json_result = handle_json_result(|| -> FFIResult<serde_json::Value> {
+        #[derive(Deserialize)]
+        struct ResetStuckJobsRequest {
+            timeout_minutes: i32,
+        }
+
+        let request: ResetStuckJobsRequest = parse_json_input(payload_json)?;
+        let pool = globals::get_db_pool()?;
+        
+        let reset_count: u64 = crate::ffi::block_on_async(async {
+            let timeout_minutes = request.timeout_minutes.max(5); // Minimum 5 minutes
+            let now_timestamp = chrono::Utc::now().to_rfc3339();
+            
+            // Reset queue entries that have been processing for too long
+            let timeout_str = format!("-{} minutes", timeout_minutes);
+            let queue_result = sqlx::query!(
+                r#"
+                UPDATE compression_queue 
+                SET status = 'pending', 
+                    error_message = 'Reset due to timeout (was stuck processing)',
+                    updated_at = ?
+                WHERE status = 'processing' 
+                AND datetime(updated_at) < datetime('now', ?)
+                "#,
+                now_timestamp,
+                timeout_str
+            )
+            .execute(&pool)
+            .await
+            .map_err(|e| FFIError::with_details(
+                ErrorCode::InternalError,
+                "Failed to reset stuck queue jobs",
+                &format!("Database error: {}", e)
+            ))?;
+            
+            // Also reset media_documents that are stuck in processing/in_progress
+            let doc_result = sqlx::query!(
+                r#"
+                UPDATE media_documents 
+                SET compression_status = 'pending',
+                    updated_at = ?
+                WHERE compression_status IN ('processing', 'in_progress') 
+                AND datetime(updated_at) < datetime('now', ?)
+                "#,
+                now_timestamp,
+                timeout_str
+            )
+            .execute(&pool)
+            .await
+            .map_err(|e| FFIError::with_details(
+                ErrorCode::InternalError,
+                "Failed to reset stuck document status",
+                &format!("Database error: {}", e)
+            ))?;
+            
+            println!("🔄 [COMPRESSION_RESET] Reset {} queue entries and {} documents stuck for >{} minutes", 
+                     queue_result.rows_affected(), doc_result.rows_affected(), timeout_minutes);
+            
+            Ok::<u64, FFIError>(queue_result.rows_affected() + doc_result.rows_affected())
+        })?;
+        
+        Ok(serde_json::json!({"reset_count": reset_count}))
     });
     
     if !result.is_null() {

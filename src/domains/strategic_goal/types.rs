@@ -12,46 +12,6 @@ use std::str::FromStr;
 use crate::domains::project::types::ProjectSummary;
 use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
 
-/// Sync status for individual records
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum RecordSyncStatus {
-    Pending,   // Waiting to be synced
-    Synced,    // Successfully synced
-    Failed,    // Sync failed
-    Conflict,  // Sync conflict detected
-}
-
-impl Default for RecordSyncStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
-
-impl FromStr for RecordSyncStatus {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "pending" => Ok(Self::Pending),
-            "synced" => Ok(Self::Synced),
-            "failed" => Ok(Self::Failed),
-            "conflict" => Ok(Self::Conflict),
-            _ => Err(format!("Unknown sync status: {}", s)),
-        }
-    }
-}
-
-impl RecordSyncStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Synced => "synced",
-            Self::Failed => "failed",
-            Self::Conflict => "conflict",
-        }
-    }
-}
-
 /// Role a user can have in relation to a strategic goal
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UserGoalRole {
@@ -151,12 +111,6 @@ pub struct StrategicGoal {
     pub deleted_by_user_id: Option<Uuid>,
     pub deleted_by_device_id: Option<Uuid>,
     pub sync_priority: SyncPriorityFromSyncDomain,
-    // Sync tracking fields
-    pub last_synced_at: Option<DateTime<Utc>>,
-    pub last_sync_attempt_at: Option<DateTime<Utc>>,
-    pub sync_status: RecordSyncStatus,
-    pub sync_error_message: Option<String>,
-    pub sync_version: i64,
 }
 
 impl StrategicGoal {
@@ -321,12 +275,6 @@ pub struct StrategicGoalRow {
     pub deleted_by_user_id: Option<String>,
     pub deleted_by_device_id: Option<String>,
     pub sync_priority: String,
-    // Sync tracking fields
-    pub last_synced_at: Option<String>,
-    pub last_sync_attempt_at: Option<String>,
-    pub sync_status: Option<String>,
-    pub sync_error_message: Option<String>,
-    pub sync_version: Option<i64>,
 }
 
 impl StrategicGoalRow {
@@ -390,14 +338,6 @@ impl StrategicGoalRow {
             deleted_by_user_id: parse_optional_uuid(&self.deleted_by_user_id, "deleted_by_user_id")?,
             deleted_by_device_id: parse_optional_uuid(&self.deleted_by_device_id, "deleted_by_device_id")?,
             sync_priority: SyncPriorityFromSyncDomain::from_str(&self.sync_priority).unwrap_or_default(),
-            // Sync tracking fields
-            last_synced_at: parse_optional_datetime(&self.last_synced_at, "last_synced_at")?,
-            last_sync_attempt_at: parse_optional_datetime(&self.last_sync_attempt_at, "last_sync_attempt_at")?,
-            sync_status: self.sync_status.as_ref()
-                .map(|s| RecordSyncStatus::from_str(s).unwrap_or_default())
-                .unwrap_or_default(),
-            sync_error_message: self.sync_error_message.clone(),
-            sync_version: self.sync_version.unwrap_or(0)
         })
     }
 }
@@ -452,7 +392,7 @@ impl From<StrategicGoal> for StrategicGoalResponse {
             sync_priority: goal.sync_priority,
             created_by_user_id: goal.created_by_user_id,
             updated_by_user_id: goal.updated_by_user_id,
-            last_synced_at: goal.last_synced_at.map(|dt| dt.to_rfc3339()),
+            last_synced_at: None, // TODO: Implement sync tracking
             created_by_username: None, // Will be populated by service enrichment
             updated_by_username: None, // Will be populated by service enrichment
             documents: None,

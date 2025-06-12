@@ -21,7 +21,8 @@ use super::compressors::{
     pdf_compressor::PdfCompressor, 
     office_compressor::OfficeCompressor,
     generic_compressor::GenericCompressor,
-    get_extension
+    get_extension,
+    video_compressor::VideoCompressor,
 };
 use crate::domains::core::repository::FindById;
 
@@ -109,6 +110,7 @@ impl CompressionServiceImpl {
         compressors.push(Box::new(ImageCompressor));
         compressors.push(Box::new(PdfCompressor::new(ghostscript_path)));
         compressors.push(Box::new(OfficeCompressor::new()));
+        compressors.push(Box::new(VideoCompressor::new()));
         
         // Add generic compressor as fallback
         compressors.push(Box::new(GenericCompressor));
@@ -281,11 +283,11 @@ impl CompressionService for CompressionServiceImpl {
         // 4. Clear any previous compression errors
         self.clear_document_error(document_id).await?;
         
-        println!("📊 [COMPRESSION_SERVICE] Updating status to in_progress for document {}", document_id);
-        // 5. Update document status to InProgress
+        println!("📊 [COMPRESSION_SERVICE] Updating status to processing for document {}", document_id);
+        // 5. Update document status to Processing
         self.media_doc_repo.update_compression_status(
             document_id, 
-            CompressionStatus::InProgress,
+            CompressionStatus::Processing,
             None,
             None
         ).await.map_err(|e| {
@@ -425,8 +427,30 @@ impl CompressionService for CompressionServiceImpl {
             config.quality_level
         ).await {
             Ok(data) => {
+                // Validate compression output to prevent zero-byte files
+                let compressed_size = data.len() as i64;
+                
+                if compressed_size == 0 {
+                    let error_message = "Compression resulted in zero-byte file - aborting to prevent data loss";
+                    println!("❌ [COMPRESSION_SERVICE] {}", error_message);
+                    self.mark_document_with_error(document_id, "compression_failure", error_message).await?;
+                    return Err(ServiceError::Domain(DomainError::Internal(error_message.to_string())));
+                }
+                
+                // Add minimum size check (should be at least 1% of original or 100 bytes minimum)
+                let min_expected_size = std::cmp::max(100, original_size / 100);
+                if compressed_size < min_expected_size {
+                    let error_message = format!(
+                        "Compressed size ({} bytes) is suspiciously small compared to original ({} bytes) - possible compression failure", 
+                        compressed_size, original_size
+                    );
+                    println!("⚠️ [COMPRESSION_SERVICE] {}", error_message);
+                    self.mark_document_with_error(document_id, "compression_failure", &error_message).await?;
+                    return Err(ServiceError::Domain(DomainError::Internal(error_message)));
+                }
+                
                 println!("✅ [COMPRESSION_SERVICE] Compression successful: {} bytes -> {} bytes for document {}", 
-                         original_size, data.len(), document_id);
+                         original_size, compressed_size, document_id);
                 data
             },
             Err(e) => {
@@ -706,7 +730,7 @@ impl CompressionService for CompressionServiceImpl {
         document_id: Uuid,
     ) -> ServiceResult<bool> {
         // If document is in the 'processing' state, update its status to 'pending'
-        if self.get_document_compression_status(document_id).await? == CompressionStatus::InProgress {
+        if self.get_document_compression_status(document_id).await? == CompressionStatus::Processing {
             self.media_doc_repo.update_compression_status(
                 document_id,
                 CompressionStatus::Pending,
@@ -739,7 +763,8 @@ impl CompressionService for CompressionServiceImpl {
         // Convert string status to enum
         match document.compression_status.as_str() {
             "pending" => Ok(CompressionStatus::Pending),
-            "in_progress" => Ok(CompressionStatus::InProgress),
+            "processing" => Ok(CompressionStatus::Processing),  // Updated to match DB constraint
+            "in_progress" => Ok(CompressionStatus::Processing), // Backwards compatibility
             "completed" => Ok(CompressionStatus::Completed),
             "skipped" => Ok(CompressionStatus::Skipped),
             "failed" => Ok(CompressionStatus::Failed),

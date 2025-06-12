@@ -3,6 +3,7 @@ import SwiftUI
 struct StrategicGoalTableRow: View {
     let goal: StrategicGoalResponse
     let columns: [TableColumn]
+    let documentCounts: [String: Int]
     
     private var progress: Double {
         goal.progressPercentage ?? 0.0
@@ -39,11 +40,19 @@ struct StrategicGoalTableRow: View {
     private func cellContent(for column: TableColumn) -> some View {
         switch column.key {
         case "code", "objective_code":
-            Text(goal.objectiveCode)
-                .font(.caption)
-                .fontWeight(.medium)
-                .lineLimit(1)
-                .foregroundColor(.primary)
+            HStack(spacing: 4) {
+                Text(goal.objectiveCode)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                    .foregroundColor(.primary)
+                
+                if goal.hasDocumentsTracked(in: documentCounts) {
+                    Image(systemName: "paperclip")
+                        .font(.caption2)
+                        .foregroundColor(.blue)
+                }
+            }
                 
         case "outcome":
             Text(goal.outcome ?? "N/A")

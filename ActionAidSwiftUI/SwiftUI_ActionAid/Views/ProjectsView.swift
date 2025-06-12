@@ -686,10 +686,16 @@ struct ProjectDetailView: View {
                                     label: "Spent",
                                     value: "$\(Int(project.spent).formatted())"
                                 )
-                                DetailRow(
-                                    label: "Remaining",
-                                    value: "$\(Int(project.budget - project.spent).formatted())"
-                                )
+                                HStack {
+                                    Text("Remaining")
+                                        .font(.subheadline)
+                                        .foregroundColor(.secondary)
+                                    Spacer()
+                                    Text("$\(Int(project.budget - project.spent).formatted())")
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+                                        .foregroundColor(project.isOverBudget ? Theme.Colors.danger : Theme.Colors.success)
+                                }
                             }
                             
                             ProgressBar(

@@ -1147,6 +1147,201 @@ pub unsafe extern "C" fn document_get_access_logs(payload_json: *const c_char, r
 }
 
 // ---------------------------------------------------------------------------
+// iOS Optimized Path-Based Upload FFI Functions (NO BASE64 ENCODING!)
+// ---------------------------------------------------------------------------
+
+/// Upload single document from file path (iOS optimized)
+/// Expected JSON payload:
+/// {
+///   "file_path": "/path/to/file.pdf",
+///   "original_filename": "document.pdf",
+///   "title": "Optional title",
+///   "document_type_id": "uuid",
+///   "related_entity_id": "uuid",
+///   "related_entity_type": "strategic_goals",
+///   "linked_field": "optional_field",
+///   "sync_priority": "normal",
+///   "compression_priority": "normal",
+///   "temp_related_id": "optional_uuid",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn document_upload_from_path(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            file_path: String,              // NO BASE64! Just the file path
+            original_filename: String,
+            title: Option<String>,
+            document_type_id: String,
+            related_entity_id: String,
+            related_entity_type: String,
+            linked_field: Option<String>,
+            sync_priority: String,
+            compression_priority: Option<String>,
+            temp_related_id: Option<String>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        
+        println!("🚀 [FFI] Processing upload from path: {}", p.file_path);
+        
+        // Parse UUIDs and enums
+        let document_type_id = Uuid::parse_str(&p.document_type_id)
+            .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
+        let related_entity_id = Uuid::parse_str(&p.related_entity_id)
+            .map_err(|_| FFIError::invalid_argument("invalid related_entity_id"))?;
+        
+        let sync_priority = SyncPriority::from_str(&p.sync_priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+        
+        let compression_priority = p.compression_priority
+            .as_ref()
+            .map(|s| CompressionPriority::from_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid compression_priority"))?;
+
+        let temp_related_id = p.temp_related_id
+            .as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid temp_related_id"))?;
+
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_document_service()?;
+
+        // Call the NEW path-based service method (no Base64 encoding/decoding!)
+        let document = block_on_async(svc.upload_document_from_path(
+            &auth,
+            p.file_path,                    // Pass the path directly!
+            p.original_filename,
+            p.title,
+            document_type_id,
+            related_entity_id,
+            p.related_entity_type,
+            p.linked_field,
+            sync_priority,
+            compression_priority,
+            temp_related_id,
+        )).map_err(FFIError::from_service_error)?;
+
+        println!("✅ [FFI] Path-based upload completed successfully");
+
+        let json_resp = serde_json::to_string(&document)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Bulk upload documents from file paths (iOS optimized)
+/// Expected JSON payload:
+/// {
+///   "file_paths": [
+///     { "file_path": "/path/to/file1.pdf", "filename": "file1.pdf" },
+///     { "file_path": "/path/to/file2.jpg", "filename": "file2.jpg" }
+///   ],
+///   "title": "Optional shared title",
+///   "document_type_id": "uuid",
+///   "related_entity_id": "uuid", 
+///   "related_entity_type": "strategic_goals",
+///   "sync_priority": "normal",
+///   "compression_priority": "normal",
+///   "temp_related_id": "optional_uuid",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn document_bulk_upload_from_paths(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct FilePathData {
+            file_path: String,              // NO BASE64! Just the file path
+            filename: String,
+        }
+
+        #[derive(Deserialize)]
+        struct Payload {
+            file_paths: Vec<FilePathData>,  // Array of paths instead of data
+            title: Option<String>,
+            document_type_id: String,
+            related_entity_id: String,
+            related_entity_type: String,
+            sync_priority: String,
+            compression_priority: Option<String>,
+            temp_related_id: Option<String>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        
+        println!("🚀 [FFI] Processing bulk upload from {} paths", p.file_paths.len());
+        
+        // Parse UUIDs and enums
+        let document_type_id = Uuid::parse_str(&p.document_type_id)
+            .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
+        let related_entity_id = Uuid::parse_str(&p.related_entity_id)
+            .map_err(|_| FFIError::invalid_argument("invalid related_entity_id"))?;
+        
+        let sync_priority = SyncPriority::from_str(&p.sync_priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+        
+        let compression_priority = p.compression_priority
+            .as_ref()
+            .map(|s| CompressionPriority::from_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid compression_priority"))?;
+
+        let temp_related_id = p.temp_related_id
+            .as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid temp_related_id"))?;
+
+        // Convert file paths to (path, filename) tuples
+        let file_paths: Vec<(String, String)> = p.file_paths
+            .into_iter()
+            .map(|f| (f.file_path, f.filename))
+            .collect();
+
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_document_service()?;
+
+        // Call the NEW bulk path-based service method (no Base64 encoding/decoding!)
+        let documents = block_on_async(svc.bulk_upload_documents_from_paths(
+            &auth,
+            file_paths,                     // Pass the paths directly!
+            p.title,
+            document_type_id,
+            related_entity_id,
+            p.related_entity_type,
+            sync_priority,
+            compression_priority,
+            temp_related_id,
+        )).map_err(FFIError::from_service_error)?;
+
+        println!("✅ [FFI] Bulk path-based upload completed successfully: {} documents", documents.len());
+
+        let json_resp = serde_json::to_string(&documents)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Memory Management
 // ---------------------------------------------------------------------------
 

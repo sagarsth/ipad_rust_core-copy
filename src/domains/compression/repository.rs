@@ -4,12 +4,47 @@ use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::{Pool, Sqlite, Transaction};
 use uuid::Uuid;
-
+use tokio::time::{sleep, Duration};
 
 use crate::errors::{DbError, DomainError, DomainResult};
 use super::types::{
     CompressionQueueEntry, CompressionQueueStatus, CompressionStats
 };
+
+/// Helper function to retry database operations that fail due to locking
+async fn execute_with_retry<T, F, Fut>(operation: F, max_retries: u32) -> DomainResult<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = DomainResult<T>>,
+{
+    let mut retries = 0;
+    loop {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) if is_database_locked_error(&e) && retries < max_retries => {
+                retries += 1;
+                let delay_ms = 50 * (2_u64.pow(retries)); // Exponential backoff: 100ms, 200ms, 400ms, 800ms
+                println!("🔄 [DB_RETRY] Database locked, retrying in {}ms (attempt {}/{})", delay_ms, retries, max_retries);
+                sleep(Duration::from_millis(delay_ms)).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Check if error is related to database locking
+fn is_database_locked_error(error: &DomainError) -> bool {
+    match error {
+        DomainError::Database(db_err) => {
+            let error_str = db_err.to_string().to_lowercase();
+            error_str.contains("database is locked") || 
+            error_str.contains("sqlite_busy") ||
+            error_str.contains("database table is locked")
+        }
+        _ => false,
+    }
+}
 
 #[async_trait]
 pub trait CompressionRepository: Send + Sync {
@@ -227,7 +262,7 @@ impl CompressionRepository for SqliteCompressionRepository {
                     r#"
                     UPDATE media_documents
                     SET 
-                        compression_status = 'in_progress',
+                        compression_status = 'processing',
                         updated_at = ?
                     WHERE id = ?
                     "#,
@@ -256,24 +291,29 @@ impl CompressionRepository for SqliteCompressionRepository {
         status: &str,
         error_message: Option<&str>,
     ) -> DomainResult<()> {
-        let updated_at_str = Utc::now().to_rfc3339();
+        let pool = &self.pool;
         let queue_id_str = queue_id.to_string();
-        sqlx::query!(
-            "UPDATE compression_queue 
-             SET status = ?, 
-                 error_message = ?,
-                 updated_at = ?
-             WHERE id = ?",
-            status,
-            error_message,
-            updated_at_str,
-            queue_id_str
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(DbError::from)?;
         
-        Ok(())
+        // Use retry logic for database operations that might encounter locking
+        execute_with_retry(|| async {
+            let updated_at_str = Utc::now().to_rfc3339();
+            sqlx::query!(
+                "UPDATE compression_queue 
+                 SET status = ?, 
+                     error_message = ?,
+                     updated_at = ?
+                 WHERE id = ?",
+                status,
+                error_message,
+                updated_at_str,
+                queue_id_str
+            )
+            .execute(pool)
+            .await
+            .map_err(DbError::from)?;
+            
+            Ok(())
+        }, 3).await // Retry up to 3 times
     }
     
     async fn update_compression_priority(
@@ -371,6 +411,7 @@ impl CompressionRepository for SqliteCompressionRepository {
         let space_saved = original_size - compressed_size;
         let now_str = Utc::now().to_rfc3339();
         
+        // Transaction operations don't need retry logic as transactions handle consistency
         sqlx::query!(
             "UPDATE compression_stats SET
                 total_original_size = total_original_size + ?,

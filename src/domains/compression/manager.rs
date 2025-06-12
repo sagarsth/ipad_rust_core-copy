@@ -325,10 +325,10 @@ impl CompressionWorker {
         let compression_repo = self.compression_repo.clone();
         
         tokio::spawn(async move {
-            // Update entry status to "in_progress"
+            // Update entry status to "processing"
             if let Err(e) = compression_repo.update_queue_entry_status(
                 entry.id,
-                "in_progress",
+                "processing",
                 None,
             ).await {
                 eprintln!("Failed to update queue entry status: {:?}", e);

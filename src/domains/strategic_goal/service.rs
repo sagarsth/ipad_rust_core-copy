@@ -103,6 +103,32 @@ pub trait StrategicGoalService: DeleteService<StrategicGoal> + Send + Sync {
         auth: &AuthContext,
     ) -> ServiceResult<Vec<MediaDocumentResponse>>;
     
+    /// Upload a single document from file path (iOS optimized, no Base64 encoding)
+    async fn upload_document_from_path(
+        &self,
+        goal_id: Uuid,
+        file_path: &str,
+        original_filename: &str,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: CompressionPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse>;
+    
+    /// Bulk upload documents from file paths (iOS optimized, no Base64 encoding)
+    async fn bulk_upload_documents_from_paths(
+        &self,
+        goal_id: Uuid,
+        file_paths: Vec<(String, String)>, // (path, filename)
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: CompressionPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>>;
+    
     /// Helper method to upload documents for a strategic goal and handle errors individually
     async fn upload_documents_for_entity(
         &self,
@@ -838,6 +864,84 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
             .collect();
             
         Ok(successful_uploads)
+    }
+
+    async fn upload_document_from_path(
+        &self,
+        goal_id: Uuid,
+        file_path: &str,
+        original_filename: &str,
+        title: Option<String>,
+        document_type_id: Uuid,
+        linked_field: Option<String>,
+        sync_priority: SyncPriority,
+        compression_priority: CompressionPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<MediaDocumentResponse> {
+        // 1. Verify goal exists
+        let _goal = self.repo.find_by_id(goal_id).await
+            .map_err(|e| ServiceError::Domain(e))?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Delegate to document service using path-based upload
+        let document = self.document_service.upload_document_from_path(
+            auth,
+            file_path.to_string(),
+            original_filename.to_string(),
+            title,
+            document_type_id,
+            goal_id,
+            "strategic_goals".to_string(),
+            linked_field,
+            sync_priority,
+            Some(compression_priority),
+            None,
+        ).await?;
+
+        Ok(document)
+    }
+
+    async fn bulk_upload_documents_from_paths(
+        &self,
+        goal_id: Uuid,
+        file_paths: Vec<(String, String)>, // (path, filename)
+        title: Option<String>,
+        document_type_id: Uuid,
+        sync_priority: SyncPriority,
+        compression_priority: CompressionPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<MediaDocumentResponse>> {
+        // 1. Verify goal exists
+        let _goal = self.repo.find_by_id(goal_id).await
+            .map_err(|e| ServiceError::Domain(e))?;
+
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
+
+        // 3. Delegate to document service using path-based bulk upload
+        let documents = self.document_service.bulk_upload_documents_from_paths(
+            auth,
+            file_paths,
+            title,
+            document_type_id,
+            goal_id,
+            "strategic_goals".to_string(),
+            sync_priority,
+            Some(compression_priority),
+            None,
+        ).await?;
+
+        Ok(documents)
     }
 
     // Add implementations for new methods here

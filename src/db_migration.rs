@@ -4,12 +4,14 @@ use crate::globals;
 
 // Embed the consolidated migration SQL file at compile time
 const MIGRATION_CONSOLIDATED: &str = include_str!("../migrations/20240101000000_consolidated.sql");
+const MIGRATION_COMPRESSION_STATUS_FIX: &str = include_str!("../migrations/20241201000000_fix_compression_status_constraints.sql");
 
 // List of migrations with their names and SQL content.
 // This now starts with the consolidated schema.
 // Future migrations can be added here.
 const MIGRATIONS: &[(&str, &str)] = &[
     ("20240101000000_consolidated.sql", MIGRATION_CONSOLIDATED),
+    ("20241201000000_fix_compression_status_constraints.sql", MIGRATION_COMPRESSION_STATUS_FIX),
     // Add new migrations here in the future, for example:
     // ("20250601120000_new_feature.sql", include_str!("../migrations/20250601120000_new_feature.sql")),
 ];
