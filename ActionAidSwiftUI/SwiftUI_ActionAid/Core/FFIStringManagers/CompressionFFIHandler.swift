@@ -232,6 +232,20 @@ class CompressionFFIHandler {
         }
     }
     
+    /// Comprehensive reset of stuck compression jobs with database fixes
+    func resetStuckJobsComprehensive(request: ComprehensiveResetRequest) async -> Result<ComprehensiveResetResponse, Error> {
+        do {
+            let jsonPayload = try encode(request)
+            return await executeOperation { resultPtr in
+                jsonPayload.withCString { cJson in
+                    compression_reset_stuck_comprehensive(cJson, resultPtr)
+                }
+            }
+        } catch {
+            return .failure(error)
+        }
+    }
+    
     // MARK: - Private Helpers
     
     private func encode<T: Encodable>(_ value: T) throws -> String {

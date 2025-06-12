@@ -4,6 +4,7 @@ use thiserror::Error;
 use tokio::fs; // Use tokio::fs for async file operations
 use uuid::Uuid;
 use std::io;
+use urlencoding;
 
 #[derive(Debug, Error)]
 pub enum FileStorageError {
@@ -37,6 +38,15 @@ pub trait FileStorageService: Send + Sync {
         entity_or_temp_id: &str,   // Associated entity ID (Uuid as string) or temp ID
         suggested_filename: &str, // Original filename for extension/naming hint
     ) -> FileStorageResult<(String, u64)>; // Returns (relative_path, size_bytes)
+
+    /// iOS Optimized: Save file from path (no memory copy!)
+    async fn save_file_from_path(
+        &self,
+        source_path: &str,
+        entity_type: &str,
+        entity_or_temp_id: &str,
+        suggested_filename: &str,
+    ) -> FileStorageResult<(String, u64)>;
 
     /// Delete a file from storage using its relative path.
     async fn delete_file(&self, relative_path: &str) -> FileStorageResult<()>;
@@ -84,12 +94,44 @@ impl LocalFileStorageService {
 
     /// Sanitizes a path component to prevent directory traversal issues.
     fn sanitize_component(component: &str) -> Result<String, FileStorageError> {
-        // Check for invalid characters or patterns
-        if component.is_empty() || component.contains('/') || component.contains('\\') || component == "." || component == ".." {
-            Err(FileStorageError::InvalidPathComponent(component.to_string()))
-        } else {
-            Ok(component.to_string())
+        // Handle empty or problematic components
+        if component.is_empty() {
+            return Err(FileStorageError::InvalidPathComponent("Empty component".to_string()));
         }
+        
+        // iOS OPTIMIZATION: Allow common iOS filename characters and handle special cases
+        let sanitized = component
+            .replace("/", "_")           // Replace path separators
+            .replace("\\", "_")          // Replace Windows path separators
+            .replace("\0", "")           // Remove null bytes
+            .replace("..", "_")          // Replace parent directory references
+            .trim_matches(|c: char| c.is_whitespace() || c == '.')  // Trim whitespace and dots
+            .to_string();
+
+        if sanitized.is_empty() {
+            return Err(FileStorageError::InvalidPathComponent("Empty component after sanitization".to_string()));
+        }
+
+        // Check for remaining problematic characters (be more permissive for iOS)
+        let has_invalid_chars = sanitized.chars().any(|c| {
+            // Allow alphanumeric, spaces, hyphens, underscores, and common iOS filename characters
+            !c.is_alphanumeric() && 
+            !" -_@$+()[]{}.,;'\"".contains(c) &&
+            !c.is_ascii_punctuation()  // Allow most ASCII punctuation
+        });
+
+        if has_invalid_chars {
+            println!("⚠️ [FILE_STORAGE] Potentially problematic characters in component: {}", sanitized);
+            // Don't fail, just log the warning - iOS filenames can be complex
+        }
+
+        // Additional check for reserved names (Windows compatibility)
+        let reserved_names = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"];
+        if reserved_names.contains(&sanitized.to_uppercase().as_str()) {
+            return Err(FileStorageError::InvalidPathComponent(format!("Reserved name: {}", sanitized)));
+        }
+
+        Ok(sanitized)
     }
 
     /// Generates a unique filename based on suggestion and a new UUID.
@@ -159,6 +201,123 @@ impl FileStorageService for LocalFileStorageService {
             },
             Err(e) => {
                 println!("   ❌ Failed to write file: {}", e);
+                Err(FileStorageError::Io(e))
+            }
+        }
+    }
+
+    /// iOS Optimized: Save file from path (no memory loading!)
+    async fn save_file_from_path(
+        &self,
+        source_path: &str,
+        entity_type: &str,
+        entity_or_temp_id: &str,
+        suggested_filename: &str,
+    ) -> FileStorageResult<(String, u64)> {
+        println!("🚀 [FILE_STORAGE] iOS optimized path-based save:");
+        println!("   📁 Source path: {}", source_path);
+        println!("   🏷️ Entity type: {}", entity_type);
+        println!("   🆔 Entity ID: {}", entity_or_temp_id);
+        println!("   📄 Filename: {}", suggested_filename);
+        
+        // iOS OPTIMIZATION: Handle URL-encoded paths and special characters
+        let decoded_source_path = match urlencoding::decode(source_path) {
+            Ok(decoded) => {
+                println!("   🔓 Decoded path: {}", decoded);
+                decoded.to_string()
+            },
+            Err(_) => {
+                println!("   ⚠️ Path decoding failed, using original: {}", source_path);
+                source_path.to_string()
+            }
+        };
+        
+        // Verify source file exists and is accessible
+        let source_metadata = fs::metadata(&decoded_source_path).await.map_err(|e| {
+            println!("   ❌ Failed to read source file metadata from '{}': {}", decoded_source_path, e);
+            println!("   🔍 Error kind: {:?}", e.kind());
+            match e.kind() {
+                io::ErrorKind::NotFound => FileStorageError::NotFound(format!("Source file not found: {}", decoded_source_path)),
+                io::ErrorKind::PermissionDenied => FileStorageError::PermissionDenied(format!("Permission denied accessing: {}", decoded_source_path)),
+                _ => FileStorageError::Io(e)
+            }
+        })?;
+        
+        let file_size = source_metadata.len();
+        println!("   📊 Source file size: {} bytes", file_size);
+        
+        // Check if it's a regular file
+        if !source_metadata.is_file() {
+            return Err(FileStorageError::Other(format!("Source path is not a regular file: {}", decoded_source_path)));
+        }
+        
+        let sanitized_entity_type = Self::sanitize_component(entity_type).map_err(|e| {
+            println!("   ❌ Failed to sanitize entity type '{}': {}", entity_type, e);
+            e
+        })?;
+        
+        let sanitized_id = Self::sanitize_component(entity_or_temp_id).map_err(|e| {
+            println!("   ❌ Failed to sanitize entity ID '{}': {}", entity_or_temp_id, e);
+            e
+        })?;
+        
+        let unique_filename = Self::generate_unique_filename(suggested_filename);
+        println!("   🏷️ Generated unique filename: {}", unique_filename);
+
+        // Construct relative path: original/entity_type/entity_or_temp_id/unique_filename.ext
+        let relative_path = Path::new(&self.original_subdir)
+            .join(&sanitized_entity_type)
+            .join(&sanitized_id)
+            .join(&unique_filename);
+
+        let relative_path_str = relative_path.to_str().ok_or_else(|| {
+            println!("   ❌ Failed to convert relative path to string");
+            FileStorageError::Other("Failed to convert relative path to string".to_string())
+        })?;
+        
+        let absolute_path = self.get_absolute_path(relative_path_str);
+        
+        println!("   🔗 Relative path: {}", relative_path_str);
+        println!("   🎯 Absolute path: {:?}", absolute_path);
+
+        let parent_dir = absolute_path.parent().ok_or_else(|| {
+            println!("   ❌ Invalid path generated, no parent directory");
+            FileStorageError::Other("Invalid path generated, no parent directory".to_string())
+        })?;
+        
+        // Ensure the parent directory exists
+        fs::create_dir_all(parent_dir).await.map_err(|e| {
+            println!("   ❌ Failed to create directory structure at '{:?}': {}", parent_dir, e);
+            FileStorageError::Io(e)
+        })?;
+        
+        println!("   ✅ Directory structure created/verified: {:?}", parent_dir);
+
+        // Use fs::copy for efficient file system operation (no memory loading!)
+        match fs::copy(&decoded_source_path, &absolute_path).await {
+            Ok(bytes_copied) => {
+                println!("   ✅ File copied successfully: {} bytes (iOS optimized)", bytes_copied);
+                
+                // Verify the copied file
+                match fs::metadata(&absolute_path).await {
+                    Ok(dest_metadata) => {
+                        let dest_size = dest_metadata.len();
+                        if dest_size != file_size {
+                            println!("   ⚠️ Size mismatch: source {} bytes, destination {} bytes", file_size, dest_size);
+                        } else {
+                            println!("   ✅ File integrity verified: {} bytes", dest_size);
+                        }
+                    },
+                    Err(e) => {
+                        println!("   ⚠️ Could not verify copied file: {}", e);
+                    }
+                }
+                
+                Ok((relative_path_str.to_string(), file_size))
+            },
+            Err(e) => {
+                println!("   ❌ Failed to copy file from '{}' to '{:?}': {}", decoded_source_path, absolute_path, e);
+                println!("   🔍 Copy error kind: {:?}", e.kind());
                 Err(FileStorageError::Io(e))
             }
         }

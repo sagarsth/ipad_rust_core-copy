@@ -100,4 +100,10 @@ func compression_get_supported_methods(
 func compression_get_document_history(
     _ payload_json: UnsafePointer<CChar>,
     _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
+@_silgen_name("compression_reset_stuck_comprehensive")
+func compression_reset_stuck_comprehensive(
+    _ payload_json: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
 ) -> CInt 

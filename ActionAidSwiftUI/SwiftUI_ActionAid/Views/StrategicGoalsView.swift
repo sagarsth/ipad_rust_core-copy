@@ -542,53 +542,68 @@ struct StrategicGoalsView: View {
         print("🔒 [DEBUG] Database constraint check completed")
     }
     
-    /// Reset stuck compression jobs
+    /// Reset stuck compression jobs with comprehensive database fixes
     private func resetStuckCompressions() async {
-        print("🔄 [RESET] Starting stuck compression reset...")
+        print("🔄 [RESET] Starting comprehensive compression reset...")
+        
+        guard let currentUser = authManager.currentUser else {
+            await MainActor.run {
+                showDebugAlert(title: "Reset Failed", message: "User not authenticated")
+            }
+            return
+        }
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
         
         let compressionHandler = CompressionFFIHandler()
-        let request = ResetStuckJobsRequest(timeoutMinutes: 10) // Reset jobs stuck for more than 10 minutes
+        let request = ComprehensiveResetRequest(
+            timeoutMinutes: 10, // Reset jobs stuck for more than 10 minutes
+            auth: authContext
+        )
         
-        let result = await compressionHandler.resetStuckJobs(request: request)
+        let result = await compressionHandler.resetStuckJobsComprehensive(request: request)
         
         await MainActor.run {
             switch result {
             case .success(let response):
+                let issuesText = response.issuesFound.isEmpty ? 
+                    "No issues found" : 
+                    "📊 ISSUES FIXED:\n" + response.issuesFound.map { "• \($0)" }.joined(separator: "\n")
+                
+                let recommendationsText = response.recommendations.isEmpty ? 
+                    "" : 
+                    "\n\n🔧 SYSTEM STATUS:\n" + response.recommendations.map { "• \($0)" }.joined(separator: "\n")
+                
                 let message = """
-                ✅ Reset \(response.resetCount) stuck compression jobs.
+                ✅ Comprehensive Reset Complete
+                Reset \(response.resetCount) database entries.
                 
-                📊 ISSUES FOUND:
-                • Database status constraint mismatches
-                • DOCX files being compressed to 0 bytes
-                • Database locking from concurrent operations
-                • Processing status using 'in_progress' instead of 'processing'
+                \(issuesText)\(recommendationsText)
                 
-                🔧 RECOMMENDED FIXES:
-                1. Update Rust code to use 'processing' instead of 'in_progress'
-                2. Fix DOCX compressor to prevent 0-byte output
-                3. Add database transaction retries for locking issues
-                4. Add compression validation before saving
-                
-                Files will now be reprocessed automatically.
+                Your compression system is now optimized and ready for use.
                 """
                 print("✅ [RESET] \(message)")
-                showDebugAlert(title: "Compression Jobs Reset", message: message)
+                showDebugAlert(title: "Compression System Fixed", message: message)
             case .failure(let error):
                 let message = """
-                ❌ Failed to reset stuck jobs: \(error.localizedDescription)
+                ❌ Failed to reset compression system: \(error.localizedDescription)
                 
-                🚨 CRITICAL ISSUES DETECTED:
-                1. Database constraint violation: status must be 'processing' not 'in_progress'
-                2. DOCX compression producing 0-byte files (DATA LOSS RISK)
-                3. Database locking from concurrent writes
+                🚨 CRITICAL ISSUES:
+                Your compression system needs manual intervention.
                 
-                ⚠️ MANUAL ACTION REQUIRED:
-                • Check Rust compression service code
-                • Verify DOCX compressor implementation
-                • Review database transaction handling
+                ⚠️ RECOMMENDED ACTIONS:
+                1. Check database file permissions
+                2. Restart the application
+                3. Check available disk space
+                4. Contact support if issues persist
                 """
                 print("❌ [RESET] \(message)")
-                showDebugAlert(title: "Reset Failed - Critical Issues", message: message)
+                showDebugAlert(title: "Reset Failed", message: message)
             }
         }
     }
@@ -2095,44 +2110,71 @@ struct DocumentUploadSheet: View {
             var failureCount = 0
             var oversizedCount = 0
             
-            for photo in newPhotos {
+            print("📸 [PHOTO_SELECTION] Processing \(newPhotos.count) photos from Photos app")
+            
+            for (index, photo) in newPhotos.enumerated() {
+                print("📸 [PHOTO_\(index + 1)/\(newPhotos.count)] Processing photo: \(photo.itemIdentifier ?? "unknown")")
+                print("📸 [PHOTO_\(index + 1)] Supported content types: \(photo.supportedContentTypes.map(\.identifier))")
+                
                 do {
+                    // iOS OPTIMIZATION: Use loadTransferable with Data but immediately write to temp file
+                    // This minimizes memory usage compared to keeping data in memory
                     if let data = try await photo.loadTransferable(type: Data.self) {
+                        print("📸 [PHOTO_\(index + 1)] Successfully loaded photo data: \(data.count) bytes")
+                        
                         // Check size before processing
                         if data.count > 500_000_000 { // 500MB limit
+                            print("📸 [PHOTO_\(index + 1)] Photo too large: \(data.count) bytes")
                             oversizedCount += 1
                             continue
                         }
                         
-                        // Generate filename based on photo identifier and supported type
+                        // Generate filename based on photo identifier and supported types
                         let filename = generatePhotoFilename(for: photo)
-                        let fileSize = data.count
-                        let detectedType = detectDocumentType(from: filename)
+                        print("📸 [PHOTO_\(index + 1)] Generated filename: \(filename)")
                         
-                        let file = DocumentFile(
+                        // iOS OPTIMIZATION: Immediately write to temp file to free memory
+                        let tempDir = FileManager.default.temporaryDirectory
+                        let tempFileURL = tempDir.appendingPathComponent("\(UUID().uuidString)_\(filename)")
+                        
+                        try data.write(to: tempFileURL)
+                        print("📸 [PHOTO_\(index + 1)] Written to temp file: \(tempFileURL.path)")
+                        
+                        let detectedType = detectDocumentType(from: filename)
+                        print("📸 [PHOTO_\(index + 1)] Detected type: \(detectedType)")
+                        
+                        // Use OptimizedDocumentFile (path-based) for consistency with file uploads
+                        let file = OptimizedDocumentFile(
                             name: filename,
-                            data: data,
-                            size: fileSize,
+                            tempPath: tempFileURL.path,
+                            size: data.count,
                             detectedType: detectedType
                         )
                         
                         await MainActor.run {
-                            if fileManager.addFile(file) {
+                            if fileManager.addOptimizedFile(file) {
+                                print("📸 [PHOTO_\(index + 1)] ✅ Successfully added optimized file")
                                 successCount += 1
                             } else {
+                                print("📸 [PHOTO_\(index + 1)] ❌ Failed to add optimized file (size limit)")
                                 oversizedCount += 1
                                 file.cleanup()
                             }
                         }
+                    } else {
+                        print("📸 [PHOTO_\(index + 1)] ❌ Failed to load photo data")
+                        failureCount += 1
                     }
                 } catch {
-                    print("Error loading photo data: \(error)")
+                    print("📸 [PHOTO_\(index + 1)] ❌ Error processing photo: \(error)")
                     failureCount += 1
                 }
             }
             
             await MainActor.run {
                 selectedPhotos.removeAll() // Clear selection for next time
+                
+                print("📸 [PHOTO_SELECTION] Final results: \(successCount) success, \(failureCount) failed, \(oversizedCount) oversized")
                 
                 if failureCount > 0 || oversizedCount > 0 {
                     var message = "Photo selection completed."
@@ -2146,19 +2188,45 @@ struct DocumentUploadSheet: View {
                         message += " \(failureCount) photos failed to load."
                     }
                     errorMessage = message
+                } else if successCount > 0 {
+                    // Clear any previous error message on success
+                    errorMessage = nil
                 }
             }
         }
     }
     
-    private func generatePhotoFilename(for photo: PhotosPickerItem) -> String {
+    private func generatePhotoFilename(for photo: PhotosPickerItem, contentType: UTType? = nil) -> String {
         // Try to get the original filename if available
         if let identifier = photo.itemIdentifier {
             // Use the identifier to create a meaningful filename
             let timestamp = Date().timeIntervalSince1970
             let shortId = String(identifier.prefix(8))
             
-            // Try to determine the type from supported types
+            // Use provided content type or try to determine from supported types
+            let typeToCheck = contentType ?? photo.supportedContentTypes.first
+            
+            if let type = typeToCheck {
+                if type.conforms(to: .heif) || type.identifier == "public.heif" {
+                    return "photo_\(shortId)_\(Int(timestamp)).heif"
+                } else if type.conforms(to: .heic) || type.identifier == "public.heic" {
+                    return "photo_\(shortId)_\(Int(timestamp)).heic"
+                } else if type.conforms(to: .jpeg) || type.identifier == "public.jpeg" {
+                    return "photo_\(shortId)_\(Int(timestamp)).jpg"
+                } else if type.conforms(to: .png) || type.identifier == "public.png" {
+                    return "photo_\(shortId)_\(Int(timestamp)).png"
+                } else if type.conforms(to: .quickTimeMovie) || type.identifier == "com.apple.quicktime-movie" {
+                    return "video_\(shortId)_\(Int(timestamp)).mov"
+                } else if type.conforms(to: .mpeg4Movie) || type.identifier == "public.mpeg-4" {
+                    return "video_\(shortId)_\(Int(timestamp)).mp4"
+                } else if type.conforms(to: .webP) {
+                    return "photo_\(shortId)_\(Int(timestamp)).webp"
+                } else if type.conforms(to: .gif) {
+                    return "photo_\(shortId)_\(Int(timestamp)).gif"
+                }
+            }
+            
+            // Try to determine the type from supported types (fallback)
             if photo.supportedContentTypes.contains(.heif) || photo.supportedContentTypes.contains(.heic) {
                 return "photo_\(shortId)_\(Int(timestamp)).heic"
             } else if photo.supportedContentTypes.contains(.jpeg) {

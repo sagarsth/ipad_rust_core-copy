@@ -55,6 +55,14 @@ pub trait CompressionRepository: Send + Sync {
         priority: i32,
     ) -> DomainResult<CompressionQueueEntry>;
     
+    /// Queue a document for compression within an existing transaction
+    async fn queue_document_with_tx(
+        &self,
+        document_id: Uuid,
+        priority: i32,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> DomainResult<CompressionQueueEntry>;
+    
     /// Get the next document for compression
     async fn get_next_document_for_compression(&self) -> DomainResult<Option<CompressionQueueEntry>>;
     
@@ -64,6 +72,15 @@ pub trait CompressionRepository: Send + Sync {
         queue_id: Uuid,
         status: &str,
         error_message: Option<&str>,
+    ) -> DomainResult<()>;
+    
+    /// Update the status of a queued document within an existing transaction
+    async fn update_queue_entry_status_with_tx(
+        &self,
+        queue_id: Uuid,
+        status: &str,
+        error_message: Option<&str>,
+        tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()>;
     
     /// Update the compression priority for a document
@@ -213,6 +230,84 @@ impl CompressionRepository for SqliteCompressionRepository {
         Ok(entry)
     }
     
+    async fn queue_document_with_tx(
+        &self,
+        document_id: Uuid,
+        priority: i32,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> DomainResult<CompressionQueueEntry> {
+        // Check if document is already in queue
+        let document_id_str_check = document_id.to_string();
+        let existing = sqlx::query!(
+            "SELECT id FROM compression_queue WHERE document_id = ?",
+            document_id_str_check
+        )
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        
+        if let Some(row) = existing {
+            let updated_at_str = Utc::now().to_rfc3339();
+            let row_id_str = row.id.as_deref()
+                .ok_or_else(|| DomainError::Internal("Queue entry ID missing in existing row".to_string()))?;
+            // Update priority if already queued
+            sqlx::query!(
+                "UPDATE compression_queue SET 
+                 priority = ?, 
+                 updated_at = ? 
+                 WHERE id = ?",
+                priority,
+                updated_at_str,
+                row_id_str
+            )
+            .execute(&mut **tx)
+            .await
+            .map_err(DbError::from)?;
+            
+            let queue_id = Uuid::parse_str(row_id_str)
+                .map_err(|_| DomainError::InvalidUuid(row_id_str.to_string()))?;
+                
+            let entry = self.get_queue_entry_internal(queue_id, tx).await?;
+            return Ok(entry);
+        }
+        
+        // Add new queue entry
+        let queue_id = Uuid::new_v4();
+        let now_str = Utc::now().to_rfc3339();
+        let queue_id_str = queue_id.to_string();
+        let document_id_str = document_id.to_string();
+        
+        // Use sqlx::query (unchecked) to bypass persistent prepare analysis error
+        sqlx::query(
+            "INSERT INTO compression_queue
+             (id, document_id, priority, attempts, status, created_at, updated_at)
+             VALUES (?, ?, ?, 0, 'pending', ?, ?)"
+        )
+        .bind(queue_id_str)
+        .bind(document_id_str)
+        .bind(priority)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Update stats
+        sqlx::query!(
+            "UPDATE compression_stats 
+             SET total_files_pending = total_files_pending + 1,
+                 updated_at = ?
+             WHERE id = 'global'",
+            now_str
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        
+        let entry = self.get_queue_entry_internal(queue_id, tx).await?;
+        Ok(entry)
+    }
+    
     async fn get_next_document_for_compression(&self) -> DomainResult<Option<CompressionQueueEntry>> {
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
         
@@ -314,6 +409,34 @@ impl CompressionRepository for SqliteCompressionRepository {
             
             Ok(())
         }, 3).await // Retry up to 3 times
+    }
+    
+    async fn update_queue_entry_status_with_tx(
+        &self,
+        queue_id: Uuid,
+        status: &str,
+        error_message: Option<&str>,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> DomainResult<()> {
+        let updated_at_str = Utc::now().to_rfc3339();
+        let queue_id_str = queue_id.to_string();
+        
+        sqlx::query!(
+            "UPDATE compression_queue 
+             SET status = ?, 
+                 error_message = ?,
+                 updated_at = ?
+             WHERE id = ?",
+            status,
+            error_message,
+            updated_at_str,
+            queue_id_str
+        )
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+        
+        Ok(())
     }
     
     async fn update_compression_priority(

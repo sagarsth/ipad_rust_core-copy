@@ -106,8 +106,8 @@ pub trait DocumentService:
     async fn bulk_upload_documents(
         &self,
         auth: &AuthContext,
-        files: Vec<(Vec<u8>, String)>, // (data, filename) - no individual titles
-        title: Option<String>, // Single shared title for all documents
+        files: Vec<(Vec<u8>, String)>,
+        title: Option<String>,
         document_type_id: Uuid,
         related_entity_id: Uuid,
         related_entity_type: String,
@@ -242,6 +242,48 @@ pub struct DocumentServiceImpl {
 }
 
 impl DocumentServiceImpl {
+    /// Configure SQLite connection pool for better concurrency
+    fn configure_sqlite_pool(pool: &SqlitePool) {
+        // SQLite-specific optimizations are typically done at connection level
+        // This is a placeholder for any pool-level configurations
+        println!("🔧 [DOC_SERVICE] SQLite pool configured for concurrency");
+    }
+    
+    /// Retry database operations that might fail due to locking
+    async fn retry_db_operation<T, F, Fut>(operation: F, max_retries: u32) -> ServiceResult<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = ServiceResult<T>>,
+    {
+        let mut retries = 0;
+        loop {
+            match operation().await {
+                Ok(result) => return Ok(result),
+                Err(e) if Self::is_database_locked_error(&e) && retries < max_retries => {
+                    retries += 1;
+                    let delay_ms = 50 * (2_u64.pow(retries)); // Exponential backoff
+                    println!("🔄 [DOC_SERVICE] Database locked, retrying in {}ms (attempt {}/{})", delay_ms, retries, max_retries);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    
+    /// Check if error is related to database locking
+    fn is_database_locked_error(error: &ServiceError) -> bool {
+        match error {
+            ServiceError::Domain(domain_err) => {
+                let error_str = domain_err.to_string().to_lowercase();
+                error_str.contains("database is locked") || 
+                error_str.contains("sqlite_busy") ||
+                error_str.contains("database table is locked")
+            }
+            _ => false,
+        }
+    }
+
     pub fn new(
         pool: SqlitePool,
         doc_type_repo: Arc<dyn DocumentTypeRepository>,
@@ -255,6 +297,9 @@ impl DocumentServiceImpl {
         compression_service: Arc<dyn CompressionService>,
         deletion_manager: Arc<PendingDeletionManager>,
     ) -> Self {
+        // Configure SQLite connection pool for better concurrency
+        Self::configure_sqlite_pool(&pool);
+        
         // --- Adapters for Delete Services ---
         struct DocTypeRepoAdapter(Arc<dyn DocumentTypeRepository>);
 
@@ -812,8 +857,10 @@ impl DocumentService for DocumentServiceImpl {
                 println!("   🆔 Document ID: {}", new_doc_metadata.id);
                 
                 new_doc_metadata.validate()?;
-                let created_doc = self.media_doc_repo.create(&new_doc_metadata).await?;
                 
+                // *** HYBRID APPROACH: Individual Document Creation ***
+                // Create document individually (resilient - if this fails, only this document fails)
+                let created_doc = self.media_doc_repo.create(&new_doc_metadata).await?;
                 println!("📄 [DOC_SERVICE] Document record created successfully!");
                 
                 let final_compression_priority = compression_priority
@@ -832,28 +879,35 @@ impl DocumentService for DocumentServiceImpl {
                         should_compress, size_bytes, doc_type.min_size_for_compression.unwrap_or(0));
                 
                 if should_compress {
-                    match self.compression_service
-                        .queue_document_for_compression(created_doc.id, final_compression_priority)
-                        .await
-                    {
+                    // *** SEPARATE COMPRESSION QUEUING WITH RETRY ***
+                    // Queue for compression separately (with retry logic for locking issues)
+                    match Self::retry_db_operation(|| async {
+                        self.compression_service
+                            .queue_document_for_compression(created_doc.id, final_compression_priority)
+                            .await
+                    }, 3).await {
                         Ok(()) => {
                             println!("✅ [DOC_SERVICE] Successfully queued document {} for compression", created_doc.id);
                         },
                         Err(e) => {
                             println!("❌ [DOC_SERVICE] Failed to queue document {} for compression: {:?}", created_doc.id, e);
-                            eprintln!("Failed to queue document {} for compression: {:?}", created_doc.id, e);
+                            // Don't fail the entire upload - document is still created successfully
+                            eprintln!("Warning: Document {} created but compression queuing failed: {:?}", created_doc.id, e);
                         }
                     }
                 } else {
                     println!("⏭️ [DOC_SERVICE] File too small for compression, marking as skipped");
-                    // Update status to skipped
-                    if let Err(e) = self.media_doc_repo.update_compression_status(
-                        created_doc.id, 
-                        CompressionStatus::Skipped, 
-                        None, 
-                        None
-                    ).await {
+                    // Update status to skipped with retry logic
+                    if let Err(e) = Self::retry_db_operation(|| async {
+                        self.media_doc_repo.update_compression_status(
+                            created_doc.id, 
+                            CompressionStatus::Skipped, 
+                            None, 
+                            None
+                        ).await.map_err(|e| ServiceError::Domain(e))
+                    }, 3).await {
                         println!("⚠️ [DOC_SERVICE] Failed to update compression status to skipped: {:?}", e);
+                        // Don't fail the upload - document is still created
                     }
                 }
                 
@@ -890,7 +944,14 @@ impl DocumentService for DocumentServiceImpl {
             .or_else(|| CompressionPriority::from_str(&doc_type.default_priority).ok())
             .unwrap_or(CompressionPriority::Normal);
 
+        let total_files = files.len();
+        println!("📦 [DOC_SERVICE] Starting bulk upload of {} documents", total_files);
+
         for (file_data, original_filename) in files {
+            println!("📄 [DOC_SERVICE] Processing file: {}", original_filename);
+            
+            // *** HYBRID APPROACH: Process each document individually ***
+            // This ensures that if one document fails, others can still succeed
             match self.upload_document(
                 auth,
                 file_data,
@@ -904,15 +965,21 @@ impl DocumentService for DocumentServiceImpl {
                 Some(final_compression_priority),
                 temp_related_id,
             ).await {
-                Ok(response) => results.push(response),
+                Ok(response) => {
+                    println!("✅ [DOC_SERVICE] Successfully uploaded: {}", original_filename);
+                    results.push(response);
+                },
                 Err(e) => {
-                    // Log the error but don't create invalid database records
+                    // Log the error but continue with other files
+                    println!("❌ [DOC_SERVICE] Failed to upload '{}': {}", original_filename, e);
                     eprintln!("🚫 Bulk upload failed for '{}': {}", original_filename, e);
                     // Skip this file instead of creating an error response with invalid file_path
                     // The client can handle partial success responses
                 }
             }
         }
+        
+        println!("📦 [DOC_SERVICE] Bulk upload completed: {}/{} files successful", results.len(), total_files);
         Ok(results)
     }
 

@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
-use sqlx::SqlitePool;
+use sqlx::{SqlitePool, Transaction, Sqlite};
 use std::env;
 
 use crate::domains::core::file_storage_service::FileStorageService;
@@ -54,6 +54,14 @@ pub trait CompressionService: Send + Sync {
         priority: CompressionPriority,
     ) -> ServiceResult<()>;
     
+    /// Queue a document for compression within an existing transaction
+    async fn queue_document_for_compression_with_tx(
+        &self,
+        document_id: Uuid,
+        priority: CompressionPriority,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> ServiceResult<()>;
+    
     /// Cancel pending compression for a document
     async fn cancel_compression(
         &self,
@@ -85,6 +93,9 @@ pub trait CompressionService: Send + Sync {
 
     /// Check if document is currently in use
     async fn is_document_in_use(&self, document_id: Uuid) -> ServiceResult<bool>;
+    
+    /// Get document details for size-based timeout calculation
+    async fn get_document_details(&self, document_id: Uuid) -> ServiceResult<Option<MediaDocument>>;
 }
 
 pub struct CompressionServiceImpl {
@@ -590,48 +601,139 @@ impl CompressionService for CompressionServiceImpl {
                 }
             };
         
-        println!("🔄 [COMPRESSION_SERVICE] Starting database transaction for document {}", document_id);
-        // 13. Start a transaction for updating document and stats
-        let mut tx = self.pool.begin().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
-        
-        // 14. Update document status
+        // 13. Update document status (separate operation to avoid transaction conflicts)
         println!("📝 [COMPRESSION_SERVICE] Updating document status to completed for document {}", document_id);
-        self.media_doc_repo.update_compression_status(
-            document_id, 
-            CompressionStatus::Completed, 
-            Some(&compressed_path),
-            Some(compressed_size)
-        ).await.map_err(|e| {
-            println!("❌ [COMPRESSION_SERVICE] Failed to update document status for {}: {:?}", document_id, e);
-            ServiceError::Domain(e)
-        })?;
         
-        // 15. Update compression stats
-        println!("📊 [COMPRESSION_SERVICE] Updating compression stats for document {}", document_id);
-        self.compression_repo.update_stats_after_compression(
-            original_size,
-            compressed_size,
-            &mut tx
-        ).await.map_err(|e| {
-            println!("❌ [COMPRESSION_SERVICE] Failed to update stats for {}: {:?}", document_id, e);
-            ServiceError::Domain(e)
-        })?;
+        // Retry logic for database locks
+        let mut retry_count = 0;
+        let max_retries = 3;
         
-        // 16. Update queue entry if exists
+        while retry_count < max_retries {
+            match self.media_doc_repo.update_compression_status(
+                document_id, 
+                CompressionStatus::Completed, 
+                Some(&compressed_path),
+                Some(compressed_size)
+            ).await {
+                Ok(_) => {
+                    println!("✅ [COMPRESSION_SERVICE] Document status updated successfully for {}", document_id);
+                    break;
+                },
+                Err(e) => {
+                    retry_count += 1;
+                    if e.to_string().contains("database is locked") && retry_count < max_retries {
+                        println!("🔄 [COMPRESSION_SERVICE] Database locked, retrying in {}ms (attempt {}/{})", 
+                                100 * retry_count, retry_count, max_retries);
+                        tokio::time::sleep(Duration::from_millis(100 * retry_count as u64)).await;
+                        continue;
+                    } else {
+                        println!("❌ [COMPRESSION_SERVICE] Failed to update document status for {} after {} attempts: {:?}", 
+                                document_id, retry_count, e);
+                        return Err(ServiceError::Domain(e));
+                    }
+                }
+            }
+        }
+        
+        // 14. Update queue entry if exists (separate operation)
         if let Some(queue_entry) = self.compression_repo.get_queue_entry_by_document_id(document_id).await
             .map_err(|e| ServiceError::Domain(e))? 
         {
             println!("📋 [COMPRESSION_SERVICE] Updating queue entry to completed for document {}", document_id);
-            self.compression_repo.update_queue_entry_status(
-                queue_entry.id, 
-                "completed", 
-                None
-            ).await.map_err(|e| ServiceError::Domain(e))?;
+            retry_count = 0;
+            while retry_count < max_retries {
+                match self.compression_repo.update_queue_entry_status(
+                    queue_entry.id, 
+                    "completed", 
+                    None
+                ).await {
+                    Ok(_) => {
+                        println!("✅ [COMPRESSION_SERVICE] Queue entry updated successfully for {}", document_id);
+                        break;
+                    },
+                    Err(e) => {
+                        retry_count += 1;
+                        if e.to_string().contains("database is locked") && retry_count < max_retries {
+                            println!("🔄 [COMPRESSION_SERVICE] Database locked updating queue, retrying in {}ms (attempt {}/{})", 
+                                    100 * retry_count, retry_count, max_retries);
+                            tokio::time::sleep(Duration::from_millis(100 * retry_count as u64)).await;
+                            continue;
+                        } else {
+                            println!("❌ [COMPRESSION_SERVICE] Failed to update queue entry for {} after {} attempts: {:?}", 
+                                    document_id, retry_count, e);
+                            // Don't fail the entire operation for queue update failures
+                            break;
+                        }
+                    }
+                }
+            }
         }
         
-        // 17. Commit transaction
-        println!("💾 [COMPRESSION_SERVICE] Committing transaction for document {}", document_id);
-        tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+        // 15. Update compression stats (in separate transaction)
+        println!("📊 [COMPRESSION_SERVICE] Updating compression stats for document {}", document_id);
+        retry_count = 0;
+        while retry_count < max_retries {
+            match self.pool.begin().await {
+                Ok(mut tx) => {
+                    match self.compression_repo.update_stats_after_compression(
+                        original_size,
+                        compressed_size,
+                        &mut tx
+                    ).await {
+                        Ok(_) => {
+                            match tx.commit().await {
+                                Ok(_) => {
+                                    println!("✅ [COMPRESSION_SERVICE] Stats updated successfully for {}", document_id);
+                                    break;
+                                },
+                                Err(e) => {
+                                    retry_count += 1;
+                                    if e.to_string().contains("database is locked") && retry_count < max_retries {
+                                        println!("🔄 [COMPRESSION_SERVICE] Database locked committing stats, retrying in {}ms (attempt {}/{})", 
+                                                100 * retry_count, retry_count, max_retries);
+                                        tokio::time::sleep(Duration::from_millis(100 * retry_count as u64)).await;
+                                        continue;
+                                    } else {
+                                        println!("❌ [COMPRESSION_SERVICE] Failed to commit stats for {} after {} attempts: {:?}", 
+                                                document_id, retry_count, e);
+                                        // Don't fail the entire operation for stats update failures
+                                        break;
+                                    }
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            retry_count += 1;
+                            if e.to_string().contains("database is locked") && retry_count < max_retries {
+                                println!("🔄 [COMPRESSION_SERVICE] Database locked updating stats, retrying in {}ms (attempt {}/{})", 
+                                        100 * retry_count, retry_count, max_retries);
+                                tokio::time::sleep(Duration::from_millis(100 * retry_count as u64)).await;
+                                continue;
+                            } else {
+                                println!("❌ [COMPRESSION_SERVICE] Failed to update stats for {} after {} attempts: {:?}", 
+                                        document_id, retry_count, e);
+                                // Don't fail the entire operation for stats update failures
+                                break;
+                            }
+                        }
+                    }
+                },
+                Err(e) => {
+                    retry_count += 1;
+                    if e.to_string().contains("database is locked") && retry_count < max_retries {
+                        println!("🔄 [COMPRESSION_SERVICE] Database locked beginning transaction, retrying in {}ms (attempt {}/{})", 
+                                100 * retry_count, retry_count, max_retries);
+                        tokio::time::sleep(Duration::from_millis(100 * retry_count as u64)).await;
+                        continue;
+                    } else {
+                        println!("❌ [COMPRESSION_SERVICE] Failed to begin transaction for stats update for {} after {} attempts: {:?}", 
+                                document_id, retry_count, e);
+                        // Don't fail the entire operation for stats update failures
+                        break;
+                    }
+                }
+            }
+        }
         
         // Calculate metrics
         let space_saved_bytes = original_size - compressed_size;
@@ -725,6 +827,69 @@ impl CompressionService for CompressionServiceImpl {
         Ok(())
     }
     
+    async fn queue_document_for_compression_with_tx(
+        &self,
+        document_id: Uuid,
+        priority: CompressionPriority,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> ServiceResult<()> {
+        println!("🗜️ [COMPRESSION] Starting queue_document_for_compression_with_tx for {}", document_id);
+        
+        // Get document to make sure it exists (within transaction)
+        let document = self.media_doc_repo.find_by_id_with_tx(document_id, tx).await
+            .map_err(|e| {
+                println!("❌ [COMPRESSION] Failed to find document {}: {:?}", document_id, e);
+                ServiceError::Domain(e)
+            })?;
+
+        println!("✅ [COMPRESSION] Found document: {}", document.original_filename);
+        println!("📊 [COMPRESSION] Document details:");
+        println!("   - Source of change: {:?}", document.source_of_change);
+        println!("   - Compression status: {}", document.compression_status);
+        println!("   - Has error: {:?}", document.has_error);
+        println!("   - Size: {} bytes", document.size_bytes);
+
+        // Do not queue documents that came from sync
+        if document.source_of_change == SourceOfChange::Sync {
+            println!("⏭️ [COMPRESSION] Skipping compression for synced document: {}", document_id);
+            // Update compression_status to SKIPPED to prevent reprocessing
+            self.media_doc_repo.update_compression_status_with_tx(
+                document_id, 
+                CompressionStatus::Skipped, 
+                None, 
+                None,
+                tx
+            ).await.map_err(|e| ServiceError::Domain(e))?;
+            return Ok(());
+        }
+            
+        // Don't queue if already compressed or has error
+        if document.has_error.unwrap_or(0) == 1 {
+            println!("⚠️ [COMPRESSION] Document has error, not queuing: {}", document_id);
+            return Ok(());  // Silently ignore error documents
+        }
+        
+        if document.compression_status == CompressionStatus::Completed.as_str() || 
+           document.compression_status == CompressionStatus::Skipped.as_str() {
+            println!("⏭️ [COMPRESSION] Document already processed ({}), skipping: {}", document.compression_status, document_id);
+            return Ok(());  // Already processed
+        }
+        
+        println!("🔄 [COMPRESSION] Queuing document for compression with priority: {:?}", priority);
+        
+        // Queue the document within the transaction
+        self.compression_repo
+            .queue_document_with_tx(document_id, priority.into(), tx)
+            .await
+            .map_err(|e| {
+                println!("❌ [COMPRESSION] Failed to queue document {}: {:?}", document_id, e);
+                ServiceError::Domain(e)
+            })?;
+            
+        println!("✅ [COMPRESSION] Successfully queued document {} for compression", document_id);
+        Ok(())
+    }
+    
     async fn cancel_compression(
         &self,
         document_id: Uuid,
@@ -798,5 +963,13 @@ impl CompressionService for CompressionServiceImpl {
     /// Check if document is currently in use
     async fn is_document_in_use(&self, document_id: Uuid) -> ServiceResult<bool> {
         self.is_document_in_use(document_id).await
+    }
+    
+    async fn get_document_details(&self, document_id: Uuid) -> ServiceResult<Option<MediaDocument>> {
+        match FindById::<MediaDocument>::find_by_id(&*self.media_doc_repo, document_id).await {
+            Ok(doc) => Ok(Some(doc)),
+            Err(DomainError::EntityNotFound { .. }) => Ok(None),
+            Err(e) => Err(ServiceError::Domain(e)),
+        }
     }
 }

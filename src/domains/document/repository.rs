@@ -463,6 +463,13 @@ pub trait MediaDocumentRepository:
         // file_path provided by service after saving file
     ) -> DomainResult<MediaDocument>;
 
+    /// Create document within an existing transaction
+    async fn create_with_tx(
+        &self,
+        new_doc: &NewMediaDocument,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> DomainResult<MediaDocument>;
+
     // UPDATE methods REMOVED - Documents are immutable via public API
 
     async fn find_by_related_entity(
@@ -484,6 +491,16 @@ pub trait MediaDocumentRepository:
         status: CompressionStatus,
         compressed_file_path: Option<&str>,
         compressed_size_bytes: Option<i64>, // ADDED size
+    ) -> DomainResult<()>;
+
+    /// Update compression status within an existing transaction
+    async fn update_compression_status_with_tx(
+        &self,
+        id: Uuid,
+        status: CompressionStatus,
+        compressed_file_path: Option<&str>,
+        compressed_size_bytes: Option<i64>,
+        tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()>;
 
     /// Update blob sync status and key. Called internally by sync service.
@@ -778,120 +795,129 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
         // The file_path column in DB will be set by the service calling create or later update.
     ) -> DomainResult<MediaDocument> {
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
-        let result = async {
-            let now = Utc::now().to_rfc3339();
-            let now_dt = Utc::now(); // For logging
-            let user_uuid = new_doc.created_by_user_id;
-            // NOTE: NewMediaDocument does not have device_id. Logging will use None.
-            // If device_id logging is needed here, add it to NewMediaDocument DTO.
-            let device_uuid: Option<Uuid> = None;
-
-            // Use the user_uuid captured outside the async block for consistency
-            let user_id_str_bind = user_uuid.map(|id| id.to_string());
-
-            // Determine related_table and related_id based on temp_related_id
-            let (actual_related_table, actual_related_id_str) = if new_doc.temp_related_id.is_some() {
-                (TEMP_RELATED_TABLE.to_string(), None) // Store temp ID separately
-            } else {
-                // If temp_id is None, related_id MUST be Some (validated in DTO)
-                (new_doc.related_table.clone(), new_doc.related_id.map(|id| id.to_string()))
-            };
-            let temp_related_id_str = new_doc.temp_related_id.map(|id| id.to_string());
-
-            // REMOVED file_path and description from INSERT list and bind list
-            // Assumes file_path will be set later, description column might not exist or is optional
-            query(
-                r#"INSERT INTO media_documents (
-                    id, related_table, related_id, type_id,
-                    original_filename, compressed_file_path, compressed_size_bytes,
-                    field_identifier, title, mime_type, size_bytes,
-                    compression_status, blob_key, blob_status, sync_priority,
-                    temp_related_id,
-                    created_at, updated_at, created_by_user_id, updated_by_user_id,
-                    deleted_at, deleted_by_user_id,
-                    file_path, source_of_change
-                ) VALUES (
-                    ?, ?, ?, ?, -- id, related_table, related_id, type_id
-                    ?, NULL, NULL, -- original_filename, compressed_file_path, compressed_size_bytes
-                    ?, ?, ?, ?, -- field_identifier, title, mime_type, size_bytes
-                    ?, NULL, ?, ?, -- compression_status, blob_key, blob_status, sync_priority
-                    ?, -- temp_related_id
-                    ?, ?, ?, ?, -- created_at, updated_at, created_by_user_id, updated_by_user_id
-                    NULL, NULL, -- deleted_at, deleted_by_user_id
-                    ?, ? -- file_path, source_of_change
-                )"#
-            )
-            .bind(new_doc.id.to_string())
-            .bind(actual_related_table) // Store actual or TEMP_RELATED_TABLE
-            .bind(actual_related_id_str) // Store actual ID or NULL if temp
-            .bind(new_doc.type_id.to_string())
-            .bind(&new_doc.original_filename)
-             // compressed fields initialized as NULL
-            .bind(&new_doc.field_identifier)
-            .bind(&new_doc.title)
-            .bind(&new_doc.mime_type)
-            .bind(new_doc.size_bytes)
-            .bind(CompressionStatus::Pending.as_str()) // Default status
-            .bind(BlobSyncStatus::Pending.as_str()) // Default status
-            .bind(
-                SyncPriorityFromSyncTypes::from_str(&new_doc.sync_priority) // CORRECTED
-                    .map_err(|_| DomainError::Validation(ValidationError::custom(&format!("Invalid sync priority string: {}", new_doc.sync_priority))))?
-                    .as_str() // Bind the string representation
-            )
-            .bind(temp_related_id_str) // Store temp ID if provided
-            .bind(&now).bind(&now)
-            .bind(user_id_str_bind.as_deref()).bind(user_id_str_bind.as_deref()) // Use Option<String> binding for both
-            .bind(&new_doc.file_path) // Bind the actual file_path from DTO
-            .bind(new_doc.source_of_change.as_str()) // Bind source_of_change
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                 if let sqlx::Error::Database(db_err) = &e {
-                     if db_err.is_unique_violation() {
-                         return DomainError::Database(DbError::Conflict(format!(
-                             "MediaDocument with ID {} already exists.", new_doc.id
-                         )));
-                     }
-                      // Check for foreign key violation on type_id
-                     if db_err.message().contains("FOREIGN KEY constraint failed") {
-                         // FIX: Use ValidationError::Custom instead of non-existent foreign_key variant
-                         return DomainError::Validation(ValidationError::Custom(format!(
-                             "Invalid document type ID ({}): Does not exist.", new_doc.type_id
-                         )));
-                     }
-                 }
-                 DomainError::Database(DbError::from(e))
-             })?;
-
-            // Log Create Operation
-            let entry = ChangeLogEntry {
-                operation_id: Uuid::new_v4(),
-                entity_table: Self::entity_name().to_string(),
-                entity_id: new_doc.id,
-                operation_type: ChangeOperationType::Create,
-                field_name: None,
-                old_value: None,
-                new_value: None, // Optionally serialize new_doc
-                timestamp: now_dt,
-                user_id: user_uuid.unwrap_or_else(Uuid::nil), // Provide default if None
-                device_id: device_uuid,
-                document_metadata: None,
-                sync_batch_id: None,
-                processed_at: None,
-                sync_error: None,
-            };
-            self.log_change_entry(entry, &mut tx).await?;
-
-            self.find_by_id_with_tx(new_doc.id, &mut tx).await
-        }.await;
-
+        let result = self.create_with_tx(new_doc, &mut tx).await;
         match result {
-            Ok(doc) => { 
-                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?; 
-                Ok(doc) 
+            Ok(doc) => {
+                tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
+                Ok(doc)
             },
-            Err(e) => { let _ = tx.rollback().await; Err(e) },
+            Err(e) => {
+                let _ = tx.rollback().await;
+                Err(e)
+            }
         }
+    }
+
+    async fn create_with_tx(
+        &self,
+        new_doc: &NewMediaDocument,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> DomainResult<MediaDocument> {
+        let now = Utc::now().to_rfc3339();
+        let now_dt = Utc::now(); // For logging
+        let user_uuid = new_doc.created_by_user_id;
+        // NOTE: NewMediaDocument does not have device_id. Logging will use None.
+        // If device_id logging is needed here, add it to NewMediaDocument DTO.
+        let device_uuid: Option<Uuid> = None;
+
+        // Use the user_uuid captured outside the async block for consistency
+        let user_id_str_bind = user_uuid.map(|id| id.to_string());
+
+        // Determine related_table and related_id based on temp_related_id
+        let (actual_related_table, actual_related_id_str) = if new_doc.temp_related_id.is_some() {
+            (TEMP_RELATED_TABLE.to_string(), None) // Store temp ID separately
+        } else {
+            // If temp_id is None, related_id MUST be Some (validated in DTO)
+            (new_doc.related_table.clone(), new_doc.related_id.map(|id| id.to_string()))
+        };
+        let temp_related_id_str = new_doc.temp_related_id.map(|id| id.to_string());
+
+        // REMOVED file_path and description from INSERT list and bind list
+        // Assumes file_path will be set later, description column might not exist or is optional
+        query(
+            r#"INSERT INTO media_documents (
+                id, related_table, related_id, type_id,
+                original_filename, compressed_file_path, compressed_size_bytes,
+                field_identifier, title, mime_type, size_bytes,
+                compression_status, blob_key, blob_status, sync_priority,
+                temp_related_id,
+                created_at, updated_at, created_by_user_id, updated_by_user_id,
+                deleted_at, deleted_by_user_id,
+                file_path, source_of_change
+            ) VALUES (
+                ?, ?, ?, ?, -- id, related_table, related_id, type_id
+                ?, NULL, NULL, -- original_filename, compressed_file_path, compressed_size_bytes
+                ?, ?, ?, ?, -- field_identifier, title, mime_type, size_bytes
+                ?, NULL, ?, ?, -- compression_status, blob_key, blob_status, sync_priority
+                ?, -- temp_related_id
+                ?, ?, ?, ?, -- created_at, updated_at, created_by_user_id, updated_by_user_id
+                NULL, NULL, -- deleted_at, deleted_by_user_id
+                ?, ? -- file_path, source_of_change
+            )"#
+        )
+        .bind(new_doc.id.to_string())
+        .bind(actual_related_table) // Store actual or TEMP_RELATED_TABLE
+        .bind(actual_related_id_str) // Store actual ID or NULL if temp
+        .bind(new_doc.type_id.to_string())
+        .bind(&new_doc.original_filename)
+         // compressed fields initialized as NULL
+        .bind(&new_doc.field_identifier)
+        .bind(&new_doc.title)
+        .bind(&new_doc.mime_type)
+        .bind(new_doc.size_bytes)
+        .bind(CompressionStatus::Pending.as_str()) // Default status
+        .bind(BlobSyncStatus::Pending.as_str()) // Default status
+        .bind(
+            SyncPriorityFromSyncTypes::from_str(&new_doc.sync_priority) // CORRECTED
+                .map_err(|_| DomainError::Validation(ValidationError::custom(&format!("Invalid sync priority string: {}", new_doc.sync_priority))))?
+                .as_str() // Bind the string representation
+        )
+        .bind(temp_related_id_str) // Store temp ID if provided
+        .bind(&now).bind(&now)
+        .bind(user_id_str_bind.as_deref()).bind(user_id_str_bind.as_deref()) // Use Option<String> binding for both
+        .bind(&new_doc.file_path) // Bind the actual file_path from DTO
+        .bind(new_doc.source_of_change.as_str()) // Bind source_of_change
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| {
+             if let sqlx::Error::Database(db_err) = &e {
+                 if db_err.is_unique_violation() {
+                     return DomainError::Database(DbError::Conflict(format!(
+                         "MediaDocument with ID {} already exists.", new_doc.id
+                     )));
+                 }
+                  // Check for foreign key violation on type_id
+                 if db_err.message().contains("FOREIGN KEY constraint failed") {
+                     // FIX: Use ValidationError::Custom instead of non-existent foreign_key variant
+                     return DomainError::Validation(ValidationError::Custom(format!(
+                         "Invalid document type ID ({}): Does not exist.", new_doc.type_id
+                     )));
+                 }
+             }
+             DomainError::Database(DbError::from(e))
+         })?;
+
+        // Log Create Operation
+        let entry = ChangeLogEntry {
+            operation_id: Uuid::new_v4(),
+            entity_table: Self::entity_name().to_string(),
+            entity_id: new_doc.id,
+            operation_type: ChangeOperationType::Create,
+            field_name: None,
+            old_value: None,
+            new_value: serde_json::to_string(new_doc).ok(),
+            timestamp: now_dt,
+            user_id: user_uuid.unwrap_or(Uuid::nil()),
+            device_id: device_uuid,
+            document_metadata: None,
+            sync_batch_id: None,
+            processed_at: None,
+            sync_error: None,
+        };
+        self.log_change_entry(entry, tx).await?;
+
+        // Return the created document
+        self.find_by_id_with_tx(new_doc.id, tx).await
     }
 
     async fn find_by_related_entity(
@@ -981,6 +1007,70 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
                 log_if_changed!(compressed_size_bytes, "compressed_size_bytes");
             }
             tx.commit().await.map_err(|e| DomainError::Database(DbError::from(e)))?;
+            Ok(())
+        }
+    }
+
+    async fn update_compression_status_with_tx(
+        &self,
+        id: Uuid,
+        status: CompressionStatus,
+        compressed_file_path: Option<&str>,
+        compressed_size_bytes: Option<i64>,
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> DomainResult<()> {
+        let old_entity = self.find_by_id_with_tx(id, tx).await.ok(); // Don't fail if not found initially
+        let now = Utc::now();
+        let system_user_id = Uuid::nil(); // System operation
+        let device_uuid: Option<Uuid> = None;
+
+        let result = query(
+            "UPDATE media_documents SET compression_status = ?, compressed_file_path = ?, compressed_size_bytes = ?, updated_at = ? WHERE id = ?"
+        )
+        .bind(status.as_str())
+        .bind(compressed_file_path)
+        .bind(compressed_size_bytes) // Bind the size
+        .bind(now.to_rfc3339())
+        .bind(id.to_string())
+        .execute(&mut **tx) // Use transaction
+        .await
+        .map_err(DbError::from)?;
+
+        if result.rows_affected() == 0 {
+            Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id))
+        } else {
+            // Log changes if old entity was found
+            if let Some(old) = old_entity {
+                // Fetch new state within the transaction
+                let new_entity = self.find_by_id_with_tx(id, tx).await?;
+
+                macro_rules! log_if_changed {
+                    ($field_name:ident, $field_sql:literal) => {
+                        if old.$field_name != new_entity.$field_name {
+                            let entry = ChangeLogEntry {
+                                operation_id: Uuid::new_v4(),
+                                entity_table: Self::entity_name().to_string(),
+                                entity_id: id,
+                                operation_type: ChangeOperationType::Update,
+                                field_name: Some($field_sql.to_string()),
+                                old_value: serde_json::to_string(&old.$field_name).ok(),
+                                new_value: serde_json::to_string(&new_entity.$field_name).ok(),
+                                timestamp: now,
+                                user_id: system_user_id,
+                                device_id: device_uuid.clone(),
+                                document_metadata: None,
+                                sync_batch_id: None,
+                                processed_at: None,
+                                sync_error: None,
+                            };
+                            self.log_change_entry(entry, tx).await?;
+                        }
+                    };
+                }
+                log_if_changed!(compression_status, "compression_status");
+                log_if_changed!(compressed_file_path, "compressed_file_path");
+                log_if_changed!(compressed_size_bytes, "compressed_size_bytes");
+            }
             Ok(())
         }
     }

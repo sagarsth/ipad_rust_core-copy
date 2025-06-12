@@ -122,9 +122,11 @@ struct GetSupportedMethodsRequest: Codable {
 
 struct ResetStuckJobsRequest: Codable {
     let timeoutMinutes: Int
+    let auth: AuthContextPayload
 
     enum CodingKeys: String, CodingKey {
         case timeoutMinutes = "timeout_minutes"
+        case auth
     }
 }
 
@@ -291,8 +293,36 @@ struct DocumentHistoryResponse: Codable {
 
 struct ResetStuckJobsResponse: Codable {
     let resetCount: Int
+    let status: String
+    let message: String
 
     enum CodingKeys: String, CodingKey {
         case resetCount = "reset_count"
+        case status
+        case message
+    }
+}
+
+struct ComprehensiveResetRequest: Codable {
+    let timeoutMinutes: Int?
+    let auth: AuthContextPayload
+    
+    enum CodingKeys: String, CodingKey {
+        case timeoutMinutes = "timeout_minutes"
+        case auth
+    }
+}
+
+struct ComprehensiveResetResponse: Codable {
+    let resetCount: Int
+    let issuesFound: [String]
+    let recommendations: [String]
+    let status: String
+    
+    enum CodingKeys: String, CodingKey {
+        case resetCount = "reset_count"
+        case issuesFound = "issues_found"
+        case recommendations
+        case status
     }
 } 
