@@ -981,6 +981,7 @@ pub unsafe extern "C" fn document_get_counts_by_entities(payload_json: *const c_
         #[derive(Deserialize)]
         struct Payload {
             related_entity_ids: Vec<String>,
+            related_table: String,
             auth: AuthCtxDto,
         }
         
@@ -992,7 +993,7 @@ pub unsafe extern "C" fn document_get_counts_by_entities(payload_json: *const c_
         let _auth: AuthContext = p.auth.try_into()?;
         let repo = globals::get_media_document_repo()?;
         
-        let counts = block_on_async(repo.get_document_counts_by_related_entity(&entity_ids))
+        let counts = block_on_async(repo.get_document_counts_by_related_entity(&entity_ids, &p.related_table))
             .map_err(FFIError::from)?;
         
         // Convert HashMap<Uuid, i64> to a more JSON-friendly format

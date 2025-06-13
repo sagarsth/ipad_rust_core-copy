@@ -39,6 +39,15 @@ pub trait FileStorageService: Send + Sync {
         suggested_filename: &str, // Original filename for extension/naming hint
     ) -> FileStorageResult<(String, u64)>; // Returns (relative_path, size_bytes)
 
+    /// Save compressed file data to the compressed directory
+    async fn save_compressed_file(
+        &self,
+        data: Vec<u8>,
+        entity_type: &str,
+        entity_or_temp_id: &str,
+        suggested_filename: &str,
+    ) -> FileStorageResult<(String, u64)>;
+
     /// iOS Optimized: Save file from path (no memory copy!)
     async fn save_file_from_path(
         &self,
@@ -206,7 +215,67 @@ impl FileStorageService for LocalFileStorageService {
         }
     }
 
-    /// iOS Optimized: Save file from path (no memory loading!)
+    /// Save compressed file data to the compressed directory
+    async fn save_compressed_file(
+        &self,
+        data: Vec<u8>,
+        entity_type: &str,
+        entity_or_temp_id: &str,
+        suggested_filename: &str,
+    ) -> FileStorageResult<(String, u64)> {
+        println!("🗂️ [FILE_STORAGE] Attempting to save compressed file:");
+        println!("   📁 Base path: {:?}", self.base_path);
+        println!("   🏷️ Entity type: {}", entity_type);
+        println!("   🆔 Entity ID: {}", entity_or_temp_id);
+        println!("   📄 Filename: {}", suggested_filename);
+        println!("   📊 Size: {} bytes", data.len());
+        
+        let sanitized_entity_type = Self::sanitize_component(entity_type)?;
+        let sanitized_id = Self::sanitize_component(entity_or_temp_id)?;
+        let unique_filename = Self::generate_unique_filename(suggested_filename);
+
+        // Construct relative path: compressed/entity_type/entity_or_temp_id/unique_filename.ext
+        let relative_path = Path::new(&self.compressed_subdir)
+            .join(&sanitized_entity_type)
+            .join(&sanitized_id)
+            .join(&unique_filename);
+
+        // Correctly get the relative path as a string slice for get_absolute_path
+        let relative_path_str = relative_path.to_str().ok_or_else(|| FileStorageError::Other("Failed to convert relative path to string".to_string()))?;
+        let absolute_path = self.get_absolute_path(relative_path_str);
+        
+        println!("   🔗 Relative path: {}", relative_path_str);
+        println!("   🎯 Absolute path: {:?}", absolute_path);
+
+        let parent_dir = absolute_path.parent().ok_or_else(|| FileStorageError::Other("Invalid path generated, no parent directory".to_string()))?;
+        
+        println!("   📂 Parent directory: {:?}", parent_dir);
+
+        // Ensure the parent directory exists
+        match fs::create_dir_all(parent_dir).await {
+            Ok(_) => println!("   ✅ Directory structure created/verified"),
+            Err(e) => {
+                println!("   ❌ Failed to create directory structure: {}", e);
+                return Err(FileStorageError::Io(e));
+            }
+        }
+
+        let file_size = data.len() as u64;
+
+        // Write the file asynchronously
+        match fs::write(&absolute_path, data).await {
+            Ok(_) => {
+                println!("   ✅ File saved successfully: {} bytes", file_size);
+                Ok((relative_path_str.to_string(), file_size))
+            },
+            Err(e) => {
+                println!("   ❌ Failed to write file: {}", e);
+                Err(FileStorageError::Io(e))
+            }
+        }
+    }
+
+    /// iOS Optimized: Save file from path (no memory copy!)
     async fn save_file_from_path(
         &self,
         source_path: &str,

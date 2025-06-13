@@ -158,6 +158,17 @@ class DocumentFFIHandler {
         let payload = Payload(temp_related_id: tempRelatedId, final_related_table: finalRelatedTable, final_related_id: finalRelatedId, auth: auth)
         return await executeOperation(payload: payload, ffiCall: document_link_temp)
     }
+    
+    /// Get document counts for multiple entity IDs efficiently in a single call
+    func getDocumentCountsByEntities(relatedEntityIds: [String], relatedTable: String, auth: AuthCtxDto) async -> Result<[DocumentCountResponse], Error> {
+        struct Payload: Codable {
+            let related_entity_ids: [String]
+            let related_table: String
+            let auth: AuthCtxDto
+        }
+        let payload = Payload(related_entity_ids: relatedEntityIds, related_table: relatedTable, auth: auth)
+        return await executeOperation(payload: payload, ffiCall: document_get_counts_by_entities)
+    }
 
     // MARK: - Private Helper Functions
 

@@ -573,7 +573,7 @@ impl CompressionService for CompressionServiceImpl {
         // Save compressed file
         println!("💾 [COMPRESSION_SERVICE] Saving compressed file for document {}", document_id);
         let (compressed_path, _) = match self.file_storage_service
-            .save_file(
+            .save_compressed_file(
                 compressed_data, 
                 entity_type, 
                 &entity_id,

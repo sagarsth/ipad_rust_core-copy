@@ -553,6 +553,7 @@ pub trait MediaDocumentRepository:
     async fn get_document_counts_by_related_entity(
         &self,
         related_entity_ids: &[Uuid],
+        related_table: &str,
     ) -> DomainResult<HashMap<Uuid, i64>>;
     
     /// Find media documents within a date range (created_at or updated_at)
@@ -1607,12 +1608,14 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
     async fn get_document_counts_by_related_entity(
         &self,
         related_entity_ids: &[Uuid],
+        related_table: &str,
     ) -> DomainResult<HashMap<Uuid, i64>> {
         let mut counts = HashMap::new();
         for &entity_id in related_entity_ids {
             let count: i64 = query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM media_documents WHERE related_entity_id = ? AND deleted_at IS NULL",
+                "SELECT COUNT(*) FROM media_documents WHERE related_table = ? AND related_id = ? AND deleted_at IS NULL",
             )
+            .bind(related_table)
             .bind(entity_id.to_string())
             .fetch_one(&self.pool)
             .await

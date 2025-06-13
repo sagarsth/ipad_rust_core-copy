@@ -294,4 +294,7 @@ struct DocumentSummary: Codable {
         case unlinkedCount = "unlinked_count"
         case linkedFields = "linked_fields"
     }
-} 
+}
+
+/// Type alias for document count response to match backend FFI function
+typealias DocumentCountResponse = CountResponse

@@ -96,8 +96,8 @@ struct StrategicGoalsView: View {
         return StrategicGoalFilter(
             statusIds: statusIds,
             responsibleTeams: nil,
-            years: nil,
-            months: nil,
+            years: nil, // Year/month filtering is handled by AdaptiveListView now
+            months: nil, // Year/month filtering is handled by AdaptiveListView now
             userRole: nil,
             syncPriorities: nil,
             searchText: searchTextFilter,
@@ -375,27 +375,83 @@ struct StrategicGoalsView: View {
                 offlineMode: false
             )
             
-            // Load document counts for each goal (only first few to avoid overwhelming the system)
-            let goalsToCheck = Array(goals.prefix(10)) // Limit to first 10 for performance
+            // Use the efficient backend function to get document counts for ALL goals in one call
+            let goalIds = goals.map(\.id)
             
-            for goal in goalsToCheck {
-                let result = await documentHandler.listDocumentsByEntity(
-                    relatedTable: "strategic_goals",
-                    relatedId: goal.id,
-                    pagination: PaginationDto(page: 1, perPage: 1), // Just get count
-                    include: [],
-                    auth: authContext
-                )
-                
-                await MainActor.run {
-                    switch result {
-                    case .success(let paginatedResult):
-                        goalDocumentCounts[goal.id] = Int(paginatedResult.total)
-                    case .failure:
-                        goalDocumentCounts[goal.id] = 0
+            if goalIds.isEmpty {
+                print("📎 [DOCUMENT_COUNTS] No goals to check for documents")
+                return
+            }
+            
+            print("📎 [DOCUMENT_COUNTS] Getting document counts for \(goalIds.count) goals using backend function")
+            print("📎 [DEBUG] Goal IDs to check: \(goalIds.prefix(5))...") // Show first 5 IDs
+            
+            let result = await documentHandler.getDocumentCountsByEntities(
+                relatedEntityIds: goalIds,
+                relatedTable: "strategic_goals",
+                auth: authContext
+            )
+            
+            await MainActor.run {
+                switch result {
+                case .success(let documentCounts):
+                    print("📎 [DEBUG] Backend returned \(documentCounts.count) count responses")
+                    
+                    // Debug: Print all returned counts
+                    for countResponse in documentCounts {
+                        if countResponse.documentCount > 0 {
+                            print("📎 [DEBUG] Backend says entity \(countResponse.entityId) has \(countResponse.documentCount) documents")
+                        }
+                    }
+                    
+                    // Clear existing counts
+                    self.goalDocumentCounts.removeAll()
+                    
+                    // Update with backend-provided counts
+                    for countResponse in documentCounts {
+                        self.goalDocumentCounts[countResponse.entityId] = Int(countResponse.documentCount)
+                    }
+                    
+                    // Ensure all goals have an entry (even if 0)
+                    for goal in self.goals {
+                        if self.goalDocumentCounts[goal.id] == nil {
+                            self.goalDocumentCounts[goal.id] = 0
+                        }
+                    }
+                    
+                    let goalsWithDocs = self.goalDocumentCounts.filter { $0.value > 0 }.count
+                    print("📎 [DOCUMENT_COUNTS] ✅ Backend function completed: \(goalsWithDocs)/\(self.goals.count) goals have documents")
+                    
+                    // Debug: Print final dictionary state
+                    print("📎 [DEBUG] Final goalDocumentCounts dictionary has \(self.goalDocumentCounts.count) entries")
+                    for (goalId, count) in self.goalDocumentCounts {
+                        if count > 0 {
+                            print("📎 [DEBUG] Dictionary entry: \(goalId) -> \(count)")
+                        }
+                    }
+                    
+                    // Debug: Print goals with documents for troubleshooting
+                    for goal in self.goals {
+                        if let count = self.goalDocumentCounts[goal.id], count > 0 {
+                            print("📎 [HAS_DOCS] \(goal.objectiveCode) (ID: \(goal.id)): \(count) documents")
+                        }
+                    }
+                    
+                case .failure(let error):
+                    print("❌ [DOCUMENT_COUNTS] Backend function failed: \(error)")
+                    
+                    // Fallback: Set all counts to 0 to prevent UI inconsistencies
+                    self.goalDocumentCounts.removeAll()
+                    for goal in self.goals {
+                        self.goalDocumentCounts[goal.id] = 0
                     }
                 }
             }
+            
+            // DEBUG: Try manual count for TRANSPORT-2024-016 to verify backend (outside MainActor.run)
+            // if case .failure = result {
+            //     await debugSingleGoalDocumentCount()
+            // }
         }
     }
     
@@ -408,17 +464,27 @@ struct StrategicGoalsView: View {
     
     // MARK: - Filter-Aware Bulk Selection
     
-    /// Get filtered goal IDs for bulk selection based on current UI filters
+    /// Get filtered goal IDs for bulk selection based on current UI filters (backend filters only)
     private func getFilteredGoalIds() async {
         guard !isLoadingFilteredIds else { return }
         
-        // Update current filter based on UI state
+        // Update current filter based on UI state (backend filters only - year/month handled by AdaptiveListView)
         currentFilter = createCurrentFilter()
         
-        // If no filters are applied, don't select anything
-        if currentFilter.isEmpty {
+        // Check if we have any backend filters active (search, status, etc.)
+        let hasBackendFilters = !searchText.isEmpty || selectedStatus != "all"
+        
+        // If no backend filters are applied, select all visible items
+        if !hasBackendFilters {
             await MainActor.run {
-                selectedItems.removeAll()
+                // Select all currently visible items (respecting AdaptiveListView's year/month filtering)
+                let allVisibleIds = Set(filteredGoals.map(\.id))
+                selectedItems = allVisibleIds
+                
+                // Enter selection mode if not already active
+                if !selectedItems.isEmpty {
+                    isInSelectionMode = true
+                }
             }
             return
         }
@@ -465,19 +531,66 @@ struct StrategicGoalsView: View {
         }
     }
     
-    /// Update filter when UI state changes
+    /// Update filter when UI state changes (backend filters only)
     private func updateFilterState() {
-        // Update current filter based on UI changes
+        // Update current filter based on UI changes (backend filters only)
         currentFilter = createCurrentFilter()
         
-        // If in selection mode with filters, refresh the selection
-        if isInSelectionMode && !currentFilter.isEmpty {
+        // Check if we have backend filters active
+        let hasBackendFilters = !searchText.isEmpty || selectedStatus != "all"
+        
+        // If in selection mode with backend filters, refresh the selection
+        if isInSelectionMode && hasBackendFilters {
             Task {
                 await getFilteredGoalIds()
             }
-        } else if currentFilter.isEmpty {
-            // Clear selection if no filters
-            selectedItems.removeAll()
+        } else if !hasBackendFilters && isInSelectionMode {
+            // If no backend filters but still in selection mode, keep current selection
+            // (Year/month filtering is handled by AdaptiveListView)
+            // Don't clear selection automatically
+        }
+    }
+    
+    /// DEBUG: Manual count for a specific goal to verify backend
+    private func debugSingleGoalDocumentCount() async {
+        guard let currentUser = authManager.currentUser else { return }
+        
+        let authContext = AuthCtxDto(
+            userId: currentUser.userId,
+            role: currentUser.role,
+            deviceId: authManager.getDeviceId(),
+            offlineMode: false
+        )
+        
+        // Look for TRANSPORT-2024-016 goal
+        if let transportGoal = goals.first(where: { $0.objectiveCode == "TRANSPORT-2024-016" }) {
+            print("📎 [DEBUG_MANUAL] Found TRANSPORT-2024-016 goal with ID: \(transportGoal.id)")
+            
+            // Try the individual document listing to compare
+            let result = await documentHandler.listDocumentsByEntity(
+                relatedTable: "strategic_goals",
+                relatedId: transportGoal.id,
+                pagination: PaginationDto(page: 1, perPage: 10),
+                include: [],
+                auth: authContext
+            )
+            
+            switch result {
+            case .success(let paginatedResult):
+                print("📎 [DEBUG_MANUAL] listDocumentsByEntity found \(paginatedResult.total) documents for TRANSPORT-2024-016")
+                if paginatedResult.total > 0 {
+                    print("📎 [DEBUG_MANUAL] ✅ This goal DOES have documents! Backend issue confirmed.")
+                    for doc in paginatedResult.items.prefix(3) {
+                        print("📎 [DEBUG_MANUAL] Document: \(doc.originalFilename)")
+                    }
+                }
+            case .failure(let error):
+                print("📎 [DEBUG_MANUAL] listDocumentsByEntity failed: \(error)")
+            }
+        } else {
+            print("📎 [DEBUG_MANUAL] TRANSPORT-2024-016 goal not found")
+            // Debug: Print all goal codes to see what's available
+            print("📎 [DEBUG_MANUAL] Available goal codes: \(goals.prefix(10).map(\.objectiveCode))")
         }
     }
     

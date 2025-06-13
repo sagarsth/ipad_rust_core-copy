@@ -282,18 +282,22 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
                         selectedMonths.removeAll()
                         isSelectAllExplicitlyPressed = false
                     } else {
-                        // Check if we have filters - if so, delegate to parent for backend filtering
-                        if hasActiveFilters() {
+                        // Select All should always clear filters and select everything
+                        // Clear year and month filters first
+                        selectedYears.removeAll()
+                        selectedMonths.removeAll()
+                        
+                        // Check if we have backend filters (search, status, etc.) - if so, delegate to parent
+                        if hasBackendFilters() {
                             // Trigger backend filter selection via callback
                             onFilterBasedSelectAll?()
                         } else {
-                            // When selecting all without filters, select everything visible
-                            selectedYears.removeAll()
-                            selectedMonths.removeAll()
+                            // When selecting all without any filters, select everything visible
                             let allItemIds = groupedItems.flatMap { $0.items.map { String(describing: $0.id) } }
                             selectedItems = Set(allItemIds)
-                            isSelectAllExplicitlyPressed = true
                         }
+                        
+                        isSelectAllExplicitlyPressed = true
                     }
                 }) {
                     VStack(spacing: 2) {
@@ -504,11 +508,19 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
     
     // MARK: - Helper Methods for Advanced Selection
     
-    /// Check if any filters are currently active (UI-based or backend-based)
+    /// Check if any date filters (year/month) are currently active
     private func hasActiveFilters() -> Bool {
         // Check for date filters
         return !selectedYears.isEmpty || !selectedMonths.isEmpty
-        // Note: Backend filters (search, status, etc.) will be handled by the parent callback
+    }
+    
+    /// Check if any backend filters (search, status, etc.) are currently active
+    /// This delegates to the parent callback which handles backend filter detection
+    private func hasBackendFilters() -> Bool {
+        // Always delegate to parent for backend filter-aware selection
+        // The parent callback (onFilterBasedSelectAll) will handle the actual backend filter detection
+        // and either select based on backend filters or select all visible items
+        return onFilterBasedSelectAll != nil
     }
     
     private func getFilteredItemIds() -> [String] {
@@ -590,6 +602,8 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
         // If we have year or month filters active, automatically select matching items
         if !selectedYears.isEmpty || !selectedMonths.isEmpty {
             selectedItems = Set(filteredIds)
+            // Reset explicit select all since we're now filtering
+            isSelectAllExplicitlyPressed = false
         } else {
             // If no filters, clear all selections but keep selection mode active
             selectedItems.removeAll()

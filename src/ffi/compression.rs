@@ -1008,20 +1008,27 @@ pub unsafe extern "C" fn compression_reset_stuck_comprehensive(payload_json: *co
                 Err(e) => issues_found.push(format!("Failed to fix processing documents: {}", e))
             }
             
-            // 2. Fix invalid compression status values (use 'processing' instead of 'in_progress')
-            match sqlx::query(
-                "UPDATE media_documents 
-                 SET compression_status = 'processing' 
-                 WHERE compression_status = 'in_progress'"
-            ).execute(&pool).await {
-                Ok(result) => {
-                    let rows = result.rows_affected();
-                    if rows > 0 {
-                        reset_count += rows;
-                        issues_found.push(format!("Fixed {} documents with invalid 'in_progress' status", rows));
-                    }
-                },
-                Err(e) => issues_found.push(format!("Failed to fix invalid status: {}", e))
+            // 2. Fix case inconsistency and invalid compression status values
+            let case_fixes = [
+                ("UPDATE media_documents SET compression_status = 'pending' WHERE compression_status = 'PENDING'", "uppercase PENDING"),
+                ("UPDATE media_documents SET compression_status = 'processing' WHERE compression_status = 'IN_PROGRESS'", "uppercase IN_PROGRESS"),
+                ("UPDATE media_documents SET compression_status = 'completed' WHERE compression_status = 'COMPLETED'", "uppercase COMPLETED"),
+                ("UPDATE media_documents SET compression_status = 'failed' WHERE compression_status = 'FAILED'", "uppercase FAILED"),
+                ("UPDATE media_documents SET compression_status = 'skipped' WHERE compression_status = 'SKIPPED'", "uppercase SKIPPED"),
+                ("UPDATE media_documents SET compression_status = 'processing' WHERE compression_status = 'in_progress'", "legacy in_progress"),
+            ];
+            
+            for (query, description) in case_fixes {
+                match sqlx::query(query).execute(&pool).await {
+                    Ok(result) => {
+                        let rows = result.rows_affected();
+                        if rows > 0 {
+                            reset_count += rows;
+                            issues_found.push(format!("Fixed {} documents with {} status", rows, description));
+                        }
+                    },
+                    Err(e) => issues_found.push(format!("Failed to fix {}: {}", description, e))
+                }
             }
             
             // 3. Fix documents with 0-byte compressed files

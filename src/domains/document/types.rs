@@ -166,13 +166,14 @@ impl CompressionStatus {
 impl FromStr for CompressionStatus {
     type Err = DomainError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_uppercase().as_str() {
-            "PENDING" => Ok(CompressionStatus::Pending),
-            "IN_PROGRESS" => Ok(CompressionStatus::Processing), // Legacy support
-            "PROCESSING" => Ok(CompressionStatus::Processing),
-            "COMPLETED" | "COMPRESSED" => Ok(CompressionStatus::Completed), // Allow old value
-            "FAILED" => Ok(CompressionStatus::Failed),
-            "SKIPPED" => Ok(CompressionStatus::Skipped),
+        // FIXED: Use lowercase matching to standardize case handling
+        match s.to_lowercase().as_str() {
+            "pending" => Ok(CompressionStatus::Pending),
+            "in_progress" => Ok(CompressionStatus::Processing), // Legacy support
+            "processing" => Ok(CompressionStatus::Processing),
+            "completed" | "compressed" => Ok(CompressionStatus::Completed), // Allow old value
+            "failed" => Ok(CompressionStatus::Failed),
+            "skipped" => Ok(CompressionStatus::Skipped),
             _ => Err(DomainError::Internal(format!("Invalid CompressionStatus string: {}", s))),
         }
     }

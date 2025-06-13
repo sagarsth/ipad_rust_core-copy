@@ -7,6 +7,10 @@ edition = "2021"
 name = "ipad_rust_core"
 crate-type = ["staticlib"]
 
+[[bin]]
+name = "debug_compression"
+path = "src/bin/debug_compression.rs"
+
 [dependencies]
 
 
