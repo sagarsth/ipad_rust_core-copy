@@ -91,6 +91,7 @@ lazy_static! {
     static ref COMPRESSION_MANAGER: Mutex<Option<Arc<dyn CompressionManager>>> = Mutex::new(None);
     static ref COMPRESSION_REPO: Mutex<Option<Arc<dyn CompressionRepository>>> = Mutex::new(None); // Added for completeness
     static ref COMPRESSION_SERVICE: Mutex<Option<Arc<dyn CompressionService>>> = Mutex::new(None);
+    static ref COMPRESSION_WORKER_SENDER: Mutex<Option<tokio::sync::mpsc::Sender<crate::domains::compression::worker::CompressionWorkerMessage>>> = Mutex::new(None);
     static ref CLOUD_STORAGE_SERVICE: Mutex<Option<Arc<dyn CloudStorageService>>> = Mutex::new(None);
 
     // User Domain
@@ -224,6 +225,9 @@ pub fn get_compression_service() -> FFIResult<Arc<dyn CompressionService>> {
 }
 pub fn get_compression_manager() -> FFIResult<Arc<dyn CompressionManager>> {
     COMPRESSION_MANAGER.lock().map_err(|_| FFIError::internal("COMPRESSION_MANAGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CompressionManager not initialized".to_string()))
+}
+pub fn get_compression_worker_sender() -> FFIResult<tokio::sync::mpsc::Sender<crate::domains::compression::worker::CompressionWorkerMessage>> {
+    COMPRESSION_WORKER_SENDER.lock().map_err(|_| FFIError::internal("COMPRESSION_WORKER_SENDER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("CompressionWorkerSender not initialized".to_string()))
 }
 
 // User
@@ -467,15 +471,26 @@ async fn initialize_internal(
     offline_mode_flag: bool,
     jwt_secret: &str
 ) -> FFIResult<()> {
-    println!("🚀 [GLOBALS] Starting internal initialization...");
-    println!("🔗 [GLOBALS] Database URL: {}", db_url);
-    println!("📱 [GLOBALS] Device ID: {}", device_id_str);
-    println!("📴 [GLOBALS] Offline mode: {}", offline_mode_flag);
+    // Initialize logging first
+    if std::env::var("RUST_LOG").is_err() {
+        #[cfg(debug_assertions)]
+        std::env::set_var("RUST_LOG", "debug");
+        #[cfg(not(debug_assertions))]
+        std::env::set_var("RUST_LOG", "info");
+    }
+    
+    // Initialize env_logger if not already initialized
+    let _ = env_logger::try_init();
+    
+    log::info!("Starting internal initialization");
+    log::debug!("Database URL: {}", db_url);
+    log::debug!("Device ID: {}", device_id_str);
+    log::debug!("Offline mode: {}", offline_mode_flag);
     
     // Initialize JWT
-    println!("🔑 [GLOBALS] Initializing JWT...");
+    log::debug!("Initializing JWT");
     crate::auth::jwt::initialize(jwt_secret);
-    println!("✅ [GLOBALS] JWT initialized");
+    log::debug!("JWT initialized");
 
     // Create async database connection
     println!("🗄️ [GLOBALS] Creating database connection...");
@@ -958,14 +973,19 @@ async fn initialize_internal(
     let comp_pool = pool.clone();
     let comp_service = compression_service.clone();
     let comp_repo = compression_repo.clone();
+    let worker = crate::domains::compression::worker::CompressionWorker::new(
+        comp_service,
+        comp_repo,
+        comp_pool,
+        Some(5_000), // poll interval ms
+        Some(2),     // max_concurrent_jobs
+    );
+    let worker_sender = worker.get_message_sender();
+    
+    // Store the worker sender globally for FFI access
+    *COMPRESSION_WORKER_SENDER.lock().unwrap() = Some(worker_sender);
+    
     tokio::spawn(async move {
-        let worker = crate::domains::compression::worker::CompressionWorker::new(
-            comp_service,
-            comp_repo,
-            comp_pool,
-            Some(5_000), // poll interval ms
-            Some(2),     // max_concurrent_jobs
-        );
         let (handle, _shutdown_tx) = worker.start();
         if let Err(e) = handle.await {
             log::error!("CompressionWorker exited: {:?}", e);

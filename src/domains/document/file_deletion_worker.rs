@@ -86,9 +86,23 @@ impl FileDeletionWorker {
         log::info!("Found {} pending file deletions", pending_deletions.len());
         
         for deletion in pending_deletions {
+            // Determine deletion type for logging
+            let deletion_type = if deletion.file_path.is_some() && deletion.compressed_file_path.is_none() {
+                "compression-cleanup" // Only original file - likely from compression service
+            } else if deletion.file_path.is_some() && deletion.compressed_file_path.is_some() {
+                "document-deletion" // Both files - from document deletion
+            } else if deletion.file_path.is_none() && deletion.compressed_file_path.is_some() {
+                "compressed-only" // Only compressed - unusual case
+            } else {
+                "unknown" // No files specified
+            };
+            
+            log::info!("Processing {} deletion for document: {} (type: {})", 
+                     deletion_type, deletion.document_id, deletion_type);
+            
             // Skip files that are currently in use if active check is enabled
             if self.active_files_check_enabled && self.is_file_in_use(&deletion.document_id).await? {
-                log::info!("Skipping file in use: document_id={}", deletion.document_id);
+                log::info!("Skipping file in use: document_id={} (type: {})", deletion.document_id, deletion_type);
                 
                 // Update the last attempt timestamp
                 let now_str = Utc::now().to_rfc3339();
@@ -111,6 +125,7 @@ impl FileDeletionWorker {
             
             // Try to delete the original file
             let original_result = if let Some(path) = &deletion.file_path {
+                log::info!("Deleting original file: {} for document {}", path, deletion.document_id);
                 self.file_storage_service.delete_file(path).await
             } else {
                 Ok(()) // No path, so "success"
@@ -118,6 +133,7 @@ impl FileDeletionWorker {
             
             // Try to delete the compressed file if it exists
             let compressed_result = if let Some(path) = &deletion.compressed_file_path {
+                log::info!("Deleting compressed file: {} for document {}", path, deletion.document_id);
                 self.file_storage_service.delete_file(path).await
             } else {
                 Ok(()) // No compressed path, so "success"
@@ -163,7 +179,10 @@ impl FileDeletionWorker {
                 .execute(&self.pool)
                 .await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
                 
-                log::info!("Successfully deleted files for document: {}", deletion.document_id);
+                log::info!("Successfully deleted files for document: {} (type: {})", deletion.document_id, deletion_type);
+                if deletion_type == "compression-cleanup" {
+                    log::info!("✅ Compression cleanup completed: Original file removed, compressed file preserved");
+                }
             } else {
                 // Update attempt count and error message
                 let now_str = Utc::now().to_rfc3339();

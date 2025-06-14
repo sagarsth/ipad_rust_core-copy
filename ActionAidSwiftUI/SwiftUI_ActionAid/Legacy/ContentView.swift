@@ -70,8 +70,12 @@ struct ContentView: View {
                     Text("Core Tests")
                 }
             
-            // Strategic Domain Tests Tab
-            StrategicTestView()
+            // Legacy Strategic Tests Tab - Removed (StrategicTestView deleted)
+            // Use the new StrategicGoalsView in the main app instead
+            Text("Strategic tests moved to main app.\n\nUse the production StrategicGoalsView instead.")
+                .multilineTextAlignment(.center)
+                .foregroundColor(.secondary)
+                .padding()
                 .tabItem {
                     Image(systemName: "target")
                     Text("Strategic")

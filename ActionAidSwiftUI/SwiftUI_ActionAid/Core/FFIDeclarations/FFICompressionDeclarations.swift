@@ -106,4 +106,48 @@ func compression_get_document_history(
 func compression_reset_stuck_comprehensive(
     _ payload_json: UnsafePointer<CChar>,
     _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
-) -> CInt 
+) -> CInt
+
+@_silgen_name("compression_reset_stuck_jobs")
+func compression_reset_stuck_jobs(
+    _ payload_json: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
+// MARK: - iOS-Specific Functions
+@_silgen_name("compression_handle_memory_pressure")
+func compression_handle_memory_pressure(_ level: CInt) -> CInt
+
+@_silgen_name("compression_update_ios_state")
+func compression_update_ios_state(_ payload_json: UnsafePointer<CChar>) -> CInt
+
+@_silgen_name("compression_get_ios_status")
+func compression_get_ios_status(_ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt
+
+@_silgen_name("compression_manual_trigger")
+func compression_manual_trigger(
+    _ payload_json: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
+@_silgen_name("compression_debug_info")
+func compression_debug_info(_ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt
+
+// MARK: - Enhanced iOS Integration Functions
+@_silgen_name("compression_handle_background_task_extension")
+func compression_handle_background_task_extension(_ payload_json: UnsafePointer<CChar>) -> CInt
+
+@_silgen_name("compression_handle_content_visibility")
+func compression_handle_content_visibility(_ payload_json: UnsafePointer<CChar>) -> CInt
+
+@_silgen_name("compression_handle_app_lifecycle_event")
+func compression_handle_app_lifecycle_event(_ payload_json: UnsafePointer<CChar>) -> CInt
+
+@_silgen_name("compression_get_comprehensive_ios_status")
+func compression_get_comprehensive_ios_status(_ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt
+
+@_silgen_name("compression_handle_enhanced_memory_warning")
+func compression_handle_enhanced_memory_warning(_ payload_json: UnsafePointer<CChar>) -> CInt
+
+@_silgen_name("compression_detect_ios_capabilities")
+func compression_detect_ios_capabilities(_ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt 

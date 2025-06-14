@@ -372,11 +372,8 @@ impl CompressionWorker {
                         eprintln!("Failed to update queue entry status after completion: {:?}", e);
                     }
                     
-                    // Handle original file deletion if appropriate
-                    // Queue the original file for deletion after grace period
-                    if let Err(e) = queue_original_for_deletion(document_id).await {
-                        eprintln!("Failed to queue original file for deletion: {:?}", e);
-                    }
+                    // Note: Original file deletion is now handled automatically by the 
+                    // CompressionService via queue_original_for_safe_deletion() with grace period
                     
                     println!("Compression completed for document {}: {:?}", document_id, result);
                 },
@@ -398,16 +395,9 @@ impl CompressionWorker {
     }
 }
 
-/// Queue original file for deletion after successful compression
-/// This function would be implemented using file_deletion_queue
-async fn queue_original_for_deletion(document_id: Uuid) -> Result<(), ServiceError> {
-    // For now, just log that we would queue for deletion to avoid crashes
-    // TODO: Implement proper file deletion queue when database pool is properly available
-    eprintln!("INFO: Would queue document {} for deletion after compression", document_id);
-    
-    // Return early to avoid the unimplemented pool access
-    Ok(())
-}
+// Note: Original file deletion queue functionality has been moved to 
+// CompressionService.queue_original_for_safe_deletion() for proper integration
+// with file verification and grace period handling
 
 // REMOVED UNSAFE GLOBAL POOL ACCESS - THIS WAS CAUSING THE CRASH
 // The unsafe global static with raw pointer access was causing memory protection faults

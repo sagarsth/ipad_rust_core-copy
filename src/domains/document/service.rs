@@ -1030,7 +1030,38 @@ impl DocumentService for DocumentServiceImpl {
             if let Err(e) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log error document download attempt for {}: {:?}", id, e); }
             return Err(ServiceError::Ui(format!("Document has an error status: {}", doc.description.unwrap_or_else(|| "Unknown error".to_string()))));
         }
-        let file_path_to_check = if let Some(compressed_path) = &doc.compressed_file_path { if doc.compression_status == CompressionStatus::Completed.as_str() { compressed_path } else { &doc.file_path } } else { &doc.file_path };
+        
+        // *** MODIFIED: Allow downloading during compression using original file ***
+        // Similar to open_document, we'll use the original file during compression
+        if doc.compression_status == CompressionStatus::Processing.as_str() {
+            // Log that user is downloading during compression (for analytics)
+            let new_log = NewDocumentAccessLog { 
+                document_id: id, 
+                user_id: auth.user_id, 
+                access_type: DocumentAccessType::Download.as_str().to_string(), 
+                details: Some("Downloading original file during compression".to_string()) 
+            };
+            if let Err(log_err) = self.doc_log_repo.create(&new_log).await { 
+                eprintln!("Failed to log download during compression for {}: {:?}", id, log_err); 
+            }
+            
+            println!("📥 [DOCUMENT_DOWNLOAD] Document {} is being compressed, serving original file", id);
+        }
+        
+        // *** MODIFIED: Smart file path selection (same logic as open_document) ***
+        let file_path_to_check = if let Some(compressed_path) = &doc.compressed_file_path {
+            if doc.compression_status == CompressionStatus::Completed.as_str() {
+                // Use compressed file if compression is completed
+                compressed_path
+            } else {
+                // Use original file if compression is in progress, pending, failed, or skipped
+                &doc.file_path
+            }
+        } else {
+            // No compressed file exists, use original
+            &doc.file_path
+        };
+        
         let absolute_path = self.file_storage_service.get_absolute_path(file_path_to_check);
         match fs::metadata(&absolute_path).await {
             Ok(_) => {
@@ -1038,7 +1069,15 @@ impl DocumentService for DocumentServiceImpl {
                     Ok(_) => {
                         match self.file_storage_service.get_file_data(file_path_to_check).await {
                             Ok(file_data) => {
-                                let new_log = NewDocumentAccessLog { document_id: id, user_id: auth.user_id, access_type: DocumentAccessType::Download.as_str().to_string(), details: None };
+                                let details = if doc.compression_status == CompressionStatus::Processing.as_str() {
+                                    Some("Downloaded original file during compression".to_string())
+                                } else if doc.compression_status == CompressionStatus::Completed.as_str() && file_path_to_check == doc.compressed_file_path.as_ref().unwrap() {
+                                    Some("Downloaded compressed file".to_string())
+                                } else {
+                                    None
+                                };
+                                
+                                let new_log = NewDocumentAccessLog { document_id: id, user_id: auth.user_id, access_type: DocumentAccessType::Download.as_str().to_string(), details };
                                 if let Err(e) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log document download for {}: {:?}", id, e); }
                                 Ok((doc.original_filename.clone(), Some(file_data)))
                             },
@@ -1052,17 +1091,33 @@ impl DocumentService for DocumentServiceImpl {
                         let details = Some(format!("File exists but is locked/inaccessible: {}", e));
                         let new_log = NewDocumentAccessLog { document_id: id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptDownload.as_str().to_string(), details };
                         if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log locked download attempt for {}: {:?}", id, log_err); }
-                        if doc.compression_status == CompressionStatus::Processing.as_str() { Err(ServiceError::Ui("Document is currently being compressed. Please try again shortly.".to_string())) } else { Err(ServiceError::Ui("Cannot access document file. It may be in use.".to_string())) }
+                        
+                        // *** IMPROVED: Better error messages ***
+                        if doc.compression_status == CompressionStatus::Processing.as_str() { 
+                            Err(ServiceError::Ui("Document file is temporarily locked during compression. Please try again in a moment.".to_string())) 
+                        } else { 
+                            Err(ServiceError::Ui("Cannot access document file. It may be in use by another process.".to_string())) 
+                        }
                     }
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let new_log = NewDocumentAccessLog { document_id: id, user_id: auth.user_id, access_type: DocumentAccessType::RequestDownload.as_str().to_string(), details: Some("File not found locally, requires download/sync".to_string()) };
-                if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log download request for {}: {:?}", id, log_err); }
-                Ok((doc.original_filename.clone(), None))
-            }
+                let details = Some(format!("File not found: {}", absolute_path.display()));
+                let new_log = NewDocumentAccessLog { document_id: id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptDownload.as_str().to_string(), details };
+                if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log missing file download attempt for {}: {:?}", id, log_err); }
+                
+                // *** IMPROVED: Suggest solutions ***
+                if doc.compression_status == CompressionStatus::Processing.as_str() {
+                    Err(ServiceError::Ui("Document is being compressed and the original file is temporarily unavailable. Please try again shortly.".to_string()))
+                } else {
+                    Err(ServiceError::Ui("Document file not found on device. It may need to be downloaded from the cloud.".to_string()))
+                }
+            },
             Err(e) => {
-                Err(ServiceError::Domain(DomainError::Internal(format!("Error checking document file: {}", e))))
+                let details = Some(format!("File system error: {}", e));
+                let new_log = NewDocumentAccessLog { document_id: id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptDownload.as_str().to_string(), details };
+                if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log file system error download attempt for {}: {:?}", id, log_err); }
+                Err(ServiceError::Domain(DomainError::Internal(format!("File system error: {}", e))))
             }
         }
     }
@@ -1081,12 +1136,23 @@ impl DocumentService for DocumentServiceImpl {
             return Err(ServiceError::Ui(format!("Document has an error status: {}", doc.description.unwrap_or_else(|| "Unknown error".to_string()))));
         }
 
-        // *** ADDED: Check compression status ***
+        // *** MODIFIED: Allow viewing during compression using original file ***
+        // Instead of blocking access during compression, we'll use the original file
+        // This provides better user experience while compression happens in background
         if doc.compression_status == CompressionStatus::Processing.as_str() {
-            // Log attempt to view while compressing
-            let new_log = NewDocumentAccessLog { document_id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptView.as_str().to_string(), details: Some("Attempted view during compression".to_string()) };
-            if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log view attempt during compression for {}: {:?}", document_id, log_err); }
-            return Err(ServiceError::Ui("Document is currently being compressed. Please try again shortly.".to_string()));
+            // Log that user is viewing during compression (for analytics)
+            let new_log = NewDocumentAccessLog { 
+                document_id, 
+                user_id: auth.user_id, 
+                access_type: DocumentAccessType::View.as_str().to_string(), 
+                details: Some("Viewing original file during compression".to_string()) 
+            };
+            if let Err(log_err) = self.doc_log_repo.create(&new_log).await { 
+                eprintln!("Failed to log view during compression for {}: {:?}", document_id, log_err); 
+            }
+            
+            // Continue with original file access instead of blocking
+            println!("📖 [DOCUMENT_OPEN] Document {} is being compressed, serving original file", document_id);
         }
 
         // *** ADDED: Register usage ***
@@ -1098,13 +1164,35 @@ impl DocumentService for DocumentServiceImpl {
             // Log error, but proceed with opening anyway
         }
 
-        let file_path_to_check = if let Some(compressed_path) = &doc.compressed_file_path { if doc.compression_status == CompressionStatus::Completed.as_str() { compressed_path } else { &doc.file_path } } else { &doc.file_path };
+        // *** MODIFIED: Smart file path selection ***
+        // Priority: 1) Completed compressed file, 2) Original file (even during compression)
+        let file_path_to_check = if let Some(compressed_path) = &doc.compressed_file_path {
+            if doc.compression_status == CompressionStatus::Completed.as_str() {
+                // Use compressed file if compression is completed
+                compressed_path
+            } else {
+                // Use original file if compression is in progress, pending, failed, or skipped
+                &doc.file_path
+            }
+        } else {
+            // No compressed file exists, use original
+            &doc.file_path
+        };
+        
         let absolute_path = self.file_storage_service.get_absolute_path(file_path_to_check);
         match fs::metadata(&absolute_path).await {
             Ok(_) => {
                 match fs::File::open(&absolute_path).await {
                     Ok(_) => {
-                        let new_log = NewDocumentAccessLog { document_id, user_id: auth.user_id, access_type: DocumentAccessType::View.as_str().to_string(), details: Some("Opened locally".to_string()) };
+                        let details = if doc.compression_status == CompressionStatus::Processing.as_str() {
+                            Some("Opened original file during compression".to_string())
+                        } else if doc.compression_status == CompressionStatus::Completed.as_str() && file_path_to_check == doc.compressed_file_path.as_ref().unwrap() {
+                            Some("Opened compressed file".to_string())
+                        } else {
+                            Some("Opened locally".to_string())
+                        };
+                        
+                        let new_log = NewDocumentAccessLog { document_id, user_id: auth.user_id, access_type: DocumentAccessType::View.as_str().to_string(), details };
                         if let Err(e) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log document view for {}: {:?}", document_id, e); }
                         #[cfg(target_os = "ios")] { let ios_path = format!("file://{}", absolute_path.display()); Ok(Some(ios_path)) }
                         #[cfg(not(target_os = "ios"))] { Ok(Some(absolute_path.to_string_lossy().to_string())) }
@@ -1113,18 +1201,33 @@ impl DocumentService for DocumentServiceImpl {
                         let details = Some(format!("File exists but is locked/inaccessible: {}", e));
                         let new_log = NewDocumentAccessLog { document_id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptView.as_str().to_string(), details };
                         if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log locked view attempt for {}: {:?}", document_id, log_err); }
-                        // Removed compression check here as it's done earlier
-                        Err(ServiceError::Ui("Cannot open document file. It may be in use.".to_string()))
+                        
+                        // *** IMPROVED: Better error messages ***
+                        if doc.compression_status == CompressionStatus::Processing.as_str() {
+                            Err(ServiceError::Ui("Document file is temporarily locked during compression. Please try again in a moment.".to_string()))
+                        } else {
+                            Err(ServiceError::Ui("Cannot access document file. It may be in use by another process.".to_string()))
+                        }
                     }
                 }
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let new_log = NewDocumentAccessLog { document_id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptView.as_str().to_string(), details: Some("File not found locally".to_string()) };
-                if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log view attempt for {}: {:?}", document_id, log_err); }
-                Ok(None)
+                let details = Some(format!("File not found: {}", absolute_path.display()));
+                let new_log = NewDocumentAccessLog { document_id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptView.as_str().to_string(), details };
+                if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log missing file view attempt for {}: {:?}", document_id, log_err); }
+                
+                // *** IMPROVED: Suggest solutions ***
+                if doc.compression_status == CompressionStatus::Processing.as_str() {
+                    Err(ServiceError::Ui("Document is being compressed and the original file is temporarily unavailable. Please try again shortly.".to_string()))
+                } else {
+                    Err(ServiceError::Ui("Document file not found on device. It may need to be downloaded from the cloud.".to_string()))
+                }
             },
             Err(e) => {
-                Err(ServiceError::Domain(DomainError::Internal(format!("Error checking document file: {}", e))))
+                let details = Some(format!("File system error: {}", e));
+                let new_log = NewDocumentAccessLog { document_id, user_id: auth.user_id, access_type: DocumentAccessType::AttemptView.as_str().to_string(), details };
+                if let Err(log_err) = self.doc_log_repo.create(&new_log).await { eprintln!("Failed to log file system error view attempt for {}: {:?}", document_id, log_err); }
+                Err(ServiceError::Domain(DomainError::Internal(format!("File system error: {}", e))))
             }
         }
     }

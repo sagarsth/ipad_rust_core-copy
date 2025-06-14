@@ -491,13 +491,43 @@ async fn export_media_documents(
             writeln!(file, "{}", json).map_err(|e| e.to_string())?;
 
             if include_blobs {
-                let rel_path = &doc.file_path;
-                let abs = file_storage.get_absolute_path(rel_path);
-                if abs.exists() {
+                let mut file_exported = false;
+                
+                // Try to export the best available file (compressed if completed, original otherwise)
+                let file_path_to_export = if doc.compression_status == "completed" && doc.compressed_file_path.is_some() {
+                    doc.compressed_file_path.as_ref().unwrap()
+                } else {
+                    &doc.file_path
+                };
+                
+                let abs_path = file_storage.get_absolute_path(file_path_to_export);
+                if abs_path.exists() {
                     let blobs_dir = dest_dir.join("blobs");
                     std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
-                    let file_name = abs.file_name().ok_or("bad file name")?;
-                    std::fs::copy(&abs, blobs_dir.join(file_name)).map_err(|e| e.to_string())?;
+                    if let Some(filename) = abs_path.file_name() {
+                        // Use original filename for consistency
+                        let export_filename = if file_path_to_export == &doc.file_path {
+                            filename.to_os_string()
+                        } else {
+                            // For compressed files, use original filename to maintain consistency
+                            std::ffi::OsString::from(&doc.original_filename)
+                        };
+                        std::fs::copy(&abs_path, blobs_dir.join(export_filename)).map_err(|e| e.to_string())?;
+                        file_exported = true;
+                    }
+                }
+                
+                // Fallback: if primary file failed and we have both paths, try the other one
+                if !file_exported && doc.compressed_file_path.is_some() && file_path_to_export != &doc.file_path {
+                    let fallback_path = &doc.file_path;
+                    let abs_fallback = file_storage.get_absolute_path(fallback_path);
+                    if abs_fallback.exists() {
+                        let blobs_dir = dest_dir.join("blobs");
+                        std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
+                        if let Some(filename) = abs_fallback.file_name() {
+                            std::fs::copy(&abs_fallback, blobs_dir.join(&doc.original_filename)).map_err(|e| e.to_string())?;
+                        }
+                    }
                 }
             }
         }
@@ -921,13 +951,43 @@ async fn export_media_documents_by_date_range(
             writeln!(file, "{}", json).map_err(|e| e.to_string())?;
 
             if include_blobs {
-                let rel_path = &doc.file_path;
-                let abs = file_storage.get_absolute_path(rel_path);
-                if abs.exists() {
+                let mut file_exported = false;
+                
+                // Try to export the best available file (compressed if completed, original otherwise)
+                let file_path_to_export = if doc.compression_status == "completed" && doc.compressed_file_path.is_some() {
+                    doc.compressed_file_path.as_ref().unwrap()
+                } else {
+                    &doc.file_path
+                };
+                
+                let abs_path = file_storage.get_absolute_path(file_path_to_export);
+                if abs_path.exists() {
                     let blobs_dir = dest_dir.join("blobs");
                     std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
-                    let file_name = abs.file_name().ok_or("bad file name")?;
-                    std::fs::copy(&abs, blobs_dir.join(file_name)).map_err(|e| e.to_string())?;
+                    if let Some(filename) = abs_path.file_name() {
+                        // Use original filename for consistency
+                        let export_filename = if file_path_to_export == &doc.file_path {
+                            filename.to_os_string()
+                        } else {
+                            // For compressed files, use original filename to maintain consistency
+                            std::ffi::OsString::from(&doc.original_filename)
+                        };
+                        std::fs::copy(&abs_path, blobs_dir.join(export_filename)).map_err(|e| e.to_string())?;
+                        file_exported = true;
+                    }
+                }
+                
+                // Fallback: if primary file failed and we have both paths, try the other one
+                if !file_exported && doc.compressed_file_path.is_some() && file_path_to_export != &doc.file_path {
+                    let fallback_path = &doc.file_path;
+                    let abs_fallback = file_storage.get_absolute_path(fallback_path);
+                    if abs_fallback.exists() {
+                        let blobs_dir = dest_dir.join("blobs");
+                        std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
+                        if let Some(filename) = abs_fallback.file_name() {
+                            std::fs::copy(&abs_fallback, blobs_dir.join(&doc.original_filename)).map_err(|e| e.to_string())?;
+                        }
+                    }
                 }
             }
         }
@@ -1134,13 +1194,42 @@ async fn export_media_documents_by_ids(
 
         // Handle blob export if requested and entity has file_path
         if include_blobs {
-            let rel_path = &entity.file_path;
-            let abs_path = file_storage.get_absolute_path(rel_path);
+            let mut file_exported = false;
+            
+            // Try to export the best available file (compressed if completed, original otherwise)
+            let file_path_to_export = if entity.compression_status == "completed" && entity.compressed_file_path.is_some() {
+                entity.compressed_file_path.as_ref().unwrap()
+            } else {
+                &entity.file_path
+            };
+            
+            let abs_path = file_storage.get_absolute_path(file_path_to_export);
             if abs_path.exists() {
                 let blobs_dir = dest_dir.join("blobs");
                 std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
                 if let Some(filename) = abs_path.file_name() {
-                    std::fs::copy(&abs_path, blobs_dir.join(filename)).map_err(|e| e.to_string())?;
+                    // Use original filename for consistency
+                    let export_filename = if file_path_to_export == &entity.file_path {
+                        filename.to_os_string()
+                    } else {
+                        // For compressed files, use original filename to maintain consistency
+                        std::ffi::OsString::from(&entity.original_filename)
+                    };
+                    std::fs::copy(&abs_path, blobs_dir.join(export_filename)).map_err(|e| e.to_string())?;
+                    file_exported = true;
+                }
+            }
+            
+            // Fallback: if primary file failed and we have both paths, try the other one
+            if !file_exported && entity.compressed_file_path.is_some() && file_path_to_export != &entity.file_path {
+                let fallback_path = &entity.file_path;
+                let abs_fallback = file_storage.get_absolute_path(fallback_path);
+                if abs_fallback.exists() {
+                    let blobs_dir = dest_dir.join("blobs");
+                    std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
+                    if let Some(filename) = abs_fallback.file_name() {
+                        std::fs::copy(&abs_fallback, blobs_dir.join(&entity.original_filename)).map_err(|e| e.to_string())?;
+                    }
                 }
             }
         }

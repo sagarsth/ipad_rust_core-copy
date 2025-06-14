@@ -8,6 +8,13 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import PhotosUI
+import QuickLook
+
+// MARK: - Identifiable URL wrapper for QuickLook
+struct IdentifiableURL: Identifiable {
+    let id = UUID()
+    let url: URL
+}
 
 // MARK: - Scroll Offset Preference Key
 struct ScrollOffsetPreferenceKey: PreferenceKey {
@@ -52,6 +59,10 @@ struct StrategicGoalsView: View {
     @State private var onTrackGoals = 0
     @State private var atRiskGoals = 0
     @State private var completedGoals = 0
+    
+    // Document viewing state
+    @State private var selectedDocumentURL: IdentifiableURL?
+    @State private var isOpeningDocument = false
     
     // Computed property to determine if we should hide the top section
     private var shouldHideTopSection: Bool {
@@ -153,6 +164,22 @@ struct StrategicGoalsView: View {
             GoalDetailView(goal: goal, onUpdate: {
                 loadGoals()
             })
+        }
+        .fullScreenCover(item: $selectedDocumentURL) { identifiableURL in
+            NavigationView {
+                QuickLookView(url: identifiableURL.url) {
+                    // Cleanup when document viewer is dismissed
+                    selectedDocumentURL = nil
+                }
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button("Close") {
+                            selectedDocumentURL = nil
+                        }
+                    }
+                }
+            }
         }
         .alert("Error", isPresented: $showErrorAlert) {
             Button("OK") { }
@@ -873,6 +900,116 @@ struct StrategicGoalsView: View {
         guard let data = try? JSONEncoder().encode(object) else { return nil }
         return String(data: data, encoding: .utf8)
     }
+    
+    /// Open a document for viewing
+    private func openDocument(_ document: MediaDocumentResponse) {
+        guard !isOpeningDocument else { return }
+        
+        isOpeningDocument = true
+        
+        Task {
+            guard let currentUser = authManager.currentUser else {
+                await MainActor.run {
+                    self.errorMessage = "User not authenticated."
+                    self.showErrorAlert = true
+                    self.isOpeningDocument = false
+                }
+                return
+            }
+            
+            let authContext = AuthCtxDto(
+                userId: currentUser.userId,
+                role: currentUser.role,
+                deviceId: authManager.getDeviceId(),
+                offlineMode: false
+            )
+            
+            print("📖 [DOCUMENT_OPEN] Opening document: \(document.title ?? document.originalFilename)")
+            
+            let result = await documentHandler.openDocument(id: document.id, auth: authContext)
+            
+            await MainActor.run {
+                self.isOpeningDocument = false
+                
+                switch result {
+                case .success(let openResponse):
+                    if let filePath = openResponse.filePath {
+                        print("📖 [DOCUMENT_OPEN] ✅ Got file path: \(filePath)")
+                        
+                        // Convert file path to URL
+                        let fileURL: URL
+                        if filePath.hasPrefix("file://") {
+                            fileURL = URL(string: filePath)!
+                        } else {
+                            fileURL = URL(fileURLWithPath: filePath)
+                        }
+                        
+                        // Check if file exists before trying to open
+                        if FileManager.default.fileExists(atPath: fileURL.path) {
+                            print("📖 [DOCUMENT_OPEN] ✅ File exists, opening with QuickLook")
+                            
+                            // Debug: Check actual file type vs filename
+                            let filename = fileURL.lastPathComponent
+                            let fileExtension = (filename as NSString).pathExtension.lowercased()
+                            print("📖 [DOCUMENT_OPEN] File extension from name: .\(fileExtension)")
+                            
+                            // Try to detect actual file type by reading file header
+                            if let fileData = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]) {
+                                let fileSize = fileData.count
+                                print("📖 [DOCUMENT_OPEN] Actual file size: \(fileSize) bytes")
+                                
+                                if fileSize >= 8 {
+                                    let header = fileData.prefix(8)
+                                    let headerHex = header.map { String(format: "%02x", $0) }.joined()
+                                    print("📖 [DOCUMENT_OPEN] File header (hex): \(headerHex)")
+                                    
+                                    // Check for common video file signatures
+                                    if headerHex.hasPrefix("00000018") || headerHex.hasPrefix("00000020") {
+                                        print("📖 [DOCUMENT_OPEN] 🎬 DETECTED: This appears to be an MP4 video file!")
+                                    } else if headerHex.hasPrefix("ffd8ff") {
+                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a JPEG image file")
+                                    } else if headerHex.hasPrefix("89504e47") {
+                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a PNG image file")
+                                    } else {
+                                        print("📖 [DOCUMENT_OPEN] ❓ DETECTED: Unknown file type with header: \(headerHex)")
+                                    }
+                                }
+                            }
+                            
+                            // Open with QuickLook
+                            self.selectedDocumentURL = IdentifiableURL(url: fileURL)
+                        } else {
+                            print("📖 [DOCUMENT_OPEN] ❌ File does not exist at path: \(fileURL.path)")
+                            self.errorMessage = "Document file not found on device. It may need to be downloaded first."
+                            self.showErrorAlert = true
+                        }
+                    } else {
+                        print("📖 [DOCUMENT_OPEN] ❌ No file path returned")
+                        self.errorMessage = "Document is not available locally. It may need to be downloaded first."
+                        self.showErrorAlert = true
+                    }
+                    
+                case .failure(let error):
+                    print("📖 [DOCUMENT_OPEN] ❌ Failed to open document: \(error)")
+                    
+                    // Check if it's a compression-related error
+                    let errorMessage = error.localizedDescription
+                    if errorMessage.contains("being compressed") {
+                        self.errorMessage = "Document is currently being compressed. You can still view it, but there may be a brief delay."
+                        self.showErrorAlert = true
+                        
+                        // Try again after a short delay for compression case
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self.openDocument(document)
+                        }
+                    } else {
+                        self.errorMessage = "Failed to open document: \(errorMessage)"
+                        self.showErrorAlert = true
+                    }
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Goal Card Component
@@ -1224,6 +1361,9 @@ struct GoalDetailView: View {
     @State private var showErrorAlert = false
     @State private var errorMessage: String?
     
+    // Document viewing state
+    @State private var selectedDocumentURL: IdentifiableURL?
+    
     var body: some View {
         NavigationView {
             ScrollView {
@@ -1342,7 +1482,10 @@ struct GoalDetailView: View {
                                 .padding(.vertical, 20)
                         } else {
                             ForEach(documents, id: \.id) { doc in
-                                MediaDocumentRow(document: doc)
+                                MediaDocumentRow(
+                                    document: doc,
+                                    onTap: { openDocument(doc) }
+                                )
                             }
                         }
                     }
@@ -1388,6 +1531,22 @@ struct GoalDetailView: View {
                 GoalDeleteOptionsSheet(onDelete: { hardDelete in
                     deleteGoal(hardDelete: hardDelete)
                 })
+            }
+            .fullScreenCover(item: $selectedDocumentURL) { identifiableURL in
+                NavigationView {
+                    QuickLookView(url: identifiableURL.url) {
+                        // Cleanup when document viewer is dismissed
+                        selectedDocumentURL = nil
+                    }
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarLeading) {
+                            Button("Close") {
+                                selectedDocumentURL = nil
+                            }
+                        }
+                    }
+                }
             }
             .onAppear {
                 loadDocuments()
@@ -1514,6 +1673,104 @@ struct GoalDetailView: View {
             }
         }
     }
+    
+    /// Open a document for viewing
+    private func openDocument(_ document: MediaDocumentResponse) {
+        Task {
+            guard let currentUser = authManager.currentUser else {
+                await MainActor.run {
+                    self.errorMessage = "User not authenticated."
+                    self.showErrorAlert = true
+                }
+                return
+            }
+            
+            let authContext = AuthCtxDto(
+                userId: currentUser.userId,
+                role: currentUser.role,
+                deviceId: authManager.getDeviceId(),
+                offlineMode: false
+            )
+            
+            print("📖 [DOCUMENT_OPEN] Opening document: \(document.title ?? document.originalFilename)")
+            
+            let result = await documentHandler.openDocument(id: document.id, auth: authContext)
+            
+            await MainActor.run {
+                switch result {
+                case .success(let openResponse):
+                    if let filePath = openResponse.filePath {
+                        print("📖 [DOCUMENT_OPEN] ✅ Got file path: \(filePath)")
+                        
+                        // Convert file path to URL
+                        let fileURL: URL
+                        if filePath.hasPrefix("file://") {
+                            fileURL = URL(string: filePath)!
+                        } else {
+                            fileURL = URL(fileURLWithPath: filePath)
+                        }
+                        
+                        // Check if file exists before trying to open
+                        if FileManager.default.fileExists(atPath: fileURL.path) {
+                            print("📖 [DOCUMENT_OPEN] ✅ File exists, opening with QuickLook")
+                            
+                            // Debug: Check actual file type vs filename
+                            let filename = fileURL.lastPathComponent
+                            let fileExtension = (filename as NSString).pathExtension.lowercased()
+                            print("📖 [DOCUMENT_OPEN] File extension from name: .\(fileExtension)")
+                            
+                            // Try to detect actual file type by reading file header
+                            if let fileData = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]) {
+                                let fileSize = fileData.count
+                                print("📖 [DOCUMENT_OPEN] Actual file size: \(fileSize) bytes")
+                                
+                                if fileSize >= 8 {
+                                    let header = fileData.prefix(8)
+                                    let headerHex = header.map { String(format: "%02x", $0) }.joined()
+                                    print("📖 [DOCUMENT_OPEN] File header (hex): \(headerHex)")
+                                    
+                                    // Check for common video file signatures
+                                    if headerHex.hasPrefix("00000018") || headerHex.hasPrefix("00000020") {
+                                        print("📖 [DOCUMENT_OPEN] 🎬 DETECTED: This appears to be an MP4 video file!")
+                                    } else if headerHex.hasPrefix("ffd8ff") {
+                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a JPEG image file")
+                                    } else if headerHex.hasPrefix("89504e47") {
+                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a PNG image file")
+                                    } else {
+                                        print("📖 [DOCUMENT_OPEN] ❓ DETECTED: Unknown file type with header: \(headerHex)")
+                                    }
+                                }
+                            }
+                            
+                            // Open with QuickLook
+                            self.selectedDocumentURL = IdentifiableURL(url: fileURL)
+                        } else {
+                            print("📖 [DOCUMENT_OPEN] ❌ File does not exist at path: \(fileURL.path)")
+                            self.errorMessage = "Document file not found on device. It may need to be downloaded first."
+                            self.showErrorAlert = true
+                        }
+                    } else {
+                        print("📖 [DOCUMENT_OPEN] ❌ No file path returned")
+                        self.errorMessage = "Document is not available locally. It may need to be downloaded first."
+                        self.showErrorAlert = true
+                    }
+                    
+                case .failure(let error):
+                    print("📖 [DOCUMENT_OPEN] ❌ Failed to open document: \(error)")
+                    
+                    // Check if it's a compression-related error
+                    let errorMessage = error.localizedDescription
+                    if errorMessage.contains("being compressed") {
+                        self.errorMessage = "Document is currently being compressed. You can still view it, but there may be a brief delay."
+                        self.showErrorAlert = true
+                    } else {
+                        self.errorMessage = "Failed to open document: \(errorMessage)"
+                        self.showErrorAlert = true
+                    }
+                }
+            }
+        }
+    }
 }
 
 // MARK: - Helper extensions for GoalDetailView
@@ -1586,6 +1843,7 @@ struct Badge: View {
 // MARK: - Media Document Row
 struct MediaDocumentRow: View {
     let document: MediaDocumentResponse
+    let onTap: () -> Void
     
     var body: some View {
         HStack {
@@ -1628,6 +1886,10 @@ struct MediaDocumentRow: View {
         }
         .padding(.vertical, 8)
         .opacity((document.hasError == true) ? 0.5 : 1.0)
+        .contentShape(Rectangle()) // Make entire row tappable
+        .onTapGesture {
+            onTap()
+        }
     }
     
     private func fileIcon(for filename: String) -> String {
@@ -1957,6 +2219,11 @@ struct DocumentUploadSheet: View {
                         }
                         .buttonStyle(PlainButtonStyle())
                         .onChange(of: selectedPhotos) { _, newPhotos in
+                            print("📸 [PHOTOS_PICKER] onChange triggered with \(newPhotos.count) items")
+                            for (index, photo) in newPhotos.enumerated() {
+                                print("📸 [PHOTOS_PICKER] Item \(index + 1): \(photo.itemIdentifier ?? "no-id")")
+                                print("📸 [PHOTOS_PICKER] Item \(index + 1) types: \(photo.supportedContentTypes.map(\.identifier))")
+                            }
                             handlePhotoSelection(newPhotos)
                         }
                     }
@@ -2229,9 +2496,21 @@ struct DocumentUploadSheet: View {
                 print("📸 [PHOTO_\(index + 1)/\(newPhotos.count)] Processing photo: \(photo.itemIdentifier ?? "unknown")")
                 print("📸 [PHOTO_\(index + 1)] Supported content types: \(photo.supportedContentTypes.map(\.identifier))")
                 
+                // Debug: Check if this looks like a video
+                let hasVideoType = photo.supportedContentTypes.contains { type in
+                    type.conforms(to: .mpeg4Movie) || 
+                    type.conforms(to: .quickTimeMovie) || 
+                    type.identifier.contains("video") ||
+                    type.identifier.contains("mp4") ||
+                    type.identifier.contains("quicktime")
+                }
+                print("📸 [PHOTO_\(index + 1)] Has video type indicators: \(hasVideoType)")
+                
                 do {
                     // iOS OPTIMIZATION: Use loadTransferable with Data but immediately write to temp file
                     // This minimizes memory usage compared to keeping data in memory
+                    print("📸 [PHOTO_\(index + 1)] Attempting to load transferable data...")
+                    
                     if let data = try await photo.loadTransferable(type: Data.self) {
                         print("📸 [PHOTO_\(index + 1)] Successfully loaded photo data: \(data.count) bytes")
                         
@@ -2243,8 +2522,13 @@ struct DocumentUploadSheet: View {
                         }
                         
                         // Generate filename based on photo identifier and supported types
+                        print("📸 [PHOTO_\(index + 1)] Calling generatePhotoFilename...")
                         let filename = generatePhotoFilename(for: photo)
                         print("📸 [PHOTO_\(index + 1)] Generated filename: \(filename)")
+                        
+                        // Debug: Check if filename indicates video
+                        let isVideoFilename = filename.contains("video_") || filename.hasSuffix(".mp4") || filename.hasSuffix(".mov")
+                        print("📸 [PHOTO_\(index + 1)] Is video filename: \(isVideoFilename)")
                         
                         // iOS OPTIMIZATION: Immediately write to temp file to free memory
                         let tempDir = FileManager.default.temporaryDirectory
@@ -2275,11 +2559,12 @@ struct DocumentUploadSheet: View {
                             }
                         }
                     } else {
-                        print("📸 [PHOTO_\(index + 1)] ❌ Failed to load photo data")
+                        print("📸 [PHOTO_\(index + 1)] ❌ Failed to load photo data - loadTransferable returned nil")
                         failureCount += 1
                     }
                 } catch {
                     print("📸 [PHOTO_\(index + 1)] ❌ Error processing photo: \(error)")
+                    print("📸 [PHOTO_\(index + 1)] Error details: \(error.localizedDescription)")
                     failureCount += 1
                 }
             }
@@ -2316,50 +2601,133 @@ struct DocumentUploadSheet: View {
             let timestamp = Date().timeIntervalSince1970
             let shortId = String(identifier.prefix(8))
             
-            // Use provided content type or try to determine from supported types
+            // Debug: Print all supported content types for troubleshooting
+            print("📸 [FILENAME_GEN] Photo \(shortId) supported types: \(photo.supportedContentTypes.map(\.identifier))")
+            print("📸 [FILENAME_GEN] Starting video detection for \(photo.supportedContentTypes.count) types...")
+            
+            // PRIORITY 1: Check ALL supported types for video indicators FIRST
+            for (index, supportedType) in photo.supportedContentTypes.enumerated() {
+                print("📸 [FILENAME_GEN] [\(index + 1)/\(photo.supportedContentTypes.count)] Checking type: \(supportedType.identifier)")
+                
+                // MP4 video detection - multiple ways to detect (MOST SPECIFIC FIRST)
+                if supportedType.identifier == "public.mpeg-4" {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via exact match: \(supportedType.identifier)")
+                    return "video_\(shortId)_\(Int(timestamp)).mp4"
+                }
+                
+                if supportedType.identifier == "com.apple.quicktime-movie" {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via exact match: \(supportedType.identifier)")
+                    return "video_\(shortId)_\(Int(timestamp)).mov"
+                }
+                
+                if supportedType.identifier.contains("mpeg-4") {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via contains mpeg-4: \(supportedType.identifier)")
+                    return "video_\(shortId)_\(Int(timestamp)).mp4"
+                }
+                
+                if supportedType.identifier.contains("mp4") {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via contains mp4: \(supportedType.identifier)")
+                    return "video_\(shortId)_\(Int(timestamp)).mp4"
+                }
+                
+                if supportedType.identifier.contains("quicktime") {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via contains quicktime: \(supportedType.identifier)")
+                    return "video_\(shortId)_\(Int(timestamp)).mov"
+                }
+                
+                if supportedType.identifier.contains("video") {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED GENERIC VIDEO via contains video: \(supportedType.identifier)")
+                    return "video_\(shortId)_\(Int(timestamp)).mp4"
+                }
+                
+                // UTType conformance checks (might be more reliable)
+                if supportedType.conforms(to: .mpeg4Movie) {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via UTType.mpeg4Movie conformance: \(supportedType.identifier)")
+                    return "video_\(shortId)_\(Int(timestamp)).mp4"
+                }
+                
+                if supportedType.conforms(to: .quickTimeMovie) {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via UTType.quickTimeMovie conformance: \(supportedType.identifier)")
+                    return "video_\(shortId)_\(Int(timestamp)).mov"
+                }
+                
+                if supportedType.conforms(to: .video) {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED GENERIC VIDEO via UTType.video conformance: \(supportedType.identifier)")
+                    return "video_\(shortId)_\(Int(timestamp)).mp4"
+                }
+                
+                print("📸 [FILENAME_GEN] [\(index + 1)/\(photo.supportedContentTypes.count)] ❌ No video match for: \(supportedType.identifier)")
+            }
+            
+            print("📸 [FILENAME_GEN] ⚠️ No video types detected in primary loop, checking image types...")
+            
+            // PRIORITY 2: Check provided content type or first supported type for images
             let typeToCheck = contentType ?? photo.supportedContentTypes.first
             
             if let type = typeToCheck {
+                print("📸 [FILENAME_GEN] Checking primary type: \(type.identifier)")
+                
+                // Image types (only after video check fails)
                 if type.conforms(to: .heif) || type.identifier == "public.heif" {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED HEIF IMAGE")
                     return "photo_\(shortId)_\(Int(timestamp)).heif"
                 } else if type.conforms(to: .heic) || type.identifier == "public.heic" {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED HEIC IMAGE")
                     return "photo_\(shortId)_\(Int(timestamp)).heic"
                 } else if type.conforms(to: .jpeg) || type.identifier == "public.jpeg" {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED JPEG IMAGE")
                     return "photo_\(shortId)_\(Int(timestamp)).jpg"
                 } else if type.conforms(to: .png) || type.identifier == "public.png" {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED PNG IMAGE")
                     return "photo_\(shortId)_\(Int(timestamp)).png"
-                } else if type.conforms(to: .quickTimeMovie) || type.identifier == "com.apple.quicktime-movie" {
-                    return "video_\(shortId)_\(Int(timestamp)).mov"
-                } else if type.conforms(to: .mpeg4Movie) || type.identifier == "public.mpeg-4" {
-                    return "video_\(shortId)_\(Int(timestamp)).mp4"
                 } else if type.conforms(to: .webP) {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED WebP IMAGE")
                     return "photo_\(shortId)_\(Int(timestamp)).webp"
                 } else if type.conforms(to: .gif) {
+                    print("📸 [FILENAME_GEN] ✅ DETECTED GIF IMAGE")
                     return "photo_\(shortId)_\(Int(timestamp)).gif"
                 }
             }
             
-            // Try to determine the type from supported types (fallback)
+            // PRIORITY 3: Standard image fallbacks based on supported types
             if photo.supportedContentTypes.contains(.heif) || photo.supportedContentTypes.contains(.heic) {
+                print("📸 [FILENAME_GEN] ✅ FALLBACK: HEIC IMAGE")
                 return "photo_\(shortId)_\(Int(timestamp)).heic"
             } else if photo.supportedContentTypes.contains(.jpeg) {
+                print("📸 [FILENAME_GEN] ✅ FALLBACK: JPEG IMAGE")
                 return "photo_\(shortId)_\(Int(timestamp)).jpg"
             } else if photo.supportedContentTypes.contains(.png) {
+                print("📸 [FILENAME_GEN] ✅ FALLBACK: PNG IMAGE")
                 return "photo_\(shortId)_\(Int(timestamp)).png"
-            } else if photo.supportedContentTypes.contains(.quickTimeMovie) {
-                return "video_\(shortId)_\(Int(timestamp)).mov"
-            } else if photo.supportedContentTypes.contains(.mpeg4Movie) {
-                return "video_\(shortId)_\(Int(timestamp)).mp4"
             }
         }
         
-        // Fallback filename
+        // FINAL FALLBACK - but make it more specific
         let timestamp = Date().timeIntervalSince1970
-        return "media_\(Int(timestamp)).jpg"
+        print("📸 [FILENAME_GEN] ⚠️ Using final fallback filename")
+        print("📸 [FILENAME_GEN] ⚠️ All supported types: \(photo.supportedContentTypes.map(\.identifier))")
+        
+        // Even in fallback, try to detect video from supported types
+        for supportedType in photo.supportedContentTypes {
+            if supportedType.identifier == "public.mpeg-4" {
+                print("📸 [FILENAME_GEN] 🎬 FINAL FALLBACK: Detected MP4 in fallback!")
+                return "video_fallback_\(Int(timestamp)).mp4"
+            }
+        }
+        
+        return "media_\(Int(timestamp)).unknown"
     }
     
     private func detectDocumentType(from filename: String) -> String {
         let fileExtension = (filename as NSString).pathExtension.lowercased()
+        
+        // Special handling for generated filenames
+        if filename.contains("video_") && (fileExtension == "mp4" || fileExtension == "mov" || fileExtension == "unknown") {
+            return "Video"
+        }
+        if filename.contains("photo_") && (fileExtension == "jpg" || fileExtension == "png" || fileExtension == "heic" || fileExtension == "unknown") {
+            return "Image"
+        }
         
         // Map extensions to match backend document type initialization
         switch fileExtension {
@@ -2398,6 +2766,16 @@ struct DocumentUploadSheet: View {
         // Data - matches backend: "db" | "sqlite" | "backup"
         case "db", "sqlite", "backup": 
             return "Data"
+            
+        // Handle unknown extensions by looking at filename patterns
+        case "unknown":
+            if filename.contains("video_") {
+                return "Video"
+            } else if filename.contains("photo_") {
+                return "Image"
+            } else {
+                return "Document" // Default fallback
+            }
             
         default: 
             return "Unknown (\(fileExtension))"
@@ -3068,4 +3446,63 @@ struct GoalDeleteOptionsSheet: View {
 
 // MARK: - Strategic Goal Table Row
 // Note: StrategicGoalTableRow is defined in Core/Components/StrategicGoalTableRow.swift
+
+// MARK: - QuickLook Support
+struct QuickLookView: UIViewControllerRepresentable {
+    let url: URL
+    let onDismiss: (() -> Void)?
+    
+    init(url: URL, onDismiss: (() -> Void)? = nil) {
+        self.url = url
+        self.onDismiss = onDismiss
+    }
+    
+    func makeUIViewController(context: Context) -> QLPreviewController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        controller.delegate = context.coordinator
+        return controller
+    }
+    
+    func updateUIViewController(_ uiViewController: QLPreviewController, context: Context) {
+        // Check if the URL has changed and needs reload
+        if context.coordinator.url != url {
+            context.coordinator.url = url
+            uiViewController.reloadData()
+        }
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(url: url, onDismiss: onDismiss)
+    }
+    
+    class Coordinator: NSObject, QLPreviewControllerDataSource, QLPreviewControllerDelegate {
+        var url: URL
+        let onDismiss: (() -> Void)?
+        
+        init(url: URL, onDismiss: (() -> Void)? = nil) {
+            self.url = url
+            self.onDismiss = onDismiss
+        }
+        
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+        
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+            // Ensure the file exists before attempting to preview
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                print("📖 [QUICKLOOK] File does not exist at path: \(url.path)")
+                // Return the URL anyway - QuickLook will show an appropriate error
+                return url as QLPreviewItem
+            }
+            
+            print("📖 [QUICKLOOK] Previewing file: \(url.lastPathComponent)")
+            return url as QLPreviewItem
+        }
+        
+        func previewControllerWillDismiss(_ controller: QLPreviewController) {
+            print("📖 [QUICKLOOK] Document viewer will dismiss")
+            onDismiss?()
+        }
+    }
+}
 

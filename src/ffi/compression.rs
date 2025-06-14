@@ -40,6 +40,7 @@ use sqlx::Row;
 use crate::auth::AuthContext;
 use crate::types::UserRole;
 use std::str::FromStr;
+use tokio::sync::oneshot;
 
 /// Ensure pointer is not null
 macro_rules! ensure_ptr {
@@ -344,13 +345,25 @@ pub unsafe extern "C" fn compression_update_priority(payload_json: *const c_char
     if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
 }
 
-/// Bulk update compression priorities
+/// Bulk update compression priorities (optimized for large batches)
 /// Input: {"document_ids": ["uuid", ...], "priority": "HIGH|NORMAL|LOW|BACKGROUND"}
-/// Output: {"updated_count": number} JSON
+/// Output: {"updated_count": number, "processing_time_ms": number} JSON
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn compression_bulk_update_priority(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     let json_result = handle_json_result(|| -> FFIResult<serde_json::Value> {
+        let start_time = std::time::Instant::now();
+        
         let request: BulkUpdatePriorityRequest = parse_json_input(payload_json)?;
+        
+        // Validate batch size for performance
+        if request.document_ids.len() > 1000 {
+            return Err(FFIError::with_details(
+                ErrorCode::InvalidArgument,
+                "Batch size too large",
+                "Maximum 1000 documents per batch operation"
+            ));
+        }
+        
         let document_ids: Result<Vec<Uuid>, _> = request.document_ids.iter()
             .map(|id_str| Uuid::parse_str(id_str))
             .collect();
@@ -365,7 +378,12 @@ pub unsafe extern "C" fn compression_bulk_update_priority(payload_json: *const c
                 .map_err(|e| to_ffi_error(e))
         })?;
         
-        Ok(serde_json::json!({"updated_count": updated_count}))
+        let processing_time = start_time.elapsed().as_millis() as u64;
+        
+        Ok(serde_json::json!({
+            "updated_count": updated_count,
+            "processing_time_ms": processing_time
+        }))
     });
     
     if !result.is_null() {
@@ -889,33 +907,132 @@ pub unsafe extern "C" fn compression_debug_info(result: *mut *mut c_char) -> c_i
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn compression_handle_memory_pressure(level: c_int) -> c_int {
     handle_status_result(|| -> FFIResult<()> {
-        match level {
-            0 => {
-                // Normal - resume normal operations
-                eprintln!("🟢 [MEMORY] Normal memory pressure - resuming operations");
-            },
-            1 => {
-                // Warning - reduce concurrency, clear caches
-                eprintln!("🟡 [MEMORY] Memory warning - reducing compression activity");
-                // Could pause non-critical compressions here
-            },
-            2 => {
-                // Critical - pause all compression, clean up
-                eprintln!("🔴 [MEMORY] Critical memory pressure - pausing compression");
-                // Could pause the compression queue entirely
-            },
-            _ => {
-                return Err(FFIError::invalid_argument("Memory pressure level must be 0-2"));
-            }
+        if level < 0 || level > 2 {
+            return Err(FFIError::invalid_argument("Memory pressure level must be 0-2"));
         }
         
-        // For now, just log. In a full implementation, you'd want to:
-        // - Pause/resume compression workers based on level
-        // - Clear internal caches
-        // - Cancel low-priority operations
+                // Get the compression worker sender directly
+        let worker_sender = globals::get_compression_worker_sender()?;
         
-        Ok(())
+        crate::ffi::block_on_async(async {
+            let (response_sender, response_receiver) = oneshot::channel();
+            
+            if let Err(_) = worker_sender.send(crate::domains::compression::worker::CompressionWorkerMessage::HandleMemoryPressure {
+                level: level as u8,
+                response: response_sender,
+            }).await {
+                return Err(FFIError::internal("Failed to send memory pressure message to worker".to_string()));
+            }
+            
+            // Wait for confirmation
+            let _ = response_receiver.await;
+            
+            println!("🍎 [FFI] Memory pressure level {} handled by worker", level);
+            Ok(())
+        })
     })
+}
+
+/// Update iOS device state from Swift
+/// Expected JSON payload:
+/// {
+///   "battery_level": 0.85,
+///   "is_charging": false,
+///   "thermal_state": 0, // 0=nominal, 1=fair, 2=serious, 3=critical
+///   "app_state": "active", // "active", "background", "inactive"
+///   "available_memory_mb": 512
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_update_ios_state(payload_json: *const c_char) -> c_int {
+    handle_status_result(|| -> FFIResult<()> {
+        #[derive(Deserialize)]
+        struct IOSStateUpdate {
+            battery_level: f32,
+            is_charging: bool,
+            thermal_state: u8,
+            app_state: String,
+            available_memory_mb: Option<u64>,
+        }
+        
+        let request: IOSStateUpdate = parse_json_input(payload_json)?;
+        
+        // Validate thermal state
+        let thermal_state = match request.thermal_state {
+            0 => crate::domains::compression::types::IOSThermalState::Nominal,
+            1 => crate::domains::compression::types::IOSThermalState::Fair,
+            2 => crate::domains::compression::types::IOSThermalState::Serious,
+            3 => crate::domains::compression::types::IOSThermalState::Critical,
+            _ => return Err(FFIError::invalid_argument("thermal_state must be 0-3")),
+        };
+        
+        // Validate app state
+        let app_state = match request.app_state.to_lowercase().as_str() {
+            "active" => crate::domains::compression::types::IOSAppState::Active,
+            "background" => crate::domains::compression::types::IOSAppState::Background,
+            "inactive" => crate::domains::compression::types::IOSAppState::Inactive,
+            _ => return Err(FFIError::invalid_argument("app_state must be 'active', 'background', or 'inactive'")),
+        };
+        
+        // Validate battery level
+        if request.battery_level < 0.0 || request.battery_level > 1.0 {
+            return Err(FFIError::invalid_argument("battery_level must be between 0.0 and 1.0"));
+        }
+        
+                // Get the compression worker sender directly
+        let worker_sender = globals::get_compression_worker_sender()?;
+        
+        crate::ffi::block_on_async(async {
+            let (response_sender, response_receiver) = oneshot::channel();
+            
+            if let Err(_) = worker_sender.send(crate::domains::compression::worker::CompressionWorkerMessage::UpdateIOSState {
+                battery_level: request.battery_level,
+                is_charging: request.is_charging,
+                thermal_state,
+                app_state,
+                available_memory_mb: request.available_memory_mb,
+                response: response_sender,
+            }).await {
+                return Err(FFIError::internal("Failed to send iOS state update to worker".to_string()));
+            }
+            
+            // Wait for confirmation
+            let _ = response_receiver.await;
+            
+            println!("🍎 [FFI] iOS state updated: battery={:.0}%, charging={}, thermal={:?}, app={:?}", 
+                     request.battery_level * 100.0, request.is_charging, thermal_state, app_state);
+            Ok(())
+        })
+    })
+}
+
+/// Get iOS-enhanced worker status  
+/// Output: IOSWorkerStatus JSON
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_get_ios_status(result: *mut *mut c_char) -> c_int {
+        let json_result = handle_json_result(|| -> FFIResult<_> {
+        let worker_sender = globals::get_compression_worker_sender()?;
+        
+        crate::ffi::block_on_async(async {
+            let (response_sender, response_receiver) = oneshot::channel();
+            
+            if let Err(_) = worker_sender.send(crate::domains::compression::worker::CompressionWorkerMessage::GetIOSStatus {
+                response: response_sender,
+            }).await {
+                return Err(FFIError::internal("Failed to request iOS status from worker".to_string()));
+            }
+            
+            // Wait for response
+            match response_receiver.await {
+                Ok(status) => Ok(status),
+                Err(_) => Err(FFIError::internal("Failed to receive iOS status from worker".to_string())),
+            }
+        })
+    });
+    
+    if !result.is_null() {
+        *result = json_result;
+    }
+    if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
 }
 
 /// Manually trigger compression for a document (for debugging)
@@ -1251,6 +1368,297 @@ pub unsafe extern "C" fn compression_reset_stuck_jobs(payload_json: *const c_cha
         *result = cstr.into_raw();
         Ok(())
     })
+}
+
+/// Handle iOS background task extension
+/// Expected JSON payload:
+/// {
+///   "granted_seconds": 30
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_handle_background_task_extension(payload_json: *const c_char) -> c_int {
+    handle_status_result(|| -> FFIResult<()> {
+        #[derive(Deserialize)]
+        struct BackgroundTaskExtension {
+            granted_seconds: u32,
+        }
+        
+        let request: BackgroundTaskExtension = parse_json_input(payload_json)?;
+        
+        // Validate granted seconds
+        if request.granted_seconds > 300 {
+            return Err(FFIError::invalid_argument("granted_seconds cannot exceed 300 (5 minutes)"));
+        }
+        
+        let worker_sender = globals::get_compression_worker_sender()?;
+        
+        crate::ffi::block_on_async(async {
+            let (response_sender, response_receiver) = oneshot::channel();
+            
+            if let Err(_) = worker_sender.send(crate::domains::compression::worker::CompressionWorkerMessage::HandleBackgroundTaskExtension {
+                granted_seconds: request.granted_seconds,
+                response: response_sender,
+            }).await {
+                return Err(FFIError::internal("Failed to send background task extension message to worker".to_string()));
+            }
+            
+            // Wait for confirmation
+            let _ = response_receiver.await;
+            
+            println!("🍎 [FFI] Background task extended: {} seconds", request.granted_seconds);
+            Ok(())
+        })
+    })
+}
+
+/// Handle content visibility change
+/// Expected JSON payload:
+/// {
+///   "is_visible": true
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_handle_content_visibility(payload_json: *const c_char) -> c_int {
+    handle_status_result(|| -> FFIResult<()> {
+        #[derive(Deserialize)]
+        struct ContentVisibility {
+            is_visible: bool,
+        }
+        
+        let request: ContentVisibility = parse_json_input(payload_json)?;
+        
+        let worker_sender = globals::get_compression_worker_sender()?;
+        
+        crate::ffi::block_on_async(async {
+            let (response_sender, response_receiver) = oneshot::channel();
+            
+            if let Err(_) = worker_sender.send(crate::domains::compression::worker::CompressionWorkerMessage::HandleContentVisibility {
+                is_visible: request.is_visible,
+                response: response_sender,
+            }).await {
+                return Err(FFIError::internal("Failed to send content visibility message to worker".to_string()));
+            }
+            
+            // Wait for confirmation
+            let _ = response_receiver.await;
+            
+            println!("👀 [FFI] Content visibility: {}", if request.is_visible { "visible" } else { "hidden" });
+            Ok(())
+        })
+    })
+}
+
+/// Handle iOS app lifecycle events
+/// Expected JSON payload:
+/// {
+///   "event": "entering_background" // or "becoming_active", "resigned_active"
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_handle_app_lifecycle_event(payload_json: *const c_char) -> c_int {
+    handle_status_result(|| -> FFIResult<()> {
+        #[derive(Deserialize)]
+        struct AppLifecycleEvent {
+            event: String,
+        }
+        
+        let request: AppLifecycleEvent = parse_json_input(payload_json)?;
+        
+        // Validate event type
+        match request.event.as_str() {
+            "entering_background" | "becoming_active" | "resigned_active" => {},
+            _ => return Err(FFIError::invalid_argument("event must be 'entering_background', 'becoming_active', or 'resigned_active'")),
+        }
+        
+        let worker_sender = globals::get_compression_worker_sender()?;
+        
+        crate::ffi::block_on_async(async {
+            let (response_sender, response_receiver) = oneshot::channel();
+            
+            if let Err(_) = worker_sender.send(crate::domains::compression::worker::CompressionWorkerMessage::HandleAppLifecycleEvent {
+                event: request.event.clone(),
+                response: response_sender,
+            }).await {
+                return Err(FFIError::internal("Failed to send app lifecycle event to worker".to_string()));
+            }
+            
+            // Wait for confirmation
+            let _ = response_receiver.await;
+            
+            println!("📱 [FFI] App lifecycle event: {}", request.event);
+            Ok(())
+        })
+    })
+}
+
+/// Get comprehensive iOS device state and worker information
+/// Output: Comprehensive iOS state JSON
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_get_comprehensive_ios_status(result: *mut *mut c_char) -> c_int {
+    let json_result = handle_json_result(|| -> FFIResult<serde_json::Value> {
+        let worker_sender = globals::get_compression_worker_sender()?;
+        
+        crate::ffi::block_on_async(async {
+            let (response_sender, response_receiver) = oneshot::channel();
+            
+            if let Err(_) = worker_sender.send(crate::domains::compression::worker::CompressionWorkerMessage::GetIOSStatus {
+                response: response_sender,
+            }).await {
+                return Err(FFIError::internal("Failed to request comprehensive iOS status from worker".to_string()));
+            }
+            
+            // Wait for response
+            match response_receiver.await {
+                Ok(ios_status) => {
+                    // Add additional system information
+                    let comprehensive_status = serde_json::json!({
+                        "ios_worker_status": ios_status,
+                        "system_info": {
+                            "rust_version": env!("CARGO_PKG_VERSION"),
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                            "feature_flags": {
+                                "ios_integration": true,
+                                "background_processing": true,
+                                "memory_pressure_handling": true,
+                                "thermal_management": true,
+                                "battery_optimization": true,
+                                "content_visibility_tracking": true,
+                                "app_lifecycle_handling": true
+                            }
+                        }
+                    });
+                    Ok(comprehensive_status)
+                },
+                Err(_) => Err(FFIError::internal("Failed to receive comprehensive iOS status from worker".to_string())),
+            }
+        })
+    });
+    
+    if !result.is_null() {
+        *result = json_result;
+    }
+    if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
+}
+
+/// Handle iOS memory warning with enhanced debugging
+/// Expected JSON payload:
+/// {
+///   "level": 2, // 0=normal, 1=warning, 2=critical
+///   "available_memory_mb": 45,
+///   "pressure_trend": "increasing" // optional: "increasing", "stable", "decreasing"
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_handle_enhanced_memory_warning(payload_json: *const c_char) -> c_int {
+    handle_status_result(|| -> FFIResult<()> {
+        #[derive(Deserialize)]
+        struct EnhancedMemoryWarning {
+            level: u8,
+            available_memory_mb: Option<u64>,
+            pressure_trend: Option<String>,
+        }
+        
+        let request: EnhancedMemoryWarning = parse_json_input(payload_json)?;
+        
+        if request.level > 2 {
+            return Err(FFIError::invalid_argument("Memory pressure level must be 0-2"));
+        }
+        
+        let worker_sender = globals::get_compression_worker_sender()?;
+        
+        crate::ffi::block_on_async(async {
+            let (response_sender, response_receiver) = oneshot::channel();
+            
+            // Send both memory pressure and iOS state update
+            if let Err(_) = worker_sender.send(crate::domains::compression::worker::CompressionWorkerMessage::HandleMemoryPressure {
+                level: request.level,
+                response: response_sender,
+            }).await {
+                return Err(FFIError::internal("Failed to send enhanced memory pressure message to worker".to_string()));
+            }
+            
+            // Wait for confirmation
+            let _ = response_receiver.await;
+            
+            let trend_info = request.pressure_trend.unwrap_or_else(|| "unknown".to_string());
+            println!("🧠 [FFI] Enhanced memory warning handled: level={}, available={}MB, trend={}", 
+                     request.level, 
+                     request.available_memory_mb.unwrap_or(0), 
+                     trend_info);
+            Ok(())
+        })
+    })
+}
+
+/// Trigger iOS device capability detection and optimization
+/// This function can be called when the app starts or when device conditions change
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_detect_ios_capabilities(result: *mut *mut c_char) -> c_int {
+    let json_result = handle_json_result(|| -> FFIResult<serde_json::Value> {
+        // Detect current device capabilities
+        let capabilities = crate::domains::compression::types::IOSDeviceCapabilities::detect_ios_device();
+        
+        // Create optimizations based on detected capabilities
+        let optimized_settings = crate::domains::compression::types::IOSOptimizations {
+            respect_low_power_mode: true,
+            pause_on_critical_thermal: true,
+            reduce_quality_on_thermal: capabilities.device_type != crate::domains::compression::types::IOSDeviceType::IPadPro,
+            background_processing_limit: match capabilities.device_type {
+                crate::domains::compression::types::IOSDeviceType::IPhone => 1,
+                crate::domains::compression::types::IOSDeviceType::IPad => 1,
+                crate::domains::compression::types::IOSDeviceType::IPadPro => 2,
+            },
+            min_battery_level: capabilities.battery_level_threshold,
+            max_memory_usage_mb: capabilities.memory_limit_mb as u64,
+        };
+        
+        // Update worker with new optimizations
+        if let Ok(worker_sender) = globals::get_compression_worker_sender() {
+            let worker_sender_clone = worker_sender.clone();
+            let optimizations_clone = optimized_settings.clone();
+            
+            tokio::spawn(async move {
+                let (response_sender, response_receiver) = oneshot::channel();
+                
+                if let Ok(_) = worker_sender_clone.send(crate::domains::compression::worker::CompressionWorkerMessage::UpdateIOSOptimizations {
+                    optimizations: optimizations_clone,
+                    response: response_sender,
+                }).await {
+                    let _ = response_receiver.await;
+                    println!("🍎 [FFI] iOS optimizations updated based on device detection");
+                }
+            });
+        }
+        
+        Ok(serde_json::json!({
+            "status": "success",
+            "detected_capabilities": {
+                "device_type": format!("{:?}", capabilities.device_type),
+                "max_concurrent_jobs": capabilities.max_concurrent_jobs,
+                "memory_limit_mb": capabilities.memory_limit_mb,
+                "thermal_throttle_threshold": capabilities.thermal_throttle_threshold,
+                "battery_level_threshold": capabilities.battery_level_threshold,
+                "safe_concurrency": capabilities.get_safe_concurrency()
+            },
+            "applied_optimizations": {
+                "background_processing_limit": optimized_settings.background_processing_limit,
+                "min_battery_level": optimized_settings.min_battery_level,
+                "max_memory_usage_mb": optimized_settings.max_memory_usage_mb,
+                "respect_low_power_mode": optimized_settings.respect_low_power_mode,
+                "pause_on_critical_thermal": optimized_settings.pause_on_critical_thermal,
+                "reduce_quality_on_thermal": optimized_settings.reduce_quality_on_thermal
+            },
+            "recommendations": [
+                "🔋 Battery optimization enabled",
+                "🌡️ Thermal management configured",
+                "🧠 Memory pressure handling active",
+                "📱 App lifecycle integration ready",
+                "⚡ Background processing limits applied"
+            ]
+        }))
+    });
+    
+    if !result.is_null() {
+        *result = json_result;
+    }
+    if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
 } 
 
 

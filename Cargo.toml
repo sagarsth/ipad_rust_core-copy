@@ -19,7 +19,7 @@ image = { version = "0.24.6", default-features = false, features = ["jpeg", "png
 zip = "0.6.6"
 tempfile = "3.7.0"
 kamadak-exif = "0.5.5"  # For EXIF metadata stripping (correct crate name)
-lopdf = "0.36.0"  # Pure Rust PDF compression (Ghostscript alternative)
+# lopdf = "0.36.0"  # Removed - PDF compression disabled for efficiency
 
 # Enhanced format support
 webp = { version = "0.2.5", optional = true }  # WebP support for better compression
@@ -47,7 +47,7 @@ thiserror = "2.0.12"
 
 # Logging
 log = "0.4"
-env_logger = "0.11.7"
+env_logger = "0.10"
 
 # Security
 argon2 = "0.5.3"

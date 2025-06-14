@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 use sqlx::{SqlitePool, Transaction, Sqlite};
 use std::env;
+use chrono::Utc;
 
 use crate::domains::core::file_storage_service::FileStorageService;
 use crate::domains::document::repository::MediaDocumentRepository;
@@ -96,6 +97,13 @@ pub trait CompressionService: Send + Sync {
     
     /// Get document details for size-based timeout calculation
     async fn get_document_details(&self, document_id: Uuid) -> ServiceResult<Option<MediaDocument>>;
+
+    /// Queue original file for safe deletion after successful compression
+    async fn queue_original_for_safe_deletion(
+        &self,
+        document_id: Uuid,
+        compressed_file_path: &str,
+    ) -> ServiceResult<()>;
 }
 
 pub struct CompressionServiceImpl {
@@ -189,7 +197,7 @@ impl CompressionServiceImpl {
                 has_error = 1,
                 error_type = ?,
                 error_message = ?,
-                compression_status = 'error',
+                compression_status = 'failed',
                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
             WHERE id = ?
             "#,
@@ -240,43 +248,42 @@ impl CompressionService for CompressionServiceImpl {
         // Start timing the operation
         let start_time = Instant::now();
         
-        println!("🔄 [COMPRESSION_SERVICE] Starting compression for document {}", document_id);
+        log::info!("Starting compression for document {}", document_id);
         
         // Check if document is in use
         if self.is_document_in_use(document_id).await? {
-            println!("⏸️ [COMPRESSION_SERVICE] Document {} is in use, cannot compress", document_id);
+            log::debug!("Document {} is in use, cannot compress", document_id);
             return Err(ServiceError::Ui(
                 "Cannot compress document that is currently in use".to_string()
             ));
         }
         
         // 1. Get document details
-        println!("📄 [COMPRESSION_SERVICE] Fetching document details for {}", document_id);
+        log::debug!("Fetching document details for {}", document_id);
         let document = FindById::<MediaDocument>::find_by_id(&*self.media_doc_repo, document_id).await
             .map_err(|e| {
-                println!("❌ [COMPRESSION_SERVICE] Failed to find document {}: {:?}", document_id, e);
+                log::error!("Failed to find document {}: {:?}", document_id, e);
                 ServiceError::Domain(e)
             })?;
         
         // Skip compression for documents that originated from sync
         if document.source_of_change == SourceOfChange::Sync {
-            println!("⏭️ [COMPRESSION_SERVICE] Skipping compression for synced document {}", document_id);
+            log::debug!("Skipping compression for synced document {}", document_id);
             return Err(ServiceError::Ui("Skipping compression for synced document".to_string()));
         }
         
         // 2. Check for error state or known issues
         // Skip documents with existing errors
         if document.has_error.unwrap_or(0) == 1 {
-            println!("⚠️ [COMPRESSION_SERVICE] Document {} has existing error, skipping", document_id);
+            log::warn!("Document {} has existing error, skipping compression", document_id);
             return Err(ServiceError::Domain(DomainError::Validation(
-                crate::errors::ValidationError::custom(&format!("Document has an error: {}", 
-                    document.error_message.unwrap_or_else(|| "Unknown error".to_string())))
+                crate::errors::ValidationError::custom("Document has an existing error")
             )));
         }
         
         // Skip documents with ERROR file path
         if document.file_path == "ERROR" {
-            println!("❌ [COMPRESSION_SERVICE] Document {} has invalid file path", document_id);
+            log::error!("Document {} has invalid file path", document_id);
             return Err(ServiceError::Domain(DomainError::Validation(
                 crate::errors::ValidationError::custom("Document file path is invalid")
             )));
@@ -284,17 +291,17 @@ impl CompressionService for CompressionServiceImpl {
         
         // 3. Check if already compressed
         if document.compression_status == CompressionStatus::Completed.as_str() {
-            println!("✅ [COMPRESSION_SERVICE] Document {} already compressed", document_id);
+            log::debug!("Document {} already compressed", document_id);
             return Err(ServiceError::Domain(DomainError::Validation(
                 crate::errors::ValidationError::custom("Document is already compressed")
             )));
         }
         
-        println!("🧹 [COMPRESSION_SERVICE] Clearing any previous errors for document {}", document_id);
+        log::debug!("Clearing any previous errors for document {}", document_id);
         // 4. Clear any previous compression errors
         self.clear_document_error(document_id).await?;
         
-        println!("📊 [COMPRESSION_SERVICE] Updating status to processing for document {}", document_id);
+        log::debug!("Updating status to processing for document {}", document_id);
         // 5. Update document status to Processing
         self.media_doc_repo.update_compression_status(
             document_id, 
@@ -302,7 +309,7 @@ impl CompressionService for CompressionServiceImpl {
             None,
             None
         ).await.map_err(|e| {
-            println!("❌ [COMPRESSION_SERVICE] Failed to update status for document {}: {:?}", document_id, e);
+            log::error!("Failed to update status for document {}: {:?}", document_id, e);
             ServiceError::Domain(e)
         })?;
         
@@ -344,8 +351,8 @@ impl CompressionService for CompressionServiceImpl {
         };
 
         if original_size_on_disk > max_in_memory_bytes() {
-            println!("📦 [COMPRESSION_SERVICE] File too large for in-memory compression: {} bytes > {} bytes", 
-                     original_size_on_disk, max_in_memory_bytes());
+            log::warn!("File too large for in-memory compression: {} bytes > {} bytes (document {})", 
+                     original_size_on_disk, max_in_memory_bytes(), document_id);
             // Mark as skipped, update queue and stats, then return early.
             self.media_doc_repo.update_compression_status(
                 document_id,
@@ -359,7 +366,7 @@ impl CompressionService for CompressionServiceImpl {
                 self.compression_repo.update_queue_entry_status(
                     queue_entry.id,
                     "skipped",
-                    Some("File too large to compress in-memory")
+                    Some("File too large to compress safely")
                 ).await.map_err(|e| ServiceError::Domain(e))?;
             }
 
@@ -370,34 +377,33 @@ impl CompressionService for CompressionServiceImpl {
             tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
 
             return Err(ServiceError::Domain(DomainError::Validation(
-                crate::errors::ValidationError::custom("File too large to compress in-memory")
+                crate::errors::ValidationError::custom("File is too large for compression")
             )));
         }
 
         // 7. Read the original file (safe size)
-        println!("📖 [COMPRESSION_SERVICE] Reading file data for document {}", document_id);
+        log::debug!("Reading file data for document {}", document_id);
         let file_data = match self.file_storage_service.get_file_data(&document.file_path).await {
             Ok(data) => {
-                println!("✅ [COMPRESSION_SERVICE] Successfully read {} bytes for document {}", data.len(), document_id);
+                log::debug!("Successfully read {} bytes for document {}", data.len(), document_id);
                 data
             },
             Err(e) => {
                 // Mark document with error and propagate failure
-                let error_message = format!("Failed to read file: {:?}", e);
-                println!("❌ [COMPRESSION_SERVICE] {}", error_message);
-                self.mark_document_with_error(document_id, "storage_failure", &error_message).await?;
+                log::error!("Failed to read file for document {}: {:?}", document_id, e);
+                self.mark_document_with_error(document_id, "storage_failure", "Failed to read document file").await?;
                 
-                return Err(ServiceError::Domain(DomainError::Internal(error_message)));
+                return Err(ServiceError::Domain(DomainError::Internal("Failed to access document file".to_string())));
             }
         };
         
         let original_size = file_data.len() as i64;
-        println!("📊 [COMPRESSION_SERVICE] Original file size: {} bytes for document {}", original_size, document_id);
+        log::debug!("Original file size: {} bytes for document {}", original_size, document_id);
         
         // Check minimum size threshold for compression
         if original_size < config.min_size_bytes {
-            println!("⏭️ [COMPRESSION_SERVICE] File too small to compress: {} bytes < {} bytes minimum", 
-                     original_size, config.min_size_bytes);
+            log::debug!("File too small to compress: {} bytes < {} bytes minimum (document {})", 
+                     original_size, config.min_size_bytes, document_id);
             
             self.media_doc_repo.update_compression_status(
                 document_id,
@@ -411,27 +417,27 @@ impl CompressionService for CompressionServiceImpl {
                 self.compression_repo.update_queue_entry_status(
                     queue_entry.id,
                     "skipped",
-                    Some("File too small to benefit from compression")
+                    Some("File below minimum size threshold")
                 ).await.map_err(|e| ServiceError::Domain(e))?;
             }
             
             return Err(ServiceError::Domain(DomainError::Validation(
-                crate::errors::ValidationError::custom("File too small to benefit from compression")
+                crate::errors::ValidationError::custom("File is below minimum size for compression")
             )));
         }
         
         // 8. Determine MIME type and extension
         let mime_type = document.mime_type.as_str();
         let extension = get_extension(&document.original_filename);
-        println!("🔍 [COMPRESSION_SERVICE] MIME type: {}, extension: {:?} for document {}", 
+        log::debug!("MIME type: {}, extension: {:?} for document {}", 
                  mime_type, extension, document_id);
         
         // 9. Select appropriate compressor
         let compressor = self.find_compressor(mime_type, extension).await;
-        println!("🗜️ [COMPRESSION_SERVICE] Selected compressor for document {}", document_id);
+        log::debug!("Selected compressor for document {}", document_id);
         
         // 10. Compress the file
-        println!("🔧 [COMPRESSION_SERVICE] Starting actual compression for document {}", document_id);
+        log::info!("Starting compression for document {}", document_id);
         let compressed_data = match compressor.compress(
             file_data, 
             config.method,
@@ -442,33 +448,67 @@ impl CompressionService for CompressionServiceImpl {
                 let compressed_size = data.len() as i64;
                 
                 if compressed_size == 0 {
-                    let error_message = "Compression resulted in zero-byte file - aborting to prevent data loss";
-                    println!("❌ [COMPRESSION_SERVICE] {}", error_message);
-                    self.mark_document_with_error(document_id, "compression_failure", error_message).await?;
-                    return Err(ServiceError::Domain(DomainError::Internal(error_message.to_string())));
+                    log::error!("Compression resulted in zero-byte file for document {}", document_id);
+                    self.mark_document_with_error(document_id, "compression_failure", "Compression produced invalid output").await?;
+                    return Err(ServiceError::Domain(DomainError::Internal("Compression failed - invalid output".to_string())));
                 }
                 
                 // Add minimum size check (should be at least 1% of original or 100 bytes minimum)
                 let min_expected_size = std::cmp::max(100, original_size / 100);
                 if compressed_size < min_expected_size {
-                    let error_message = format!(
-                        "Compressed size ({} bytes) is suspiciously small compared to original ({} bytes) - possible compression failure", 
-                        compressed_size, original_size
-                    );
-                    println!("⚠️ [COMPRESSION_SERVICE] {}", error_message);
-                    self.mark_document_with_error(document_id, "compression_failure", &error_message).await?;
-                    return Err(ServiceError::Domain(DomainError::Internal(error_message)));
+                    log::warn!("Compressed size ({} bytes) suspiciously small vs original ({} bytes) for document {}", 
+                             compressed_size, original_size, document_id);
+                    self.mark_document_with_error(document_id, "compression_failure", "Compression produced unexpectedly small output").await?;
+                    return Err(ServiceError::Domain(DomainError::Internal("Compression failed - invalid result size".to_string())));
                 }
                 
-                println!("✅ [COMPRESSION_SERVICE] Compression successful: {} bytes -> {} bytes for document {}", 
+                log::info!("Compression successful: {} bytes -> {} bytes for document {}", 
                          original_size, compressed_size, document_id);
                 data
             },
             Err(e) => {
-                // Mark document with error and propagate failure
-                let error_message = format!("Compression failed: {:?}", e);
-                println!("❌ [COMPRESSION_SERVICE] {}", error_message);
-                self.mark_document_with_error(document_id, "compression_failure", &error_message).await?;
+                // Check if this is a PDF skip request
+                if let DomainError::Internal(ref msg) = e {
+                    if msg == "PDF_SKIP_COMPRESSION" {
+                        log::info!("PDF compression skipped for document {} - PDFs are already compressed", document_id);
+                        
+                        // Mark as skipped instead of failed
+                        self.media_doc_repo.update_compression_status(
+                            document_id,
+                            CompressionStatus::Skipped,
+                            None,
+                            None
+                        ).await.map_err(|e| ServiceError::Domain(e))?;
+                        
+                        // Update queue status to skipped
+                        if let Some(queue_entry) = self.compression_repo.get_queue_entry_by_document_id(document_id).await
+                            .map_err(|e| ServiceError::Domain(e))? 
+                        {
+                            self.compression_repo.update_queue_entry_status(
+                                queue_entry.id, 
+                                "skipped", 
+                                Some("PDF files are already compressed - skipped to save CPU cycles")
+                            ).await.map_err(|e| ServiceError::Domain(e))?;
+                        }
+                        
+                        // Update stats for skipped compression
+                        let mut tx = self.pool.begin().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+                        if let Err(stats_err) = self.compression_repo.update_stats_for_skipped(&mut tx).await {
+                            log::error!("Failed to update stats for skipped compression: {:?}", stats_err);
+                            let _ = tx.rollback().await;
+                        } else {
+                            tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+                        }
+                        
+                        return Err(ServiceError::Domain(DomainError::Validation(
+                            crate::errors::ValidationError::custom("PDF compression skipped - already compressed format")
+                        )));
+                    }
+                }
+                
+                // Handle regular compression failures
+                log::error!("Compression failed for document {}: {:?}", document_id, e);
+                self.mark_document_with_error(document_id, "compression_failure", "Compression process failed").await?;
                 
                 // Update queue status
                 if let Some(queue_entry) = self.compression_repo.get_queue_entry_by_document_id(document_id).await
@@ -477,20 +517,20 @@ impl CompressionService for CompressionServiceImpl {
                     self.compression_repo.update_queue_entry_status(
                         queue_entry.id, 
                         "failed", 
-                        Some(&error_message)
+                        Some("Compression process failed")
                     ).await.map_err(|e| ServiceError::Domain(e))?;
                 }
                 
                 // Update stats for failed compression
                 let mut tx = self.pool.begin().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
                 if let Err(stats_err) = self.compression_repo.update_stats_for_failed(&mut tx).await {
-                    eprintln!("Failed to update stats for failed compression: {:?}", stats_err);
+                    log::error!("Failed to update stats for failed compression: {:?}", stats_err);
                     let _ = tx.rollback().await;
                 } else {
                     tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
                 }
                 
-                return Err(ServiceError::Domain(DomainError::Internal(error_message)));
+                return Err(ServiceError::Domain(DomainError::Internal("Compression operation failed".to_string())));
             }
         };
         
@@ -747,7 +787,14 @@ impl CompressionService for CompressionServiceImpl {
         
         println!("🎉 [COMPRESSION_SERVICE] Compression completed for document {} in {}ms", document_id, duration_ms);
         
-        // 18. Return result
+        // 18. Queue original file for safe deletion after grace period
+        if let Err(e) = self.queue_original_for_safe_deletion(document_id, &compressed_path).await {
+            // Log error but don't fail the compression operation
+            log::warn!("Failed to queue original file for deletion for document {}: {:?}", document_id, e);
+            println!("⚠️ [COMPRESSION_SERVICE] Warning: Could not queue original file for deletion: {:?}", e);
+        }
+        
+        // 19. Return result
         Ok(CompressionResult {
             document_id,
             original_size,
@@ -971,5 +1018,100 @@ impl CompressionService for CompressionServiceImpl {
             Err(DomainError::EntityNotFound { .. }) => Ok(None),
             Err(e) => Err(ServiceError::Domain(e)),
         }
+    }
+
+    /// Queue original file for safe deletion after successful compression
+    async fn queue_original_for_safe_deletion(
+        &self,
+        document_id: Uuid,
+        compressed_file_path: &str,
+    ) -> ServiceResult<()> {
+        println!("🗑️ [COMPRESSION_SERVICE] Queuing original file for deletion after grace period for document {}", document_id);
+        
+        // Get document details to fetch the original file path
+        let document = FindById::<MediaDocument>::find_by_id(&*self.media_doc_repo, document_id).await
+            .map_err(|e| {
+                log::error!("Failed to find document {} for deletion queuing: {:?}", document_id, e);
+                ServiceError::Domain(e)
+            })?;
+
+        // Skip if document has error path
+        if document.file_path == "ERROR" {
+            println!("⚠️ [COMPRESSION_SERVICE] Skipping deletion queue for error document {}", document_id);
+            return Ok(());
+        }
+
+        // Verify compressed file exists before queuing original for deletion
+        match self.file_storage_service.get_file_size(compressed_file_path).await {
+            Ok(size) if size > 0 => {
+                println!("✅ [COMPRESSION_SERVICE] Verified compressed file exists ({} bytes) for document {}", size, document_id);
+            },
+            Ok(_) => {
+                println!("❌ [COMPRESSION_SERVICE] Compressed file is empty, keeping original for document {}", document_id);
+                return Ok(());
+            },
+            Err(e) => {
+                println!("❌ [COMPRESSION_SERVICE] Compressed file verification failed, keeping original for document {}: {:?}", document_id, e);
+                return Ok(());
+            }
+        }
+
+        // Queue the original file for deletion with 24-hour grace period
+        let queue_id_str = Uuid::new_v4().to_string();
+        let doc_id_str = document_id.to_string();
+        
+        // Try to get any admin user for the deletion request to satisfy foreign key constraint
+        let (user_id_str, device_id_str) = {
+            match sqlx::query!(
+                "SELECT id FROM users WHERE role = 'admin' LIMIT 1"
+            )
+            .fetch_optional(&self.pool)
+            .await {
+                Ok(Some(row)) => (row.id, "compression_service".to_string()),
+                _ => {
+                    // If no admin user found, skip deletion queue to avoid constraint issues
+                    println!("⚠️ [COMPRESSION_SERVICE] No admin user found for deletion queue, skipping original file deletion queue");
+                    return Ok(());
+                }
+            }
+        };
+        
+        let now_str = Utc::now().to_rfc3339();
+        
+        sqlx::query!(
+            r#"
+            INSERT INTO file_deletion_queue (
+                id,
+                document_id,
+                file_path,
+                compressed_file_path,
+                requested_at,
+                requested_by,
+                requested_by_device_id,
+                grace_period_seconds
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+            queue_id_str,
+            doc_id_str,
+            document.file_path, // Original file path to delete
+            None::<String>, // Don't delete compressed file
+            now_str,
+            user_id_str,
+            device_id_str,
+            86400 // 24 hour grace period
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            log::error!("Failed to queue original file for deletion for document {}: {:?}", document_id, e);
+            ServiceError::Domain(DomainError::Database(DbError::from(e)))
+        })?;
+
+        println!("✅ [COMPRESSION_SERVICE] Queued original file for deletion: {} (document {})", document.file_path, document_id);
+        println!("   📅 Grace period: 24 hours from now");
+        println!("   🔒 Compressed file will be preserved: {}", compressed_file_path);
+        
+        Ok(())
     }
 }
