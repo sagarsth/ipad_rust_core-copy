@@ -422,41 +422,31 @@ impl DocumentServiceImpl {
         let mut _display_path = response.file_path.clone();
         let mut _display_size = response.size_bytes;
 
-        // Skip availability check for error documents
-        if response.has_error {
-            response.is_available_locally = false;
-        } else {
+        // Check if the relevant file (original or completed compressed) is available locally
+        let path_to_check = if response.compression_status == CompressionStatus::Completed.as_str() && response.compressed_file_path.is_some() {
             if let Some(compressed_path) = &response.compressed_file_path {
-                if response.compression_status == CompressionStatus::Completed.as_str() {
-                    _display_path = compressed_path.clone();
-                    if let Some(compressed_size) = response.compressed_size_bytes {
-                        _display_size = compressed_size;
-                    }
+                _display_path = compressed_path.clone();
+                if let Some(compressed_size) = response.compressed_size_bytes {
+                    _display_size = compressed_size;
                 }
-            }
-
-            // Check if the relevant file (original or completed compressed) is available locally
-            let path_to_check = if response.compression_status == CompressionStatus::Completed.as_str() && response.compressed_file_path.is_some() {
-                response.compressed_file_path.as_ref().unwrap()
+                compressed_path
             } else {
                 &response.file_path
-            };
-            let absolute_path = self.file_storage_service.get_absolute_path(path_to_check);
-
-            // Set availability flag based on file existence check
-            match fs::metadata(&absolute_path).await {
-                Ok(_) => {
-                    response.is_available_locally = true;
-                },
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    response.is_available_locally = false;
-                }
-                Err(e) => {
-                    // Log error but don't fail the entire enrichment, set as unavailable
-                    eprintln!("Error checking file metadata for {}: {}", absolute_path.display(), e);
-                    response.is_available_locally = false;
-                }
             }
+        } else {
+            &response.file_path
+        };
+        
+        // Only mark as unavailable if file doesn't actually exist or has actual file path errors
+        // Don't mark as unavailable just because compression failed
+        if response.file_path == "ERROR" {
+            response.is_available_locally = false;
+        } else {
+            let absolute_path = self.file_storage_service.get_absolute_path(path_to_check);
+            response.is_available_locally = match tokio::fs::metadata(&absolute_path).await {
+                Ok(_) => true,
+                Err(_) => false,
+            };
         }
 
         // Handle includes

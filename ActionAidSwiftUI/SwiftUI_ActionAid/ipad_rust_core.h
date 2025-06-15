@@ -63,7 +63,7 @@ int32_t hash_password(const char*, char**);
 void free_string(char*);
 
 // ============================================================================
-// COMPRESSION FUNCTIONS (31 functions)
+// COMPRESSION FUNCTIONS (32 functions)
 // ============================================================================
 
 int32_t compression_compress_document(const char*, char**);
@@ -97,6 +97,7 @@ int32_t compression_handle_app_lifecycle_event(const char*);
 int32_t compression_get_comprehensive_ios_status(char**);
 int32_t compression_handle_enhanced_memory_warning(const char*);
 int32_t compression_detect_ios_capabilities(char**);
+int32_t compression_cleanup_stale_documents(char**);
 
 // ============================================================================
 // CORE FUNCTIONS (7 functions)

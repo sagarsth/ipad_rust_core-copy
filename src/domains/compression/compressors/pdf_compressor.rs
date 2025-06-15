@@ -39,6 +39,6 @@ impl Compressor for PdfCompressor {
         
         // Return an error to indicate this file should be skipped
         // The compression service will catch this and mark the file as "skipped"
-        Err(DomainError::Internal("PDF_SKIP_COMPRESSION".to_string()))
+        Err(DomainError::Validation(crate::errors::ValidationError::custom("PDF compression skipped - already compressed format")))
     }
 }

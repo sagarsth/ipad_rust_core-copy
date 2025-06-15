@@ -7,13 +7,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔍 Compression Debug Tool");
     println!("========================");
     
-    // Try to find the database
+    // Try to find the database (look for actionaid_core.sqlite)
     let db_path = find_database_path().unwrap_or_else(|| {
-        eprintln!("❌ Could not find actionaid.db database");
+        eprintln!("❌ Could not find actionaid_core.sqlite database");
         eprintln!("   Searched in:");
-        eprintln!("   - ./storage/actionaid.db");
-        eprintln!("   - ./actionaid.db");
-        eprintln!("   - $IOS_DOCUMENTS_DIR/actionaid.db");
+        eprintln!("   - ./storage/actionaid_core.sqlite");
+        eprintln!("   - ./actionaid_core.sqlite");
+        eprintln!("   - $IOS_DOCUMENTS_DIR/actionaid_core.sqlite");
         eprintln!("   - iOS Simulator directories");
         std::process::exit(1);
     });
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Run debug analysis
     get_compression_overview(&pool).await?;
-    get_compressed_documents(&pool).await?;
+    get_recent_documents(&pool).await?;
     get_failed_compressions(&pool).await?;
     get_compression_queue_status(&pool).await?;
     get_document_types_analysis(&pool).await?;
@@ -39,10 +39,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn find_database_path() -> Option<String> {
-    // Check current directory first
+    // Check current directory first (for actionaid_core.sqlite)
     let candidates = vec![
-        "./storage/actionaid.db",
-        "./actionaid.db",
+        "./storage/actionaid_core.sqlite",
+        "./actionaid_core.sqlite",
     ];
     
     for path in &candidates {
@@ -53,7 +53,7 @@ fn find_database_path() -> Option<String> {
     
     // Check iOS Documents directory if set
     if let Ok(ios_docs) = env::var("IOS_DOCUMENTS_DIR") {
-        let db_path = format!("{}/actionaid.db", ios_docs);
+        let db_path = format!("{}/actionaid_core.sqlite", ios_docs);
         if Path::new(&db_path).exists() {
             return Some(db_path);
         }
@@ -66,7 +66,7 @@ fn find_database_path() -> Option<String> {
         let output = Command::new("find")
             .args(&[
                 &format!("{}/Library/Developer/CoreSimulator/Devices", home),
-                "-name", "actionaid.db",
+                "-name", "actionaid_core.sqlite",
                 "-type", "f"
             ])
             .output()
@@ -135,63 +135,62 @@ async fn get_compression_overview(pool: &SqlitePool) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-async fn get_compressed_documents(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n✅ SUCCESSFULLY COMPRESSED DOCUMENTS");
-    println!("=====================================");
+async fn get_recent_documents(pool: &SqlitePool) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n📋 RECENT DOCUMENT ACTIVITY");
+    println!("============================");
     
     let rows = sqlx::query(r#"
         SELECT 
             id,
             original_filename,
-            mime_type,
+            compression_status,
             size_bytes,
             compressed_size_bytes,
-            file_path,
-            compressed_file_path,
             created_at,
-            related_table
+            updated_at
         FROM media_documents 
-        WHERE compression_status = 'completed' 
-            AND compressed_file_path IS NOT NULL
-            AND file_path != 'ERROR'
-        ORDER BY created_at DESC
-        LIMIT 20
+        WHERE file_path != 'ERROR'
+        ORDER BY updated_at DESC
+        LIMIT 10
     "#)
     .fetch_all(pool)
     .await?;
     
     if rows.is_empty() {
-        println!("❌ No compressed documents found!");
+        println!("❌ No documents found!");
         return Ok(());
     }
     
-    println!("\n🎯 Found {} compressed documents (showing first 20):", rows.len());
+    println!("\n🎯 Most recent 10 documents:");
     
     for row in rows {
         let doc_id: String = row.get("id");
         let filename: String = row.get("original_filename");
-        let mime_type: String = row.get("mime_type");
+        let status: String = row.get("compression_status");
         let orig_size: i64 = row.get("size_bytes");
         let comp_size: Option<i64> = row.get("compressed_size_bytes");
-        let orig_path: String = row.get("file_path");
-        let comp_path: Option<String> = row.get("compressed_file_path");
-        let created: String = row.get("created_at");
-        let table: String = row.get("related_table");
+        let updated: String = row.get("updated_at");
         
-        let comp_size = comp_size.unwrap_or(orig_size);
-        let savings = orig_size - comp_size;
-        let percentage = if orig_size > 0 { (savings as f64 / orig_size as f64) * 100.0 } else { 0.0 };
+        let status_icon = match status.as_str() {
+            "completed" => "✅",
+            "skipped" => "⏭️",
+            "pending" => "⏳",
+            "processing" => "🔄",
+            "failed" => "❌",
+            _ => "❓",
+        };
         
         println!("\n📄 {}", filename);
         println!("   🆔 ID: {}...", &doc_id[..8.min(doc_id.len())]);
-        println!("   🗂️ Type: {} ({})", mime_type, table);
-        println!("   📏 Size: {} → {}", format_bytes(orig_size), format_bytes(comp_size));
-        println!("   💾 Saved: {} ({:.1}%)", format_bytes(savings), percentage);
-        println!("   📁 Original: {}", orig_path);
-        if let Some(comp_path) = comp_path {
-            println!("   🗜️ Compressed: {}", comp_path);
+        println!("   {} Status: {}", status_icon, status);
+        if let Some(comp_size) = comp_size {
+            let savings = orig_size - comp_size;
+            let percentage = if orig_size > 0 { (savings as f64 / orig_size as f64) * 100.0 } else { 0.0 };
+            println!("   📏 Size: {} → {} ({:.1}% saved)", format_bytes(orig_size), format_bytes(comp_size), percentage);
+        } else {
+            println!("   📏 Size: {}", format_bytes(orig_size));
         }
-        println!("   📅 Created: {}", created);
+        println!("   📅 Updated: {}", updated);
     }
     
     Ok(())
@@ -214,7 +213,7 @@ async fn get_failed_compressions(pool: &SqlitePool) -> Result<(), Box<dyn std::e
         WHERE compression_status = 'failed' 
             OR has_error = 1
             AND file_path != 'ERROR'
-        ORDER BY created_at DESC
+        ORDER BY updated_at DESC
         LIMIT 10
     "#)
     .fetch_all(pool)
@@ -231,7 +230,6 @@ async fn get_failed_compressions(pool: &SqlitePool) -> Result<(), Box<dyn std::e
         let filename: String = row.get("original_filename");
         let mime_type: String = row.get("mime_type");
         let size: i64 = row.get("size_bytes");
-        let path: String = row.get("file_path");
         let error: Option<String> = row.get("error_message");
         
         println!("\n📄 {}", filename);
@@ -239,7 +237,6 @@ async fn get_failed_compressions(pool: &SqlitePool) -> Result<(), Box<dyn std::e
         println!("   🗂️ Type: {}", mime_type);
         println!("   📏 Size: {}", format_bytes(size));
         println!("   ❌ Error: {}", error.unwrap_or_else(|| "Unknown error".to_string()));
-        println!("   📁 Path: {}", path);
     }
     
     Ok(())
@@ -263,16 +260,18 @@ async fn get_compression_queue_status(pool: &SqlitePool) -> Result<(), Box<dyn s
     
     let rows = sqlx::query(r#"
         SELECT 
-            document_id,
-            priority,
-            status,
-            queued_at,
-            started_at,
-            completed_at,
-            error_message,
-            attempts
-        FROM compression_queue 
-        ORDER BY queued_at DESC
+            cq.document_id,
+            md.original_filename,
+            cq.status,
+            cq.priority,
+            cq.attempts,
+            cq.created_at,
+            cq.updated_at,
+            cq.error_message,
+            printf('%.1f MB', md.size_bytes / 1024.0 / 1024.0) as file_size
+        FROM compression_queue cq
+        JOIN media_documents md ON cq.document_id = md.id
+        ORDER BY cq.status, cq.priority DESC, cq.created_at ASC
         LIMIT 20
     "#)
     .fetch_all(pool)
@@ -284,25 +283,34 @@ async fn get_compression_queue_status(pool: &SqlitePool) -> Result<(), Box<dyn s
     }
     
     println!("\n📋 Found {} queue entries (showing latest 20):", rows.len());
+    
+    let mut current_status = String::new();
     for row in rows {
-        let doc_id: String = row.get("document_id");
-        let priority: String = row.get("priority");
+        let filename: String = row.get("original_filename");
         let status: String = row.get("status");
-        let queued: String = row.get("queued_at");
-        let started: Option<String> = row.get("started_at");
-        let completed: Option<String> = row.get("completed_at");
-        let error: Option<String> = row.get("error_message");
-        let attempts: i64 = row.get("attempts");
+        let priority: i32 = row.get("priority");
+        let attempts: i32 = row.get("attempts");
+        let file_size: String = row.get("file_size");
+        let error_message: Option<String> = row.get("error_message");
         
-        println!("\n🔄 Document: {}...", &doc_id[..8.min(doc_id.len())]);
-        println!("   🚦 Status: {}", status);
-        println!("   ⚡ Priority: {}", priority);
-        println!("   📅 Queued: {}", queued);
-        println!("   🏃 Started: {}", started.unwrap_or_else(|| "Not started".to_string()));
-        println!("   ✅ Completed: {}", completed.unwrap_or_else(|| "Not completed".to_string()));
-        println!("   🔄 Attempts: {}", attempts);
-        if let Some(error) = error {
-            println!("   ❌ Error: {}", error);
+        if status != current_status {
+            current_status = status.clone();
+            let status_icon = match status.as_str() {
+                "pending" => "⏳",
+                "processing" => "🔄",
+                "completed" => "✅",
+                "failed" => "❌",
+                "skipped" => "⏭️",
+                _ => "❓",
+            };
+            println!("\n{} {} Jobs:", status_icon, status.to_uppercase());
+        }
+        
+        println!("   📄 {} ({}) - Priority: {}, Attempts: {}", 
+                 filename, file_size, priority, attempts);
+        
+        if let Some(err) = error_message {
+            println!("      ❌ Error: {}", err);
         }
     }
     
@@ -323,6 +331,7 @@ async fn get_document_types_analysis(pool: &SqlitePool) -> Result<(), Box<dyn st
             SUM(CASE WHEN md.compression_status = 'completed' THEN 1 ELSE 0 END) as compressed_count,
             SUM(CASE WHEN md.compression_status = 'failed' THEN 1 ELSE 0 END) as failed_count,
             SUM(CASE WHEN md.compression_status = 'skipped' THEN 1 ELSE 0 END) as skipped_count,
+            SUM(CASE WHEN md.compression_status = 'pending' THEN 1 ELSE 0 END) as pending_count,
             AVG(md.size_bytes) as avg_size,
             SUM(md.size_bytes) as total_original_size,
             SUM(CASE WHEN md.compressed_size_bytes IS NOT NULL THEN md.compressed_size_bytes ELSE 0 END) as total_compressed_size
@@ -345,6 +354,7 @@ async fn get_document_types_analysis(pool: &SqlitePool) -> Result<(), Box<dyn st
         let compressed: i64 = row.get("compressed_count");
         let failed: i64 = row.get("failed_count");
         let skipped: i64 = row.get("skipped_count");
+        let pending: i64 = row.get("pending_count");
         let avg_size: Option<f64> = row.get("avg_size");
         let total_orig: Option<i64> = row.get("total_original_size");
         let total_comp: Option<i64> = row.get("total_compressed_size");
@@ -357,10 +367,8 @@ async fn get_document_types_analysis(pool: &SqlitePool) -> Result<(), Box<dyn st
         println!("   🗜️ Compression: Level {}, Method: {}", 
                  comp_level, comp_method.unwrap_or_else(|| "none".to_string()));
         println!("   📏 Min size for compression: {}", format_bytes(min_size.unwrap_or(0)));
-        println!("   📊 Documents: {} total", doc_count);
-        println!("   ✅ Compressed: {}", compressed);
-        println!("   ❌ Failed: {}", failed);
-        println!("   ⏭️ Skipped: {}", skipped);
+        println!("   📊 Documents: {} total (✅{} compressed, ❌{} failed, ⏭️{} skipped, ⏳{} pending)", 
+                 doc_count, compressed, failed, skipped, pending);
         println!("   📐 Average size: {}", format_bytes(avg_size.unwrap_or(0.0) as i64));
         
         let total_orig = total_orig.unwrap_or(0);
@@ -379,24 +387,52 @@ async fn check_storage_directory(_pool: &SqlitePool) -> Result<(), Box<dyn std::
     println!("\n📁 STORAGE DIRECTORY ANALYSIS");
     println!("==============================");
     
-    // Try to determine storage path from environment or find the database path
-    let storage_path = if let Ok(ios_docs) = env::var("IOS_DOCUMENTS_DIR") {
-        ios_docs
-    } else if let Some(db_path) = find_database_path() {
-        Path::new(&db_path).parent().unwrap_or_else(|| Path::new("./")).to_string_lossy().to_string()
+    // Use the same logic as globals.rs to determine the correct storage path
+    let storage_path = if cfg!(target_os = "ios") {
+        println!("🔍 [STORAGE] Detected iOS target, checking IOS_DOCUMENTS_DIR...");
+        match std::env::var("IOS_DOCUMENTS_DIR") {
+            Ok(path) => {
+                println!("✅ [STORAGE] IOS_DOCUMENTS_DIR found: '{}'", path);
+                path
+            },
+            Err(e) => {
+                println!("❌ [STORAGE] IOS_DOCUMENTS_DIR not found: {:?}, using fallback", e);
+                "./storage".to_string()
+            }
+        }
     } else {
-        "./storage".to_string()
+        println!("🔍 [STORAGE] Not iOS target, but checking IOS_DOCUMENTS_DIR anyway...");
+        match std::env::var("IOS_DOCUMENTS_DIR") {
+            Ok(path) => {
+                println!("✅ [STORAGE] IOS_DOCUMENTS_DIR found even on non-iOS target: '{}'", path);
+                path
+            },
+            Err(_) => {
+                println!("📁 [STORAGE] IOS_DOCUMENTS_DIR not set, trying database path...");
+                if let Some(db_path) = find_database_path() {
+                    let db_parent = Path::new(&db_path).parent().unwrap_or_else(|| Path::new("./"));
+                    let db_parent_str = db_parent.to_string_lossy().to_string();
+                    println!("📍 [STORAGE] Using database parent directory: '{}'", db_parent_str);
+                    db_parent_str
+                } else {
+                    println!("🔧 [STORAGE] Using default ./storage");
+                    "./storage".to_string()
+                }
+            }
+        }
     };
     
-    println!("🔍 Checking storage path: {}", storage_path);
+    println!("🗂️ [STORAGE] Final storage path: '{}'", storage_path);
     
     let storage_base = Path::new(&storage_path);
-    let original_dir = storage_base.join("original");
-    let compressed_dir = storage_base.join("compressed");
+    let storage_subdir = storage_base.join("storage");
+    let original_dir = storage_subdir.join("original");
+    let compressed_dir = storage_subdir.join("compressed");
     
     println!("\n📂 Directory structure:");
-    println!("   📁 Original: {}", if original_dir.exists() { "✅ exists" } else { "❌ missing" });
-    println!("   🗜️ Compressed: {}", if compressed_dir.exists() { "✅ exists" } else { "❌ missing" });
+    println!("   📁 Base: {} ({})", storage_path, if storage_base.exists() { "✅ exists" } else { "❌ missing" });
+    println!("   📁 Original: {} ({})", original_dir.display(), if original_dir.exists() { "✅ exists" } else { "❌ missing" });
+    println!("   🗜️ Compressed: {} ({})", compressed_dir.display(), if compressed_dir.exists() { "✅ exists" } else { "❌ missing" });
     
     if original_dir.exists() {
         scan_directory(&original_dir, "📄 Original").await;

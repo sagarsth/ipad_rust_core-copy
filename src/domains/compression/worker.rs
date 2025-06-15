@@ -359,6 +359,49 @@ impl CompressionWorker {
         // Clean up completed jobs
         self.cleanup_completed_jobs().await;
         
+        // Automated maintenance: Run cleanup every 10 minutes (600 seconds)
+        static mut LAST_CLEANUP: Option<Instant> = None;
+        let should_cleanup = unsafe {
+            match LAST_CLEANUP {
+                None => true,
+                Some(last) => last.elapsed().as_secs() >= 600, // 10 minutes
+            }
+        };
+        
+        if should_cleanup {
+            println!("🧹 [COMPRESSION_WORKER] Running automated maintenance");
+            
+            // Run stale document cleanup
+            match self.compression_service.cleanup_stale_documents().await {
+                Ok(cleaned_count) => {
+                    if cleaned_count > 0 {
+                        println!("✅ [MAINTENANCE] Cleaned up {} stale documents", cleaned_count);
+                    }
+                },
+                Err(e) => {
+                    println!("❌ [MAINTENANCE] Stale document cleanup failed: {:?}", e);
+                }
+            }
+            
+            // Run stuck job recovery
+            match self.compression_service.reset_stuck_jobs().await {
+                Ok(reset_count) => {
+                    if reset_count > 0 {
+                        println!("✅ [MAINTENANCE] Reset {} stuck jobs", reset_count);
+                    }
+                },
+                Err(e) => {
+                    println!("❌ [MAINTENANCE] Stuck job recovery failed: {:?}", e);
+                }
+            }
+            
+            unsafe {
+                LAST_CLEANUP = Some(Instant::now());
+            }
+            
+            println!("🎉 [MAINTENANCE] Automated maintenance completed");
+        }
+        
         // Start new jobs if we have capacity
         if self.has_capacity().await {
             if self.start_next_job_if_available().await {
@@ -558,6 +601,16 @@ impl CompressionWorker {
                 Ok(compression_result) => compression_result,
                 Err(_timeout_error) => {
                     println!("⏰ [COMPRESSION_JOB] TIMEOUT after {}s for document {}", timeout_secs, document_id);
+                    
+                    // Check if the document actually completed during the timeout window
+                    if let Ok(Some(doc)) = compression_service.get_document_details(document_id).await {
+                        if doc.compression_status == "completed" {
+                            println!("✅ [COMPRESSION_JOB] Document {} actually completed during timeout window, treating as success", document_id);
+                            // Skip error handling - document was actually successful
+                            return;
+                        }
+                    }
+                    
                     Err(ServiceError::Domain(DomainError::Internal(format!("Compression timed out after {} seconds", timeout_secs))))
                 }
             };
@@ -623,17 +676,43 @@ impl CompressionWorker {
                 Err(e) => {
                     println!("❌ [COMPRESSION_JOB] Document {} compression failed after {:?}: {:?}", document_id, duration, e);
                     
-                    // Update queue entry to failed with error message
-                    let error_message = format!("Compression failed: {}", e);
-                    if let Err(update_err) = compression_repo.update_queue_entry_status_with_tx(
-                        queue_entry.id,
-                        "failed",
-                        Some(&error_message),
-                        &mut tx
-                    ).await {
-                        println!("❌ [COMPRESSION_JOB] Failed to update status to failed: {:?}", update_err);
-                        let _ = tx.rollback().await;
-                        return;
+                    // Check if this is a PDF skip or validation skip that should be marked as skipped
+                    let should_skip = if let ServiceError::Domain(DomainError::Validation(ref validation_err)) = e {
+                        let msg = validation_err.to_string();
+                        msg.contains("PDF compression skipped") ||
+                        msg.contains("already compressed format") ||
+                        msg.contains("would not reduce file size significantly") ||
+                        msg.contains("below minimum size") ||
+                        msg.contains("too large for compression")
+                    } else {
+                        false
+                    };
+                    
+                    if should_skip {
+                        // Mark as skipped instead of failed
+                        if let Err(e) = compression_repo.update_queue_entry_status_with_tx(
+                            queue_entry.id,
+                            "skipped",
+                            Some("Compression skipped - file already optimized or not suitable"),
+                            &mut tx
+                        ).await {
+                            println!("❌ [COMPRESSION_JOB] Failed to update status to skipped: {:?}", e);
+                            let _ = tx.rollback().await;
+                            return;
+                        }
+                    } else {
+                        // Update queue entry to failed with error message
+                        let error_message = format!("Compression failed: {}", e);
+                        if let Err(update_err) = compression_repo.update_queue_entry_status_with_tx(
+                            queue_entry.id,
+                            "failed",
+                            Some(&error_message),
+                            &mut tx
+                        ).await {
+                            println!("❌ [COMPRESSION_JOB] Failed to update status to failed: {:?}", update_err);
+                            let _ = tx.rollback().await;
+                            return;
+                        }
                     }
                 }
             }

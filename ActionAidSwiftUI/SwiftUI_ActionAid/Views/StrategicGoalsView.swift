@@ -1364,6 +1364,12 @@ struct GoalDetailView: View {
     // Document viewing state
     @State private var selectedDocumentURL: IdentifiableURL?
     
+    // Document refresh mechanism
+    @State private var refreshTimer: Timer?
+    @State private var lastRefreshTime = Date()
+    @State private var hasActiveCompressions = false
+    @State private var lastCompressionCount = 0
+    
     var body: some View {
         NavigationView {
             ScrollView {
@@ -1468,7 +1474,7 @@ struct GoalDetailView: View {
                             HStack {
                                 ProgressView()
                                     .scaleEffect(0.8)
-                                Text("Loading documents...")
+                                Text(hasActiveCompressions ? "Refreshing compression status..." : "Loading documents...")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                                 Spacer()
@@ -1525,6 +1531,7 @@ struct GoalDetailView: View {
             .sheet(isPresented: $showUploadSheet) {
                 DocumentUploadSheet(goalId: goal.id, onUploadComplete: {
                     loadDocuments()
+                    startDocumentRefreshTimer()
                 })
             }
             .sheet(isPresented: $showDeleteOptions) {
@@ -1550,6 +1557,10 @@ struct GoalDetailView: View {
             }
             .onAppear {
                 loadDocuments()
+                startDocumentRefreshTimer()
+            }
+            .onDisappear {
+                stopDocumentRefreshTimer()
             }
             .alert("Delete Goal", isPresented: $showDeleteConfirmation) {
                 Button("Cancel", role: .cancel) { }
@@ -1618,12 +1629,75 @@ struct GoalDetailView: View {
                 switch result {
                 case .success(let paginatedResult):
                     documents = paginatedResult.items
+                    updateCompressionStatus()
                 case .failure(let error):
                     print("Failed to load documents: \(error)")
                     documents = []
+                    hasActiveCompressions = false
                 }
             }
         }
+    }
+    
+    private func refreshDocuments() {
+        lastRefreshTime = Date()
+        loadDocuments()
+    }
+    
+    private func smartRefreshDocuments() {
+        // Check if enough time has passed since last refresh to avoid spam
+        let timeSinceLastRefresh = Date().timeIntervalSince(lastRefreshTime)
+        guard timeSinceLastRefresh >= 20.0 else { return }
+        
+        lastRefreshTime = Date()
+        loadDocuments()
+    }
+    
+    private func updateCompressionStatus() {
+        // Check if we have any documents that are currently being compressed
+        let processingStatuses = ["pending", "processing", "in_progress"]
+        let activeCompressions = documents.filter { doc in
+            processingStatuses.contains(doc.compressionStatus.lowercased())
+        }
+        
+        let newHasActiveCompressions = !activeCompressions.isEmpty
+        let newCompressionCount = activeCompressions.count
+        
+        // Check if compressions have finished (count went down)
+        let compressionsFinished = lastCompressionCount > newCompressionCount && lastCompressionCount > 0
+        
+        if newHasActiveCompressions != hasActiveCompressions {
+            hasActiveCompressions = newHasActiveCompressions
+            
+            if hasActiveCompressions {
+                print("🔄 [COMPRESSION_STATUS] \(activeCompressions.count) documents are compressing")
+            } else {
+                print("✅ [COMPRESSION_STATUS] All compressions completed")
+            }
+        } else if compressionsFinished {
+            print("⚡ [COMPRESSION_STATUS] \(lastCompressionCount - newCompressionCount) compression(s) just finished")
+        }
+        
+        lastCompressionCount = newCompressionCount
+    }
+    
+    private func startDocumentRefreshTimer() {
+        // Only start timer if we don't already have one
+        guard refreshTimer == nil else { return }
+        
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { _ in
+            // Only refresh if we have active compressions
+            if self.hasActiveCompressions {
+                Task { @MainActor in
+                    self.smartRefreshDocuments()
+                }
+            }
+        }
+    }
+    
+    private func stopDocumentRefreshTimer() {
+        refreshTimer?.invalidate()
+        refreshTimer = nil
     }
     
     private func deleteGoal(hardDelete: Bool = false) {
@@ -1676,6 +1750,9 @@ struct GoalDetailView: View {
     
     /// Open a document for viewing
     private func openDocument(_ document: MediaDocumentResponse) {
+        // Light refresh before opening to get latest status
+        refreshDocuments()
+        
         Task {
             guard let currentUser = authManager.currentUser else {
                 await MainActor.run {
@@ -1916,14 +1993,16 @@ struct MediaDocumentRow: View {
 // MARK: - Compression Badge
 struct CompressionBadge: View {
     let status: String
+    @State private var isAnimating = false
     
-    var statusConfig: (icon: String, color: Color) {
+    var statusConfig: (icon: String, color: Color, shouldAnimate: Bool) {
         switch status.uppercased() {
-        case "COMPLETED": return ("checkmark.circle.fill", .green)
-        case "IN_PROGRESS", "PROCESSING": return ("arrow.triangle.2.circlepath", .orange)
-        case "FAILED", "ERROR": return ("exclamationmark.triangle.fill", .red)
-        case "PENDING": return ("clock", .gray)
-        default: return ("questionmark.circle", .gray)
+        case "COMPLETED": return ("checkmark.circle.fill", .green, false)
+        case "SKIPPED": return ("checkmark.circle.fill", .green, false) // Green checkmark for skipped - already optimized
+        case "IN_PROGRESS", "PROCESSING": return ("circle.dotted", .orange, false)
+        case "FAILED", "ERROR": return ("exclamationmark.triangle.fill", .red, false)
+        case "PENDING": return ("circle", .gray, false)
+        default: return ("questionmark.circle", .gray, false)
         }
     }
     
@@ -1931,6 +2010,31 @@ struct CompressionBadge: View {
         Image(systemName: statusConfig.icon)
             .font(.caption)
             .foregroundColor(statusConfig.color)
+            .rotationEffect(.degrees(isAnimating ? 360 : 0))
+            .onAppear {
+                if statusConfig.shouldAnimate {
+                    startAnimation()
+                }
+            }
+            .onChange(of: status) { oldStatus, newStatus in
+                if statusConfig.shouldAnimate {
+                    startAnimation()
+                } else {
+                    stopAnimation()
+                }
+            }
+    }
+    
+    private func startAnimation() {
+        withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
+            isAnimating = true
+        }
+    }
+    
+    private func stopAnimation() {
+        withAnimation(.easeOut(duration: 0.3)) {
+            isAnimating = false
+        }
     }
 }
 
@@ -2595,115 +2699,119 @@ struct DocumentUploadSheet: View {
     }
     
     private func generatePhotoFilename(for photo: PhotosPickerItem, contentType: UTType? = nil) -> String {
-        // Try to get the original filename if available
+        let timestamp = Date().timeIntervalSince1970
+        
+        // Create identifier for filename (use itemIdentifier if available, otherwise generate one)
+        let shortId: String
         if let identifier = photo.itemIdentifier {
-            // Use the identifier to create a meaningful filename
-            let timestamp = Date().timeIntervalSince1970
-            let shortId = String(identifier.prefix(8))
+            shortId = String(identifier.prefix(8))
+            print("📸 [FILENAME_GEN] Using photo identifier: \(shortId)")
+        } else {
+            shortId = "no-id"
+            print("📸 [FILENAME_GEN] No photo identifier available, using: \(shortId)")
+        }
+        
+        // Debug: Print all supported content types for troubleshooting
+        print("📸 [FILENAME_GEN] Photo \(shortId) supported types: \(photo.supportedContentTypes.map(\.identifier))")
+        print("📸 [FILENAME_GEN] Starting video detection for \(photo.supportedContentTypes.count) types...")
+        
+        // PRIORITY 1: Check ALL supported types for video indicators FIRST (ALWAYS RUN, REGARDLESS OF IDENTIFIER)
+        for (index, supportedType) in photo.supportedContentTypes.enumerated() {
+            print("📸 [FILENAME_GEN] [\(index + 1)/\(photo.supportedContentTypes.count)] Checking type: \(supportedType.identifier)")
             
-            // Debug: Print all supported content types for troubleshooting
-            print("📸 [FILENAME_GEN] Photo \(shortId) supported types: \(photo.supportedContentTypes.map(\.identifier))")
-            print("📸 [FILENAME_GEN] Starting video detection for \(photo.supportedContentTypes.count) types...")
-            
-            // PRIORITY 1: Check ALL supported types for video indicators FIRST
-            for (index, supportedType) in photo.supportedContentTypes.enumerated() {
-                print("📸 [FILENAME_GEN] [\(index + 1)/\(photo.supportedContentTypes.count)] Checking type: \(supportedType.identifier)")
-                
-                // MP4 video detection - multiple ways to detect (MOST SPECIFIC FIRST)
-                if supportedType.identifier == "public.mpeg-4" {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via exact match: \(supportedType.identifier)")
-                    return "video_\(shortId)_\(Int(timestamp)).mp4"
-                }
-                
-                if supportedType.identifier == "com.apple.quicktime-movie" {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via exact match: \(supportedType.identifier)")
-                    return "video_\(shortId)_\(Int(timestamp)).mov"
-                }
-                
-                if supportedType.identifier.contains("mpeg-4") {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via contains mpeg-4: \(supportedType.identifier)")
-                    return "video_\(shortId)_\(Int(timestamp)).mp4"
-                }
-                
-                if supportedType.identifier.contains("mp4") {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via contains mp4: \(supportedType.identifier)")
-                    return "video_\(shortId)_\(Int(timestamp)).mp4"
-                }
-                
-                if supportedType.identifier.contains("quicktime") {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via contains quicktime: \(supportedType.identifier)")
-                    return "video_\(shortId)_\(Int(timestamp)).mov"
-                }
-                
-                if supportedType.identifier.contains("video") {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED GENERIC VIDEO via contains video: \(supportedType.identifier)")
-                    return "video_\(shortId)_\(Int(timestamp)).mp4"
-                }
-                
-                // UTType conformance checks (might be more reliable)
-                if supportedType.conforms(to: .mpeg4Movie) {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via UTType.mpeg4Movie conformance: \(supportedType.identifier)")
-                    return "video_\(shortId)_\(Int(timestamp)).mp4"
-                }
-                
-                if supportedType.conforms(to: .quickTimeMovie) {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via UTType.quickTimeMovie conformance: \(supportedType.identifier)")
-                    return "video_\(shortId)_\(Int(timestamp)).mov"
-                }
-                
-                if supportedType.conforms(to: .video) {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED GENERIC VIDEO via UTType.video conformance: \(supportedType.identifier)")
-                    return "video_\(shortId)_\(Int(timestamp)).mp4"
-                }
-                
-                print("📸 [FILENAME_GEN] [\(index + 1)/\(photo.supportedContentTypes.count)] ❌ No video match for: \(supportedType.identifier)")
+            // MP4 video detection - multiple ways to detect (MOST SPECIFIC FIRST)
+            if supportedType.identifier == "public.mpeg-4" {
+                print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via exact match: \(supportedType.identifier)")
+                return "video_\(shortId)_\(Int(timestamp)).mp4"
             }
             
-            print("📸 [FILENAME_GEN] ⚠️ No video types detected in primary loop, checking image types...")
-            
-            // PRIORITY 2: Check provided content type or first supported type for images
-            let typeToCheck = contentType ?? photo.supportedContentTypes.first
-            
-            if let type = typeToCheck {
-                print("📸 [FILENAME_GEN] Checking primary type: \(type.identifier)")
-                
-                // Image types (only after video check fails)
-                if type.conforms(to: .heif) || type.identifier == "public.heif" {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED HEIF IMAGE")
-                    return "photo_\(shortId)_\(Int(timestamp)).heif"
-                } else if type.conforms(to: .heic) || type.identifier == "public.heic" {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED HEIC IMAGE")
-                    return "photo_\(shortId)_\(Int(timestamp)).heic"
-                } else if type.conforms(to: .jpeg) || type.identifier == "public.jpeg" {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED JPEG IMAGE")
-                    return "photo_\(shortId)_\(Int(timestamp)).jpg"
-                } else if type.conforms(to: .png) || type.identifier == "public.png" {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED PNG IMAGE")
-                    return "photo_\(shortId)_\(Int(timestamp)).png"
-                } else if type.conforms(to: .webP) {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED WebP IMAGE")
-                    return "photo_\(shortId)_\(Int(timestamp)).webp"
-                } else if type.conforms(to: .gif) {
-                    print("📸 [FILENAME_GEN] ✅ DETECTED GIF IMAGE")
-                    return "photo_\(shortId)_\(Int(timestamp)).gif"
-                }
+            if supportedType.identifier == "com.apple.quicktime-movie" {
+                print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via exact match: \(supportedType.identifier)")
+                return "video_\(shortId)_\(Int(timestamp)).mov"
             }
             
-            // PRIORITY 3: Standard image fallbacks based on supported types
-            if photo.supportedContentTypes.contains(.heif) || photo.supportedContentTypes.contains(.heic) {
-                print("📸 [FILENAME_GEN] ✅ FALLBACK: HEIC IMAGE")
+            if supportedType.identifier.contains("mpeg-4") {
+                print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via contains mpeg-4: \(supportedType.identifier)")
+                return "video_\(shortId)_\(Int(timestamp)).mp4"
+            }
+            
+            if supportedType.identifier.contains("mp4") {
+                print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via contains mp4: \(supportedType.identifier)")
+                return "video_\(shortId)_\(Int(timestamp)).mp4"
+            }
+            
+            if supportedType.identifier.contains("quicktime") {
+                print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via contains quicktime: \(supportedType.identifier)")
+                return "video_\(shortId)_\(Int(timestamp)).mov"
+            }
+            
+            if supportedType.identifier.contains("video") {
+                print("📸 [FILENAME_GEN] ✅ DETECTED GENERIC VIDEO via contains video: \(supportedType.identifier)")
+                return "video_\(shortId)_\(Int(timestamp)).mp4"
+            }
+            
+            // UTType conformance checks (might be more reliable)
+            if supportedType.conforms(to: .mpeg4Movie) {
+                print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via UTType.mpeg4Movie conformance: \(supportedType.identifier)")
+                return "video_\(shortId)_\(Int(timestamp)).mp4"
+            }
+            
+            if supportedType.conforms(to: .quickTimeMovie) {
+                print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via UTType.quickTimeMovie conformance: \(supportedType.identifier)")
+                return "video_\(shortId)_\(Int(timestamp)).mov"
+            }
+            
+            if supportedType.conforms(to: .video) {
+                print("📸 [FILENAME_GEN] ✅ DETECTED GENERIC VIDEO via UTType.video conformance: \(supportedType.identifier)")
+                return "video_\(shortId)_\(Int(timestamp)).mp4"
+            }
+            
+            print("📸 [FILENAME_GEN] [\(index + 1)/\(photo.supportedContentTypes.count)] ❌ No video match for: \(supportedType.identifier)")
+        }
+        
+        print("📸 [FILENAME_GEN] ⚠️ No video types detected in primary loop, checking image types...")
+        
+        // PRIORITY 2: Check provided content type or first supported type for images
+        let typeToCheck = contentType ?? photo.supportedContentTypes.first
+        
+        if let type = typeToCheck {
+            print("📸 [FILENAME_GEN] Checking primary type: \(type.identifier)")
+            
+            // Image types (only after video check fails)
+            if type.conforms(to: .heif) || type.identifier == "public.heif" {
+                print("📸 [FILENAME_GEN] ✅ DETECTED HEIF IMAGE")
+                return "photo_\(shortId)_\(Int(timestamp)).heif"
+            } else if type.conforms(to: .heic) || type.identifier == "public.heic" {
+                print("📸 [FILENAME_GEN] ✅ DETECTED HEIC IMAGE")
                 return "photo_\(shortId)_\(Int(timestamp)).heic"
-            } else if photo.supportedContentTypes.contains(.jpeg) {
-                print("📸 [FILENAME_GEN] ✅ FALLBACK: JPEG IMAGE")
+            } else if type.conforms(to: .jpeg) || type.identifier == "public.jpeg" {
+                print("📸 [FILENAME_GEN] ✅ DETECTED JPEG IMAGE")
                 return "photo_\(shortId)_\(Int(timestamp)).jpg"
-            } else if photo.supportedContentTypes.contains(.png) {
-                print("📸 [FILENAME_GEN] ✅ FALLBACK: PNG IMAGE")
+            } else if type.conforms(to: .png) || type.identifier == "public.png" {
+                print("📸 [FILENAME_GEN] ✅ DETECTED PNG IMAGE")
                 return "photo_\(shortId)_\(Int(timestamp)).png"
+            } else if type.conforms(to: .webP) {
+                print("📸 [FILENAME_GEN] ✅ DETECTED WebP IMAGE")
+                return "photo_\(shortId)_\(Int(timestamp)).webp"
+            } else if type.conforms(to: .gif) {
+                print("📸 [FILENAME_GEN] ✅ DETECTED GIF IMAGE")
+                return "photo_\(shortId)_\(Int(timestamp)).gif"
             }
         }
         
+        // PRIORITY 3: Standard image fallbacks based on supported types
+        if photo.supportedContentTypes.contains(.heif) || photo.supportedContentTypes.contains(.heic) {
+            print("📸 [FILENAME_GEN] ✅ FALLBACK: HEIC IMAGE")
+            return "photo_\(shortId)_\(Int(timestamp)).heic"
+        } else if photo.supportedContentTypes.contains(.jpeg) {
+            print("📸 [FILENAME_GEN] ✅ FALLBACK: JPEG IMAGE")
+            return "photo_\(shortId)_\(Int(timestamp)).jpg"
+        } else if photo.supportedContentTypes.contains(.png) {
+            print("📸 [FILENAME_GEN] ✅ FALLBACK: PNG IMAGE")
+            return "photo_\(shortId)_\(Int(timestamp)).png"
+        }
+        
         // FINAL FALLBACK - but make it more specific
-        let timestamp = Date().timeIntervalSince1970
         print("📸 [FILENAME_GEN] ⚠️ Using final fallback filename")
         print("📸 [FILENAME_GEN] ⚠️ All supported types: \(photo.supportedContentTypes.map(\.identifier))")
         
@@ -2883,58 +2991,76 @@ struct DocumentUploadSheet: View {
                     
                     print("🚀 [BULK_UPLOAD] Using optimized path-based bulk upload")
                     
-                    let filePaths = fileManager.optimizedFiles.map { ($0.tempPath, $0.name) }
+                    // 🔧 FIXED: For bulk upload, we need to detect the document type for each individual file
+                    // Since the backend bulk upload function expects a single documentTypeId, we'll use individual uploads for mixed types
+                    var allResults: [UploadResult] = []
+                    var hasAnySuccess = false
                     
-                    // Get actual document type ID for bulk upload
-                    let defaultDocTypeId = await getDefaultDocumentTypeId()
-                    let documentTypeId = defaultDocTypeId ?? "00000000-0000-0000-0000-000000000000"
-                    
-                    let result = await ffiHandler.bulkUploadDocumentsFromPaths(
-                        goalId: goalId,
-                        filePaths: filePaths,               // Array of paths, no Base64!
-                        title: documentTitle.isEmpty ? nil : documentTitle,
-                        documentTypeId: documentTypeId,
-                        syncPriority: priority,
-                        compressionPriority: .normal,
-                        auth: authContext
-                    )
+                    for file in fileManager.optimizedFiles {
+                        print("🔍 [BULK_UPLOAD] Processing file: \(file.name)")
+                        
+                        // Detect specific document type for each file
+                        let specificDocTypeId = await detectDocumentType(for: file.name)
+                        let finalDocTypeId: String
+                        if specificDocTypeId != nil {
+                            finalDocTypeId = specificDocTypeId!
+                            print("🎯 [BULK_UPLOAD] Using specific document type for \(file.name): \(finalDocTypeId)")
+                        } else {
+                            finalDocTypeId = await getDefaultDocumentTypeId() ?? "00000000-0000-0000-0000-000000000000"
+                            print("⚠️ [BULK_UPLOAD] Using default document type for \(file.name): \(finalDocTypeId)")
+                        }
+                        
+                        // Upload each file individually to ensure correct document type
+                        let result = await ffiHandler.uploadDocumentFromPath(
+                            goalId: goalId,
+                            filePath: file.tempPath,
+                            originalFilename: file.name,
+                            title: documentTitle.isEmpty ? nil : documentTitle,
+                            documentTypeId: finalDocTypeId,
+                            linkedField: nil, // Bulk uploads don't support field linking
+                            syncPriority: priority,
+                            compressionPriority: .normal,
+                            auth: authContext
+                        )
+                        
+                        switch result {
+                        case .success(let document):
+                            print("✅ [BULK_UPLOAD] Successfully uploaded: \(file.name) as \(document.typeName ?? "Unknown")")
+                            allResults.append(UploadResult(
+                                filename: document.originalFilename,
+                                success: true,
+                                message: "✅ iOS Optimized Individual Upload - \(document.typeName ?? "Document")"
+                            ))
+                            hasAnySuccess = true
+                            
+                        case .failure(let error):
+                            print("❌ [BULK_UPLOAD] Failed to upload: \(file.name) - \(error)")
+                            allResults.append(UploadResult(
+                                filename: file.name,
+                                success: false,
+                                message: "Failed to upload: \(error.localizedDescription)"
+                            ))
+                        }
+                        
+                        // Clean up individual file after upload attempt
+                        file.cleanup()
+                    }
                     
                     await MainActor.run {
                         self.isUploading = false
+                        self.uploadResults = allResults
                         
-                        switch result {
-                        case .success(let documents):
-                            self.uploadResults = documents.map { doc in
-                                UploadResult(
-                                    filename: doc.originalFilename,
-                                    success: true,
-                                    message: "✅ iOS Optimized Bulk Upload - \(doc.typeName ?? "Document")"
-                                )
-                            }
+                        if hasAnySuccess {
+                            onUploadComplete()
                             
-                            if !uploadResults.isEmpty {
-                                onUploadComplete()
-                                
-                                // Clean up temp files after successful bulk upload
-                                fileManager.clearAll()
-                                
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                                    dismiss()
-                                }
-                            }
-                            
-                        case .failure(let error):
-                            self.errorMessage = "Optimized bulk upload failed: \(error.localizedDescription)"
-                            self.uploadResults = fileManager.optimizedFiles.map { file in
-                                UploadResult(
-                                    filename: file.name,
-                                    success: false,
-                                    message: "Failed to upload"
-                                )
-                            }
-                            
-                            // Clean up temp files after upload attempt
+                            // Clear the file manager since individual files were already cleaned up
                             fileManager.clearAll()
+                            
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                dismiss()
+                            }
+                        } else {
+                            self.errorMessage = "All uploads failed. Please check the files and try again."
                         }
                     }
                 } else {
@@ -3505,4 +3631,5 @@ struct QuickLookView: UIViewControllerRepresentable {
         }
     }
 }
+
 

@@ -730,10 +730,25 @@ impl SoftDeletable for SqliteMediaDocumentRepository {
         .map_err(DbError::from)?;
 
         if result.rows_affected() == 0 {
-            Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id))
-        } else {
-            Ok(())
+            return Err(DomainError::EntityNotFound(Self::entity_name().to_string(), id));
         }
+
+        // CRITICAL FIX: Clean up compression queue when document is soft-deleted
+        // This prevents the compression worker from processing deleted documents
+        let cleanup_result = query(
+            "DELETE FROM compression_queue WHERE document_id = ?"
+        )
+        .bind(id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(DbError::from)?;
+
+        if cleanup_result.rows_affected() > 0 {
+            log::info!("Cleaned up {} compression queue entries for soft-deleted document {}", 
+                      cleanup_result.rows_affected(), id);
+        }
+
+        Ok(())
     }
     async fn soft_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
         let mut tx = self.pool.begin().await.map_err(|e| DomainError::Database(DbError::from(e)))?; // Changed map_err(DbError::from)
@@ -759,8 +774,17 @@ impl HardDeletable for SqliteMediaDocumentRepository {
         _auth: &AuthContext,
         tx: &mut Transaction<'_, Sqlite>,
     ) -> DomainResult<()> {
-         let result = query("DELETE FROM media_documents WHERE id = ?")
-            .bind(id.to_string())
+        // 1. Remove from compression queue BEFORE deleting the document
+        let doc_id_str = id.to_string();
+        query("DELETE FROM compression_queue WHERE document_id = ?")
+            .bind(&doc_id_str)
+            .execute(&mut **tx)
+            .await
+            .map_err(DbError::from)?;
+        
+        // 2. Delete the document record
+        let result = query("DELETE FROM media_documents WHERE id = ?")
+            .bind(doc_id_str)
             .execute(&mut **tx)
             .await
             .map_err(DbError::from)?;

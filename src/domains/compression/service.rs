@@ -104,6 +104,12 @@ pub trait CompressionService: Send + Sync {
         document_id: Uuid,
         compressed_file_path: &str,
     ) -> ServiceResult<()>;
+
+    /// Clean up stale documents and queue entries (automated maintenance)
+    async fn cleanup_stale_documents(&self) -> ServiceResult<u64>;
+
+    /// Reset stuck compression jobs (automated recovery)
+    async fn reset_stuck_jobs(&self) -> ServiceResult<u64>;
 }
 
 pub struct CompressionServiceImpl {
@@ -1113,5 +1119,214 @@ impl CompressionService for CompressionServiceImpl {
         println!("   🔒 Compressed file will be preserved: {}", compressed_file_path);
         
         Ok(())
+    }
+
+    /// Clean up stale documents and queue entries (automated maintenance)
+    async fn cleanup_stale_documents(&self) -> ServiceResult<u64> {
+        println!("🧹 [COMPRESSION_SERVICE] Starting automated stale document cleanup");
+        let mut total_cleaned = 0u64;
+
+        // 1. Clean up orphaned queue entries (documents that no longer exist)
+        match sqlx::query!(
+            r#"
+            DELETE FROM compression_queue 
+            WHERE document_id NOT IN (
+                SELECT id FROM media_documents WHERE deleted_at IS NULL
+            )
+            "#
+        )
+        .execute(&self.pool)
+        .await {
+            Ok(result) => {
+                let orphaned_count = result.rows_affected();
+                if orphaned_count > 0 {
+                    total_cleaned += orphaned_count;
+                    println!("✅ [CLEANUP] Removed {} orphaned queue entries", orphaned_count);
+                }
+            },
+            Err(e) => {
+                println!("❌ [CLEANUP] Failed to clean orphaned queue entries: {:?}", e);
+            }
+        }
+
+        // 2. Clean up queue entries for deleted documents
+        match sqlx::query!(
+            r#"
+            DELETE FROM compression_queue 
+            WHERE document_id IN (
+                SELECT id FROM media_documents WHERE deleted_at IS NOT NULL
+            )
+            "#
+        )
+        .execute(&self.pool)
+        .await {
+            Ok(result) => {
+                let deleted_count = result.rows_affected();
+                if deleted_count > 0 {
+                    total_cleaned += deleted_count;
+                    println!("✅ [CLEANUP] Removed {} queue entries for deleted documents", deleted_count);
+                }
+            },
+            Err(e) => {
+                println!("❌ [CLEANUP] Failed to clean deleted document queues: {:?}", e);
+            }
+        }
+
+        // 3. Reset documents stuck in 'processing' state for more than 1 hour
+        match sqlx::query!(
+            r#"
+            UPDATE media_documents 
+            SET 
+                compression_status = 'pending',
+                updated_at = datetime('now'),
+                has_error = 0,
+                error_message = NULL
+            WHERE compression_status = 'processing'
+            AND (julianday('now') - julianday(updated_at)) * 24 * 60 > 60
+            AND deleted_at IS NULL
+            "#
+        )
+        .execute(&self.pool)
+        .await {
+            Ok(result) => {
+                let stuck_count = result.rows_affected();
+                if stuck_count > 0 {
+                    total_cleaned += stuck_count;
+                    println!("✅ [CLEANUP] Reset {} stuck documents from processing to pending", stuck_count);
+                }
+            },
+            Err(e) => {
+                println!("❌ [CLEANUP] Failed to reset stuck documents: {:?}", e);
+            }
+        }
+
+        // 4. Clean up very old failed documents (older than 7 days) - mark as skipped to stop retries
+        match sqlx::query!(
+            r#"
+            UPDATE media_documents 
+            SET 
+                compression_status = 'skipped',
+                updated_at = datetime('now'),
+                error_message = 'Skipped after 7 days of failures'
+            WHERE compression_status = 'failed'
+            AND (julianday('now') - julianday(updated_at)) > 7
+            AND deleted_at IS NULL
+            "#
+        )
+        .execute(&self.pool)
+        .await {
+            Ok(result) => {
+                let old_failed_count = result.rows_affected();
+                if old_failed_count > 0 {
+                    total_cleaned += old_failed_count;
+                    println!("✅ [CLEANUP] Marked {} old failed documents as skipped", old_failed_count);
+                }
+            },
+            Err(e) => {
+                println!("❌ [CLEANUP] Failed to clean old failed documents: {:?}", e);
+            }
+        }
+
+        if total_cleaned > 0 {
+            println!("🎉 [CLEANUP] Completed stale document cleanup: {} items processed", total_cleaned);
+        } else {
+            println!("✨ [CLEANUP] No stale documents found - system is clean");
+        }
+
+        Ok(total_cleaned)
+    }
+
+    /// Reset stuck compression jobs (automated recovery)
+    async fn reset_stuck_jobs(&self) -> ServiceResult<u64> {
+        println!("🔄 [COMPRESSION_SERVICE] Starting stuck job recovery");
+        let mut total_reset = 0u64;
+
+        // 1. Reset queue entries stuck in 'processing' state for more than 30 minutes
+        match sqlx::query!(
+            r#"
+            UPDATE compression_queue 
+            SET 
+                status = 'pending',
+                attempts = CASE 
+                    WHEN attempts >= 3 THEN 0  -- Reset attempts if too many failures
+                    ELSE attempts 
+                END,
+                error_message = NULL,
+                updated_at = datetime('now')
+            WHERE status = 'processing'
+            AND (julianday('now') - julianday(updated_at)) * 24 * 60 > 30
+            "#
+        )
+        .execute(&self.pool)
+        .await {
+            Ok(result) => {
+                let stuck_queue_count = result.rows_affected();
+                if stuck_queue_count > 0 {
+                    total_reset += stuck_queue_count;
+                    println!("✅ [RECOVERY] Reset {} stuck queue entries", stuck_queue_count);
+                }
+            },
+            Err(e) => {
+                println!("❌ [RECOVERY] Failed to reset stuck queue entries: {:?}", e);
+            }
+        }
+
+        // 2. Reset failed queue entries that have been failing for less than 24 hours (give them another chance)
+        match sqlx::query!(
+            r#"
+            UPDATE compression_queue 
+            SET 
+                status = 'pending',
+                attempts = 0,
+                error_message = NULL,
+                updated_at = datetime('now')
+            WHERE status = 'failed'
+            AND attempts < 5  -- Only retry if not too many attempts
+            AND (julianday('now') - julianday(updated_at)) * 24 < 24  -- Less than 24 hours old
+            "#
+        )
+        .execute(&self.pool)
+        .await {
+            Ok(result) => {
+                let retry_count = result.rows_affected();
+                if retry_count > 0 {
+                    total_reset += retry_count;
+                    println!("✅ [RECOVERY] Gave {} failed jobs another chance", retry_count);
+                }
+            },
+            Err(e) => {
+                println!("❌ [RECOVERY] Failed to retry failed jobs: {:?}", e);
+            }
+        }
+
+        // 3. Remove very old failed queue entries (older than 7 days) to prevent queue bloat
+        match sqlx::query!(
+            r#"
+            DELETE FROM compression_queue 
+            WHERE status = 'failed'
+            AND (julianday('now') - julianday(updated_at)) > 7
+            "#
+        )
+        .execute(&self.pool)
+        .await {
+            Ok(result) => {
+                let old_failed_count = result.rows_affected();
+                if old_failed_count > 0 {
+                    total_reset += old_failed_count;
+                    println!("✅ [RECOVERY] Removed {} very old failed queue entries", old_failed_count);
+                }
+            },
+            Err(e) => {
+                println!("❌ [RECOVERY] Failed to remove old failed entries: {:?}", e);
+            }
+        }
+
+        if total_reset > 0 {
+            println!("🎉 [RECOVERY] Completed stuck job recovery: {} items processed", total_reset);
+        } else {
+            println!("✨ [RECOVERY] No stuck jobs found - queue is healthy");
+        }
+
+        Ok(total_reset)
     }
 }

@@ -1,7 +1,7 @@
 //! Repository for compression queue and stats
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{Utc, DateTime, NaiveDateTime};
 use sqlx::{Pool, Sqlite, Transaction};
 use uuid::Uuid;
 use tokio::time::{sleep, Duration};
@@ -10,6 +10,22 @@ use crate::errors::{DbError, DomainError, DomainResult};
 use super::types::{
     CompressionQueueEntry, CompressionQueueStatus, CompressionStats
 };
+
+/// Helper function to parse dates in both RFC3339 and SQLite formats
+fn parse_flexible_datetime(date_str: &str) -> DomainResult<DateTime<Utc>> {
+    // Try RFC3339 format first (e.g., "2025-06-15T11:35:09.547939+00:00")
+    if let Ok(dt) = DateTime::parse_from_rfc3339(date_str) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    
+    // Try SQLite format (e.g., "2025-06-15 11:19:22")
+    if let Ok(naive_dt) = NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M:%S") {
+        return Ok(naive_dt.and_utc());
+    }
+    
+    // If both fail, return error
+    Err(DomainError::Internal(format!("Invalid date format: {}", date_str)))
+}
 
 /// Helper function to retry database operations that fail due to locking
 async fn execute_with_retry<T, F, Fut>(operation: F, max_retries: u32) -> DomainResult<T>
@@ -311,15 +327,17 @@ impl CompressionRepository for SqliteCompressionRepository {
     async fn get_next_document_for_compression(&self) -> DomainResult<Option<CompressionQueueEntry>> {
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
         
-        // First, check if document is available (not in use)
+        // First, check if document is available (not in use AND not deleted)
         let row = sqlx::query!(
             r#"
             SELECT cq.id, cq.document_id
             FROM compression_queue cq
+            INNER JOIN media_documents md ON cq.document_id = md.id
             LEFT JOIN active_file_usage afu ON 
                 cq.document_id = afu.document_id AND 
                 afu.last_active_at > datetime('now', '-5 minutes')
             WHERE cq.status = 'pending'
+            AND md.deleted_at IS NULL -- CRITICAL: Skip soft-deleted documents
             AND afu.document_id IS NULL -- Skip documents that are in use
             ORDER BY cq.priority DESC, cq.created_at ASC
             LIMIT 1
@@ -465,12 +483,14 @@ impl CompressionRepository for SqliteCompressionRepository {
     async fn get_queue_status(&self) -> DomainResult<CompressionQueueStatus> {
         let row = sqlx::query!(
             "SELECT 
-                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,
-                SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) as processing_count,
-                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count,
-                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed_count,
-                SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped_count
-             FROM compression_queue"
+                SUM(CASE WHEN cq.status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+                SUM(CASE WHEN cq.status = 'processing' THEN 1 ELSE 0 END) as processing_count,
+                SUM(CASE WHEN cq.status = 'completed' THEN 1 ELSE 0 END) as completed_count,
+                SUM(CASE WHEN cq.status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN cq.status = 'skipped' THEN 1 ELSE 0 END) as skipped_count
+             FROM compression_queue cq
+             INNER JOIN media_documents md ON cq.document_id = md.id
+             WHERE md.deleted_at IS NULL"
         )
         .fetch_one(&self.pool)
         .await
@@ -630,13 +650,8 @@ impl CompressionRepository for SqliteCompressionRepository {
                 let document_id_uuid = Uuid::parse_str(&row.document_id)
                     .map_err(|_| DomainError::InvalidUuid(row.document_id.clone()))?;
                 
-                let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
-                    .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", row.created_at)))?
-                    .with_timezone(&Utc);
-                
-                let updated_at = chrono::DateTime::parse_from_rfc3339(&row.updated_at)
-                    .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", row.updated_at)))?
-                    .with_timezone(&Utc);
+                        let created_at = parse_flexible_datetime(&row.created_at)?;
+        let updated_at = parse_flexible_datetime(&row.updated_at)?;
                 
                 Ok(Some(CompressionQueueEntry {
                     id: queue_id,
@@ -729,13 +744,8 @@ impl SqliteCompressionRepository {
         let document_id = Uuid::parse_str(&row.document_id)
             .map_err(|_| DomainError::InvalidUuid(row.document_id.clone()))?;
         
-        let created_at = chrono::DateTime::parse_from_rfc3339(&row.created_at)
-            .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", row.created_at)))?
-            .with_timezone(&Utc);
-        
-        let updated_at = chrono::DateTime::parse_from_rfc3339(&row.updated_at)
-            .map_err(|_| DomainError::Internal(format!("Invalid date format: {}", row.updated_at)))?
-            .with_timezone(&Utc);
+        let created_at = parse_flexible_datetime(&row.created_at)?;
+        let updated_at = parse_flexible_datetime(&row.updated_at)?;
         
         Ok(CompressionQueueEntry {
             id: queue_id,

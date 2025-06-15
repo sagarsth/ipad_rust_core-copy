@@ -1659,6 +1659,92 @@ pub unsafe extern "C" fn compression_detect_ios_capabilities(result: *mut *mut c
         *result = json_result;
     }
     if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
+}
+
+/// Manual cleanup of stale documents and stuck jobs
+/// This function immediately cleans up the compression system and can be called anytime
+/// Output: JSON with cleanup results
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn compression_cleanup_stale_documents(result: *mut *mut c_char) -> c_int {
+    let json_result = handle_json_result(|| -> FFIResult<serde_json::Value> {
+        let compression_service = globals::get_compression_service()?;
+        
+        crate::ffi::block_on_async(async {
+            println!("🧹 [FFI] Manual stale document cleanup triggered");
+            
+            // Run stale document cleanup
+            let stale_cleanup_result = compression_service.cleanup_stale_documents().await;
+            let stale_cleaned = match &stale_cleanup_result {
+                Ok(count) => *count,
+                Err(e) => {
+                    println!("❌ [FFI] Stale document cleanup failed: {:?}", e);
+                    0
+                }
+            };
+            
+            // Run stuck job recovery
+            let stuck_recovery_result = compression_service.reset_stuck_jobs().await;
+            let stuck_reset = match &stuck_recovery_result {
+                Ok(count) => *count,
+                Err(e) => {
+                    println!("❌ [FFI] Stuck job recovery failed: {:?}", e);
+                    0
+                }
+            };
+            
+            let total_processed = stale_cleaned + stuck_reset;
+            let success = stale_cleanup_result.is_ok() && stuck_recovery_result.is_ok();
+            
+            let mut issues = Vec::new();
+            let mut actions = Vec::new();
+            
+            if stale_cleaned > 0 {
+                actions.push(format!("Cleaned up {} stale documents", stale_cleaned));
+            }
+            if stuck_reset > 0 {
+                actions.push(format!("Reset {} stuck jobs", stuck_reset));
+            }
+            if total_processed == 0 {
+                actions.push("No cleanup needed - system is healthy".to_string());
+            }
+            
+            if let Err(e) = stale_cleanup_result {
+                issues.push(format!("Stale cleanup error: {}", e));
+            }
+            if let Err(e) = stuck_recovery_result {
+                issues.push(format!("Stuck job recovery error: {}", e));
+            }
+            
+            println!("🎉 [FFI] Manual cleanup completed: {} items processed", total_processed);
+            
+            Ok(serde_json::json!({
+                "status": if success { "success" } else { "partial_success" },
+                "total_processed": total_processed,
+                "stale_documents_cleaned": stale_cleaned,
+                "stuck_jobs_reset": stuck_reset,
+                "actions_taken": actions,
+                "issues": issues,
+                "timestamp": chrono::Utc::now().to_rfc3339(),
+                "recommendations": if total_processed > 0 {
+                    vec![
+                        "✅ Compression system cleaned up successfully",
+                        "🔄 New documents should now process faster",
+                        "📊 Check compression queue status for current state"
+                    ]
+                } else {
+                    vec![
+                        "✨ System was already clean",
+                        "🚀 Compression system is running optimally"
+                    ]
+                }
+            }))
+        })
+    });
+    
+    if !result.is_null() {
+        *result = json_result;
+    }
+    if json_result.is_null() { ErrorCode::InternalError as c_int } else { ErrorCode::Success as c_int }
 } 
 
 

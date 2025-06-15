@@ -215,7 +215,7 @@ pub trait StrategicGoalService: DeleteService<StrategicGoal> + Send + Sync {
 pub struct StrategicGoalServiceImpl {
     pool: SqlitePool,
     repo: Arc<dyn StrategicGoalRepository + Send + Sync>,
-    delete_service: Arc<BaseDeleteService<StrategicGoal>>,
+    delete_service: Arc<dyn DeleteService<StrategicGoal>>,
     document_service: Arc<dyn DocumentService>,
     // --- ADDED: Project Repository --- 
     project_repo: Arc<dyn ProjectRepository + Send + Sync>,
@@ -233,78 +233,18 @@ impl StrategicGoalServiceImpl {
         document_service: Arc<dyn DocumentService>,
         // --- ADDED: Inject Project Repository --- 
         project_repo: Arc<dyn ProjectRepository + Send + Sync>,
-        // --- ADDED: Inject User Repository --- 
+        // --- ADDED: User Repository for username lookups --- 
         user_repo: Arc<dyn UserRepository + Send + Sync>,
         deletion_manager: Arc<PendingDeletionManager>,
+        // --- ADDED: Inject the properly configured delete service from globals ---
+        delete_service: Arc<dyn DeleteService<StrategicGoal>>,
     ) -> Self {
-        // Define a local wrapper struct that implements DeleteServiceRepository
-        struct RepoAdapter(Arc<dyn StrategicGoalRepository + Send + Sync>);
-
-        #[async_trait]
-        impl FindById<StrategicGoal> for RepoAdapter {
-            async fn find_by_id(&self, id: Uuid) -> DomainResult<StrategicGoal> {
-                self.0.find_by_id(id).await
-            }
-        }
-
-        #[async_trait]
-        impl SoftDeletable for RepoAdapter {
-            async fn soft_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
-                 self.0.soft_delete(id, auth).await
-             }
-             
-             async fn soft_delete_with_tx(
-                 &self,
-                 id: Uuid,
-                 auth: &AuthContext,
-                 tx: &mut Transaction<'_, Sqlite>,
-             ) -> DomainResult<()> {
-                 self.0.soft_delete_with_tx(id, auth, tx).await
-             }
-        }
-
-        #[async_trait]
-        impl HardDeletable for RepoAdapter {
-            fn entity_name(&self) -> &'static str {
-                 "strategic_goals"
-             }
-             
-             async fn hard_delete(&self, id: Uuid, auth: &AuthContext) -> DomainResult<()> {
-                 self.0.hard_delete(id, auth).await
-             }
-             
-             async fn hard_delete_with_tx(
-                 &self,
-                 id: Uuid,
-                 auth: &AuthContext,
-                 tx: &mut Transaction<'_, Sqlite>,
-             ) -> DomainResult<()> {
-                 self.0.hard_delete_with_tx(id, auth, tx).await
-             }
-        }
-
-        // Wrap the specific repo in the adapter
-        let adapted_repo: Arc<dyn DeleteServiceRepository<StrategicGoal>> = 
-            Arc::new(RepoAdapter(strategic_goal_repo.clone()));
-
-        let delete_service = Arc::new(BaseDeleteService::new(
-            pool.clone(),
-            adapted_repo, // Pass the adapted repo
-            tombstone_repo,
-            change_log_repo,
-            dependency_checker,
-            None,
-            deletion_manager,
-        ));
-        
         Self {
             pool,
-            repo: strategic_goal_repo, // Keep the original repo for other methods
+            repo: strategic_goal_repo,
             delete_service,
             document_service,
-            // --- ADDED: Store Project Repository --- 
             project_repo,
-            // --- ADDED: Store User Repository --- 
             user_repo,
         }
     }

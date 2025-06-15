@@ -1115,6 +1115,7 @@ async fn initialize_internal(
         document_service.clone(),
         media_document_repo.clone(),
         deletion_manager.clone(),
+        
     ));
 
     // Strategic Goal Service
@@ -1128,6 +1129,7 @@ async fn initialize_internal(
         project_repo.clone(),
         user_repo.clone(),
         deletion_manager.clone(),
+        delete_service_strategic_goal.clone(), // Pass the properly configured delete service
     ));
 
     // Funding Service (alias)

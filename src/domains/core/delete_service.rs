@@ -398,7 +398,17 @@ where
                     };
                     self.deletion_manager.add_pending(pending_delete_operation_id, deletion_info).await;
                     
-                    // 6. Perform the actual hard delete of the document record
+                    // 6. Remove from compression queue BEFORE deleting the document
+                    let doc_id_str = doc_id.to_string();
+                    sqlx::query!(
+                        "DELETE FROM compression_queue WHERE document_id = ?",
+                        doc_id_str
+                    )
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(DbError::from)?;
+                    
+                    // 7. Perform the actual hard delete of the document record
                     media_repo.hard_delete_with_tx(doc_id, auth, tx).await?;
                     
                     // DB ON DELETE CASCADE will handle document versions and access logs automatically
@@ -406,7 +416,17 @@ where
                 } else {
                     // --- SOFT DELETE PATH ---
                     
-                    // Only soft delete the document record - don't queue for file deletion yet
+                    // 1. Remove from compression queue for soft-deleted documents too
+                    let doc_id_str = doc_id.to_string();
+                    sqlx::query!(
+                        "DELETE FROM compression_queue WHERE document_id = ?",
+                        doc_id_str
+                    )
+                    .execute(&mut **tx)
+                    .await
+                    .map_err(DbError::from)?;
+                    
+                    // 2. Only soft delete the document record - don't queue for file deletion yet
                     // since the document should still exist but be marked as deleted
                     media_repo.soft_delete_with_tx(doc_id, auth, tx).await?;
                     
