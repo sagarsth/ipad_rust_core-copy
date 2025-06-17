@@ -405,6 +405,59 @@ pub unsafe extern "C" fn strategic_goal_delete(payload_json: *const c_char, resu
     })
 }
 
+/// Bulk delete strategic goals (soft or hard delete)
+/// Expected JSON payload:
+/// {
+///   "ids": ["uuid1", "uuid2", ...],
+///   "hard_delete": bool,
+///   "force": bool,
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strategic_goal_bulk_delete(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            ids: Vec<String>,
+            hard_delete: Option<bool>,
+            force: Option<bool>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        // Parse UUIDs
+        let mut uuids = Vec::new();
+        for id_str in p.ids {
+            let uuid = Uuid::parse_str(&id_str).map_err(|_| FFIError::invalid_argument("invalid uuid in ids"))?;
+            uuids.push(uuid);
+        }
+        
+        // Configure delete options
+        let options = crate::domains::core::delete_service::DeleteOptions {
+            allow_hard_delete: p.hard_delete.unwrap_or(false),
+            fallback_to_soft_delete: true,
+            force: p.force.unwrap_or(false),
+        };
+        
+        let svc = globals::get_strategic_goal_service()?;
+        let batch_result = block_on_async(svc.batch_delete(&uuids, &auth, options))
+            .map_err(FFIError::from)?;
+        
+        let json_resp = serde_json::to_string(&batch_result)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Document Integration
 // ---------------------------------------------------------------------------

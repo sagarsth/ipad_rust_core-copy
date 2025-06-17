@@ -39,9 +39,15 @@ func strategic_goal_update(
 
 @_silgen_name("strategic_goal_delete")
 func strategic_goal_delete(
-    _ payload_json: UnsafePointer<CChar>,
+    _ payload: UnsafePointer<CChar>,
     _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
-) -> CInt
+) -> Int32
+
+@_silgen_name("strategic_goal_bulk_delete")
+func strategic_goal_bulk_delete(
+    _ payload: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> Int32
 
 // MARK: - Document Integration
 @_silgen_name("strategic_goal_create_with_documents")
@@ -124,4 +130,28 @@ func strategic_goal_get_value_statistics(
 func strategic_goal_get_filtered_ids(
     _ payload_json: UnsafePointer<CChar>,
     _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
-) -> CInt 
+) -> CInt
+
+// MARK: - Export Support
+@_silgen_name("export_strategic_goals_by_filter")
+func export_strategic_goals_by_filter(
+    _ export_options_json: UnsafePointer<CChar>,
+    _ token: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
+@_silgen_name("export_strategic_goals_by_ids")
+func export_strategic_goals_by_ids(
+    _ export_options_json: UnsafePointer<CChar>,
+    _ token: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
+@_silgen_name("export_get_status")
+func export_get_status(
+    _ job_id: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
+@_silgen_name("export_free")
+func export_free(_ ptr: UnsafeMutablePointer<CChar>?) 

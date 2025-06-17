@@ -196,6 +196,75 @@ pub unsafe extern "C" fn export_get_status(
     })
 }
 
+/// Create export for strategic goals by specific IDs
+/// 
+/// # Arguments
+/// * `export_options_json` - JSON containing export options and IDs
+/// * `token` - Access token for authentication
+/// 
+/// # Returns
+/// JSON containing export job summary with job ID and status
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn export_strategic_goals_by_ids(
+    export_options_json: *const c_char,
+    token: *const c_char,
+    result: *mut *mut c_char,
+) -> c_int {
+    handle_status_result(|| unsafe {
+        if export_options_json.is_null() || token.is_null() || result.is_null() {
+            return Err(FFIError::invalid_argument("Null pointer(s) provided"));
+        }
+        
+        let json_str = CStr::from_ptr(export_options_json).to_str()
+            .map_err(|_| FFIError::invalid_argument("Invalid export options JSON string"))?;
+        
+        let token_str = CStr::from_ptr(token).to_str()
+            .map_err(|_| FFIError::invalid_argument("Invalid token string"))?;
+        
+        #[derive(Deserialize)]
+        struct ExportByIdsOptions {
+            ids: Vec<String>,
+            include_blobs: Option<bool>,
+            target_path: Option<String>,
+        }
+        
+        let options: ExportByIdsOptions = parse_json_payload(json_str)?;
+        let auth_context = create_auth_context_from_token(token_str)?;
+        
+        // Parse IDs to UUIDs with debugging
+        log::info!("Received IDs for export: {:?}", options.ids);
+        let ids: Result<Vec<Uuid>, _> = options.ids.iter()
+            .map(|id_str| {
+                log::info!("Attempting to parse UUID: '{}'", id_str);
+                let result = Uuid::parse_str(id_str);
+                if let Err(ref e) = result {
+                    log::error!("Failed to parse UUID '{}': {}", id_str, e);
+                }
+                result
+            })
+            .collect();
+        let ids = ids.map_err(|e| FFIError::invalid_argument(&format!("Invalid UUID format in IDs: {}", e)))?;
+        
+        let filters = vec![EntityFilter::StrategicGoalsByIds { ids }];
+        let include_blobs = options.include_blobs.unwrap_or(false);
+        let target_path = options.target_path.map(PathBuf::from);
+        
+        let export_request = ExportRequest {
+            filters,
+            include_blobs,
+            target_path,
+        };
+        
+        let export_service = build_export_service()?;
+        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+            .map_err(|e| FFIError::internal(format!("Export creation failed: {}", e)))?;
+        
+        let response = format_export_job_response(summary);
+        *result = create_json_response(response)?;
+        Ok(())
+    })
+}
+
 /// Create export for all strategic goals
 /// 
 /// # Arguments
@@ -627,6 +696,65 @@ pub unsafe extern "C" fn export_strategic_goals_by_date_range(
         let export_service = build_export_service()?;
         let summary = block_on_async(export_service.create_export(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Strategic goals date range export failed: {}", e)))?;
+        
+        let response = format_export_job_response(summary);
+        *result = create_json_response(response)?;
+        Ok(())
+    })
+}
+
+/// Create export for strategic goals using complex filter (matches UI filtering logic)
+/// 
+/// # Arguments
+/// * `export_options_json` - JSON containing export options with complex filter
+/// * `token` - Access token for authentication
+/// 
+/// # Returns
+/// JSON containing export job summary
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn export_strategic_goals_by_filter(
+    export_options_json: *const c_char,
+    token: *const c_char,
+    result: *mut *mut c_char,
+) -> c_int {
+    handle_status_result(|| unsafe {
+        if export_options_json.is_null() || token.is_null() || result.is_null() {
+            return Err(FFIError::invalid_argument("Null pointer(s) provided"));
+        }
+        
+        let json_str = CStr::from_ptr(export_options_json).to_str()
+            .map_err(|_| FFIError::invalid_argument("Invalid export options JSON string"))?;
+        
+        let token_str = CStr::from_ptr(token).to_str()
+            .map_err(|_| FFIError::invalid_argument("Invalid token string"))?;
+        
+        #[derive(Deserialize)]
+        struct ExportWithFilterOptions {
+            include_blobs: Option<bool>,
+            target_path: Option<String>,
+            filter: serde_json::Value, // We'll parse this as the complex filter
+        }
+        
+        let options: ExportWithFilterOptions = parse_json_payload(json_str)?;
+        let auth_context = create_auth_context_from_token(token_str)?;
+        
+        // Parse the complex filter
+        let strategic_goal_filter: crate::domains::strategic_goal::types::StrategicGoalFilter = 
+            serde_json::from_value(options.filter)
+                .map_err(|e| FFIError::invalid_argument(&format!("Invalid filter format: {}", e)))?;
+        
+        let include_blobs = options.include_blobs.unwrap_or(false);
+        let target_path = options.target_path.map(PathBuf::from);
+        
+        let export_request = ExportRequest {
+            filters: vec![EntityFilter::StrategicGoalsByFilter { filter: strategic_goal_filter }],
+            include_blobs,
+            target_path,
+        };
+        
+        let export_service = build_export_service()?;
+        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+            .map_err(|e| FFIError::internal(format!("Strategic goals filter export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
         *result = create_json_response(response)?;

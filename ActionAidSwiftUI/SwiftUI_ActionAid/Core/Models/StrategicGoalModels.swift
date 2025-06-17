@@ -131,11 +131,42 @@ struct StrategicGoalDeleteRequest: Codable {
     let id: String
     let hardDelete: Bool?
     let auth: AuthContextPayload
+}
 
-    enum CodingKeys: String, CodingKey {
-        case id, auth
-        case hardDelete = "hard_delete"
-    }
+// MARK: - Bulk Delete Models
+
+struct StrategicGoalBulkDeleteRequest: Codable {
+    let ids: [String]
+    let hardDelete: Bool?
+    let force: Bool?
+    let auth: AuthContextPayload
+}
+
+struct BatchDeleteResult: Codable {
+    let hardDeleted: [String]
+    let softDeleted: [String]
+    let failed: [String]
+    let dependencies: [String: [String]]
+    let errors: [String: String]
+}
+
+// MARK: - Failed Delete Detail
+
+struct FailedDeleteDetail: Codable {
+    let id: String
+    let entityData: StrategicGoalResponse?
+    let entityType: String
+    let reason: FailureReason
+    let dependencies: [String]
+}
+
+enum FailureReason: String, Codable, CaseIterable {
+    case dependenciesPrevented = "DependenciesPrevented"
+    case softDeletedDueToDependencies = "SoftDeletedDueToDependencies"
+    case notFound = "NotFound"
+    case authorizationFailed = "AuthorizationFailed"
+    case databaseError = "DatabaseError"
+    case unknown = "Unknown"
 }
 
 struct UploadDocumentRequest: Codable {
@@ -651,4 +682,86 @@ struct UserRoleFilter: Codable {
 struct StrategicGoalFilterRequest: Codable {
     let filter: StrategicGoalFilter
     let auth: AuthContextPayload
+}
+
+// MARK: - Export Models
+
+struct StrategicGoalExportOptions: Codable {
+    let includeBlobs: Bool
+    let targetPath: String?
+    let filter: StrategicGoalFilter
+    
+    enum CodingKeys: String, CodingKey {
+        case includeBlobs = "include_blobs"
+        case targetPath = "target_path" 
+        case filter
+    }
+}
+
+struct StrategicGoalExportByIdsOptions: Codable {
+    let ids: [String]
+    let includeBlobs: Bool?
+    let targetPath: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case ids
+        case includeBlobs = "include_blobs"
+        case targetPath = "target_path"
+    }
+}
+
+struct ExportJobResponse: Codable {
+    let job: ExportJob
+}
+
+struct ExportJob: Codable {
+    let id: String
+    let requestedByUserId: String?
+    let requestedAt: String
+    let includeBlobs: Bool
+    let status: String
+    let localPath: String?
+    let totalEntities: Int64?
+    let totalBytes: Int64?
+    let errorMessage: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case id
+        case requestedByUserId = "requested_by_user_id"
+        case requestedAt = "requested_at"
+        case includeBlobs = "include_blobs"
+        case status
+        case localPath = "local_path"
+        case totalEntities = "total_entities"
+        case totalBytes = "total_bytes"
+        case errorMessage = "error_message"
+    }
+}
+
+enum ExportStatus: String, Codable, CaseIterable {
+    case pending = "Pending"
+    case running = "Running" 
+    case completed = "Completed"
+    case failed = "Failed"
+    
+    var displayName: String {
+        switch self {
+        case .pending: return "Pending"
+        case .running: return "Running"
+        case .completed: return "Completed"
+        case .failed: return "Failed"
+        }
+    }
+    
+    var isCompleted: Bool {
+        self == .completed
+    }
+    
+    var isFailed: Bool {
+        self == .failed
+    }
+    
+    var isInProgress: Bool {
+        self == .pending || self == .running
+    }
 } 

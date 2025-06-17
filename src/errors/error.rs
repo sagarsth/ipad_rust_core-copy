@@ -92,6 +92,86 @@ impl serde::Serialize for DbError {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for DbError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+        use std::fmt;
+
+        struct DbErrorVisitor;
+
+        impl<'de> Visitor<'de> for DbErrorVisitor {
+            type Value = DbError;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a DbError structure")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<DbError, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut error_type: Option<String> = None;
+                let mut message: Option<String> = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        "type" => {
+                            if error_type.is_some() {
+                                return Err(de::Error::duplicate_field("type"));
+                            }
+                            error_type = Some(map.next_value()?);
+                        }
+                        "message" => {
+                            if message.is_some() {
+                                return Err(de::Error::duplicate_field("message"));
+                            }
+                            message = Some(map.next_value()?);
+                        }
+                        _ => {
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let error_type = error_type.ok_or_else(|| de::Error::missing_field("type"))?;
+                let message = message.ok_or_else(|| de::Error::missing_field("message"))?;
+
+                match error_type.as_str() {
+                    "Sqlx" => Ok(DbError::Other(format!("SQLx error: {}", message))),
+                    "ConnectionPool" => Ok(DbError::ConnectionPool(message)),
+                    "Transaction" => Ok(DbError::Transaction(message)),
+                    "Query" => Ok(DbError::Query(message)),
+                    "Execution" => Ok(DbError::Execution(message)),
+                    "NotFound" => {
+                        // Parse the message to extract entity and id
+                        if message.starts_with("Record not found: ") {
+                            let parts: Vec<&str> = message["Record not found: ".len()..].splitn(2, " with ID ").collect();
+                            if parts.len() == 2 {
+                                Ok(DbError::NotFound(parts[0].to_string(), parts[1].to_string()))
+                            } else {
+                                Ok(DbError::Other(message))
+                            }
+                        } else {
+                            Ok(DbError::Other(message))
+                        }
+                    }
+                    "Conflict" => Ok(DbError::Conflict(message)),
+                    "Locked" => Ok(DbError::Locked),
+                    "Migration" => Ok(DbError::Migration(message)),
+                    "Other" => Ok(DbError::Other(message)),
+                    _ => Ok(DbError::Other(message)),
+                }
+            }
+        }
+
+        const FIELDS: &[&str] = &["type", "message"];
+        deserializer.deserialize_struct("DbError", FIELDS, DbErrorVisitor)
+    }
+}
+
 /// Manual Clone implementation for DbError
 impl Clone for DbError {
     fn clone(&self) -> Self {
@@ -111,7 +191,7 @@ impl Clone for DbError {
 }
 
 /// Domain-level errors
-#[derive(Debug, Error, Clone, Serialize)]
+#[derive(Debug, Error, Clone, Serialize, Deserialize)]
 pub enum DomainError {
     #[error("Database error: {0}")]
     Database(#[from] DbError),
@@ -168,7 +248,7 @@ impl From<FileStorageError> for DomainError {
 }
 
 /// Service-level errors (application specific)
-#[derive(Debug, Error, Clone, Serialize)]
+#[derive(Debug, Error, Clone, Serialize, Deserialize)]
 pub enum ServiceError {
     #[error("Domain error: {0}")]
     Domain(#[from] DomainError),
@@ -208,7 +288,7 @@ pub enum ServiceError {
 }
 
 /// Sync-specific errors
-#[derive(Debug, Error, Clone, Serialize)]
+#[derive(Debug, Error, Clone, Serialize, Deserialize)]
 pub enum SyncError {
     #[error("Network error: {0}")]
     Network(String),
@@ -273,7 +353,7 @@ pub struct SyncConflict {
 }
 
 /// Validation errors
-#[derive(Debug, Error, Clone, Serialize)]
+#[derive(Debug, Error, Clone, Serialize, Deserialize)]
 pub enum ValidationError {
     #[error("Field '{field}' is required")]
     Required {

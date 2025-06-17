@@ -167,11 +167,12 @@ int32_t donor_get_with_document_timeline(const char*, char**);
 void donor_free(char*);
 
 // ============================================================================
-// EXPORT FUNCTIONS (24 functions)
+// EXPORT FUNCTIONS (26 functions)
 // ============================================================================
 
 int32_t export_create_export(const char*, const char*, char**);
 int32_t export_get_status(const char*, char**);
+int32_t export_strategic_goals_by_ids(const char*, const char*, char**);
 int32_t export_strategic_goals_all(const char*, const char*, char**);
 int32_t export_projects_all(const char*, const char*, char**);
 int32_t export_activities_all(const char*, const char*, char**);
@@ -181,6 +182,7 @@ int32_t export_livelihoods_all(const char*, const char*, char**);
 int32_t export_workshops_all(const char*, const char*, char**);
 int32_t export_unified_all_domains(const char*, const char*, char**);
 int32_t export_strategic_goals_by_date_range(const char*, const char*, char**);
+int32_t export_strategic_goals_by_filter(const char*, const char*, char**);
 int32_t export_projects_by_date_range(const char*, const char*, char**);
 int32_t export_activities_by_date_range(const char*, const char*, char**);
 int32_t export_donors_by_date_range(const char*, const char*, char**);
@@ -297,7 +299,7 @@ int32_t project_get_document_references(const char*, char**);
 void project_free(char*);
 
 // ============================================================================
-// STRATEGIC_GOAL FUNCTIONS (19 functions)
+// STRATEGIC_GOAL FUNCTIONS (20 functions)
 // ============================================================================
 
 int32_t strategic_goal_create(const char*, char**);
@@ -306,6 +308,7 @@ int32_t strategic_goal_get(const char*, char**);
 int32_t strategic_goal_list(const char*, char**);
 int32_t strategic_goal_update(const char*, char**);
 int32_t strategic_goal_delete(const char*, char**);
+int32_t strategic_goal_bulk_delete(const char*, char**);
 int32_t strategic_goal_upload_document(const char*, char**);
 int32_t strategic_goal_bulk_upload_documents(const char*, char**);
 int32_t strategic_goal_upload_document_from_path(const char*, char**);

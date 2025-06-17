@@ -6,6 +6,7 @@ use uuid::Uuid;
 use sqlx::{SqlitePool, Transaction, Sqlite};
 use std::env;
 use chrono::Utc;
+use std::str::FromStr;
 
 use crate::domains::core::file_storage_service::FileStorageService;
 use crate::domains::document::repository::MediaDocumentRepository;
@@ -242,6 +243,49 @@ impl CompressionServiceImpl {
         
         Ok(())
     }
+    
+    /// Load compression configuration from document type in database
+    async fn load_compression_config_from_db(&self, type_id: Uuid) -> Result<CompressionConfig, ServiceError> {
+        let type_id_str = type_id.to_string();
+        
+        let result = sqlx::query!(
+            r#"
+            SELECT 
+                compression_method,
+                compression_level,
+                min_size_for_compression
+            FROM document_types 
+            WHERE id = ?
+            "#,
+            type_id_str
+        )
+        .fetch_optional(&self.pool)
+        .await;
+        
+        match result {
+            Ok(Some(row)) => {
+                let method = row.compression_method
+                    .unwrap_or_else(|| "lossless".to_string());
+                
+                let compression_method = CompressionMethod::from_str(&method)
+                    .map_err(|e| ServiceError::Domain(e))?;
+                
+                Ok(CompressionConfig {
+                    method: compression_method,
+                    quality_level: row.compression_level as i32,
+                    min_size_bytes: row.min_size_for_compression.unwrap_or(10240),
+                })
+            },
+            Ok(None) => {
+                log::warn!("Document type {} not found, using default compression config", type_id);
+                Ok(CompressionConfig::default())
+            },
+            Err(e) => {
+                log::error!("Database error loading compression config for type {}: {:?}", type_id, e);
+                Err(ServiceError::Domain(DomainError::Database(DbError::from(e))))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -320,27 +364,86 @@ impl CompressionService for CompressionServiceImpl {
         })?;
         
         // 6. Get document type details to determine compression settings
-        let config = config.unwrap_or_else(|| {
-            // Create format-specific default config based on MIME type
-            match document.mime_type.as_str() {
-                "image/jpeg" | "image/jpg" => CompressionConfig {
-                    method: CompressionMethod::Lossy,
-                    quality_level: 80, // Good balance for JPEG
-                    min_size_bytes: 5120, // 5KB minimum for images
-                },
-                "image/png" => CompressionConfig {
-                    method: CompressionMethod::Lossless,
-                    quality_level: 9, // Best compression for PNG
-                    min_size_bytes: 10240, // 10KB minimum for PNG
-                },
-                "application/pdf" => CompressionConfig {
-                    method: CompressionMethod::PdfOptimize,
-                    quality_level: 5, // Balanced PDF compression
-                    min_size_bytes: 51200, // 50KB minimum for PDFs
-                },
-                _ => CompressionConfig::default()
+        let config = match config {
+            Some(config) => config,
+            None => {
+                // Load compression settings from document type in database
+                match self.load_compression_config_from_db(document.type_id).await {
+                    Ok(db_config) => {
+                        log::info!("Loaded compression config from database for document {}: method={:?}, quality={}, min_size={}", 
+                                 document_id, db_config.method, db_config.quality_level, db_config.min_size_bytes);
+                        db_config
+                    },
+                    Err(e) => {
+                        log::warn!("Failed to load compression config from database for document {}: {:?}, using defaults", document_id, e);
+                        // Fallback to format-specific default config based on MIME type
+                        match document.mime_type.as_str() {
+                            "image/jpeg" | "image/jpg" => CompressionConfig {
+                                method: CompressionMethod::Lossy,
+                                quality_level: 80, // Good balance for JPEG
+                                min_size_bytes: 5120, // 5KB minimum for images
+                            },
+                            "image/png" => CompressionConfig {
+                                method: CompressionMethod::Lossless,
+                                quality_level: 9, // Best compression for PNG
+                                min_size_bytes: 10240, // 10KB minimum for PNG
+                            },
+                            "application/pdf" => CompressionConfig {
+                                method: CompressionMethod::None, // 🔧 FIX: PDFs should not be compressed
+                                quality_level: 0,
+                                min_size_bytes: 0,
+                            },
+                            _ => CompressionConfig::default()
+                        }
+                    }
+                }
             }
-        });
+        };
+
+        // Check if compression is disabled for this document type
+        if config.method == CompressionMethod::None {
+            log::info!("Compression disabled for document {} - marking as skipped", document_id);
+            
+            // Mark as skipped instead of processing
+            self.media_doc_repo.update_compression_status(
+                document_id,
+                CompressionStatus::Skipped,
+                None,
+                None
+            ).await.map_err(|e| ServiceError::Domain(e))?;
+            
+            // Update queue status to skipped
+            if let Some(queue_entry) = self.compression_repo.get_queue_entry_by_document_id(document_id).await
+                .map_err(|e| ServiceError::Domain(e))? 
+            {
+                self.compression_repo.update_queue_entry_status(
+                    queue_entry.id, 
+                    "skipped", 
+                    Some("Compression disabled for this document type")
+                ).await.map_err(|e| ServiceError::Domain(e))?;
+            }
+            
+            // Update stats for skipped compression
+            let mut tx = self.pool.begin().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+            if let Err(stats_err) = self.compression_repo.update_stats_for_skipped(&mut tx).await {
+                log::error!("Failed to update stats for skipped compression: {:?}", stats_err);
+                let _ = tx.rollback().await;
+            } else {
+                tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+            }
+            
+            return Ok(CompressionResult {
+                document_id,
+                original_size: document.size_bytes,
+                compressed_size: document.size_bytes, // Same size since skipped
+                compressed_file_path: document.file_path.clone(), // Use original file path
+                space_saved_bytes: 0, // No space saved since skipped
+                space_saved_percentage: 0.0, // No compression
+                method_used: config.method,
+                quality_level: config.quality_level,
+                duration_ms: start_time.elapsed().as_millis() as i64,
+            });
+        }
 
         // BEFORE loading the entire file, check its size to avoid RAM spikes
         println!("📏 [COMPRESSION_SERVICE] Checking file size for document {}", document_id);
@@ -473,9 +576,10 @@ impl CompressionService for CompressionServiceImpl {
                 data
             },
             Err(e) => {
-                // Check if this is a PDF skip request
-                if let DomainError::Internal(ref msg) = e {
-                    if msg == "PDF_SKIP_COMPRESSION" {
+                // Check if this is a PDF skip request (ValidationError from PDF compressor)
+                if let DomainError::Validation(ref validation_err) = e {
+                    let error_message = validation_err.to_string();
+                    if error_message.contains("PDF compression skipped") {
                         log::info!("PDF compression skipped for document {} - PDFs are already compressed", document_id);
                         
                         // Mark as skipped instead of failed
@@ -506,9 +610,64 @@ impl CompressionService for CompressionServiceImpl {
                             tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
                         }
                         
-                        return Err(ServiceError::Domain(DomainError::Validation(
-                            crate::errors::ValidationError::custom("PDF compression skipped - already compressed format")
-                        )));
+                        return Ok(CompressionResult {
+                            document_id,
+                            original_size,
+                            compressed_size: original_size, // Same size since skipped
+                            compressed_file_path: document.file_path.clone(), // Use original file path
+                            space_saved_bytes: 0, // No space saved since skipped
+                            space_saved_percentage: 0.0, // No compression
+                            method_used: config.method,
+                            quality_level: config.quality_level,
+                            duration_ms: start_time.elapsed().as_millis() as i64,
+                        });
+                    }
+                }
+                
+                // Legacy check for old PDF skip format (keep for compatibility)
+                if let DomainError::Internal(ref msg) = e {
+                    if msg == "PDF_SKIP_COMPRESSION" {
+                        log::info!("PDF compression skipped for document {} - PDFs are already compressed (legacy)", document_id);
+                        
+                        // Mark as skipped instead of failed
+                        self.media_doc_repo.update_compression_status(
+                            document_id,
+                            CompressionStatus::Skipped,
+                            None,
+                            None
+                        ).await.map_err(|e| ServiceError::Domain(e))?;
+                        
+                        // Update queue status to skipped
+                        if let Some(queue_entry) = self.compression_repo.get_queue_entry_by_document_id(document_id).await
+                            .map_err(|e| ServiceError::Domain(e))? 
+                        {
+                            self.compression_repo.update_queue_entry_status(
+                                queue_entry.id, 
+                                "skipped", 
+                                Some("PDF files are already compressed - skipped to save CPU cycles")
+                            ).await.map_err(|e| ServiceError::Domain(e))?;
+                        }
+                        
+                        // Update stats for skipped compression
+                        let mut tx = self.pool.begin().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+                        if let Err(stats_err) = self.compression_repo.update_stats_for_skipped(&mut tx).await {
+                            log::error!("Failed to update stats for skipped compression: {:?}", stats_err);
+                            let _ = tx.rollback().await;
+                        } else {
+                            tx.commit().await.map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+                        }
+                        
+                        return Ok(CompressionResult {
+                            document_id,
+                            original_size,
+                            compressed_size: original_size, // Same size since skipped
+                            compressed_file_path: document.file_path.clone(), // Use original file path
+                            space_saved_bytes: 0, // No space saved since skipped
+                            space_saved_percentage: 0.0, // No compression
+                            method_used: config.method,
+                            quality_level: config.quality_level,
+                            duration_ms: start_time.elapsed().as_millis() as i64,
+                        });
                     }
                 }
                 

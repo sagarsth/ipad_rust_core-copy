@@ -5,10 +5,11 @@ use chrono::{DateTime, Utc};
 use tokio::task;
 use tempfile::TempDir;
 use zip::{ZipWriter, write::FileOptions};
-use std::io::Write;
+use std::io::{Write, BufWriter};
 use serde_json::Value;
 use futures::future::join_all;
 use chrono::TimeZone;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use crate::auth::AuthContext;
 use crate::errors::{ServiceError, ServiceResult};
@@ -21,6 +22,137 @@ use crate::globals;
 use crate::types::PaginationParams;
 use std::path::{PathBuf, Path};
 use crate::domains::document::repository::MediaDocumentRepository;
+
+// Performance-optimized JSON Lines writer
+struct OptimizedJsonLWriter {
+    writer: BufWriter<std::fs::File>,
+    buffer: String,
+    entities_written: usize,
+}
+
+impl OptimizedJsonLWriter {
+    fn new(file_path: &Path) -> Result<Self, String> {
+        let file = std::fs::File::create(file_path).map_err(|e| e.to_string())?;
+        let writer = BufWriter::with_capacity(4 * 1024 * 1024, file); // 4MB buffer
+        Ok(Self {
+            writer,
+            buffer: String::with_capacity(256 * 1024), // 256KB initial capacity
+            entities_written: 0,
+        })
+    }
+
+    fn write_entity<T: serde::Serialize>(&mut self, entity: &T) -> Result<(), String> {
+        // Serialize entity to JSON
+        let json_line = serde_json::to_string(entity).map_err(|e| e.to_string())?;
+        
+        // Check if adding this line would exceed buffer capacity
+        if self.buffer.len() + json_line.len() + 1 > 512_000 && !self.buffer.is_empty() {
+            // Flush current buffer first
+            self.writer.write_all(self.buffer.as_bytes()).map_err(|e| e.to_string())?;
+            self.buffer.clear();
+        }
+        
+        // Add to buffer
+        self.buffer.push_str(&json_line);
+        self.buffer.push('\n');
+        
+        self.entities_written += 1;
+        Ok(())
+    }
+
+    fn write_enhanced_entity<T: serde::Serialize>(&mut self, entity: &T, metadata: serde_json::Value) -> Result<(), String> {
+        let mut entity_json = serde_json::to_value(entity).map_err(|e| e.to_string())?;
+        if let (serde_json::Value::Object(ref mut entity_map), serde_json::Value::Object(meta_map)) = (&mut entity_json, metadata) {
+            entity_map.extend(meta_map);
+        }
+        
+        let json_line = serde_json::to_string(&entity_json).map_err(|e| e.to_string())?;
+        
+        // Check if adding this line would exceed buffer capacity
+        if self.buffer.len() + json_line.len() + 1 > 512_000 && !self.buffer.is_empty() {
+            // Flush current buffer first
+            self.writer.write_all(self.buffer.as_bytes()).map_err(|e| e.to_string())?;
+            self.buffer.clear();
+        }
+        
+        // Add to buffer
+        self.buffer.push_str(&json_line);
+        self.buffer.push('\n');
+        
+        self.entities_written += 1;
+        Ok(())
+    }
+
+    fn finalize(mut self) -> Result<usize, String> {
+        // Flush remaining buffer
+        if !self.buffer.is_empty() {
+            self.writer.write_all(self.buffer.as_bytes()).map_err(|e| e.to_string())?;
+        }
+        self.writer.flush().map_err(|e| e.to_string())?;
+        Ok(self.entities_written)
+    }
+}
+
+// Future-proof format abstraction
+#[derive(Debug, Clone, Copy)]
+pub enum ExportFormat {
+    JsonLines,
+    Csv,
+    Parquet,
+}
+
+impl ExportFormat {
+    fn file_extension(&self) -> &'static str {
+        match self {
+            ExportFormat::JsonLines => "jsonl",
+            ExportFormat::Csv => "csv",
+            ExportFormat::Parquet => "parquet",
+        }
+    }
+}
+
+// Simplified approach - use concrete type for now, abstract later when needed
+fn create_export_writer(format: ExportFormat, file_path: &Path) -> Result<OptimizedJsonLWriter, String> {
+    match format {
+        ExportFormat::JsonLines => {
+            OptimizedJsonLWriter::new(file_path)
+        }
+        ExportFormat::Csv => {
+            // TODO: Implement CSV writer when needed
+            Err("CSV format not yet implemented".to_string())
+        }
+        ExportFormat::Parquet => {
+            // TODO: Implement Parquet writer when needed
+            Err("Parquet format not yet implemented".to_string())
+        }
+    }
+}
+
+// Parallel processing helper for large exports
+async fn export_entities_parallel<T, F, Fut>(
+    entities: &[T],
+    chunk_size: usize,
+    processor: F,
+) -> Result<Vec<String>, String>
+where
+    T: Clone + Send + Sync + 'static,
+    F: Fn(Vec<T>) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = Result<String, String>> + Send + 'static,
+{
+    let chunks: Vec<Vec<T>> = entities.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect();
+    let tasks: Vec<_> = chunks.into_iter().map(|chunk| {
+        let proc = processor.clone();
+        tokio::spawn(async move { proc(chunk).await })
+    }).collect();
+    
+    let mut results = Vec::new();
+    for task in tasks {
+        let result = task.await.map_err(|e| format!("Task join error: {}", e))?;
+        results.push(result?);
+    }
+    
+    Ok(results)
+}
 
 #[async_trait]
 pub trait ExportService: Send + Sync {
@@ -109,8 +241,8 @@ async fn perform_export_job(
     include_blobs: bool,
     target_path: Option<PathBuf>,
 ) {
-    let total_entities: i64 = 0;
-    let mut total_bytes: i64 = 0;
+    let total_entities = Arc::new(AtomicI64::new(0));
+    let total_bytes = Arc::new(AtomicI64::new(0));
 
     // Wrap entire operation in its own error scope
     let result: Result<String, String> = async {
@@ -128,51 +260,67 @@ async fn perform_export_job(
                     EntityFilter::StrategicGoals { status_id } => {
                         export_strategic_goals(&temp_dir_path, status_id).await?;
                         // FIXME: we don't yet get per-entity count accurately; leave 0 for now.
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::StrategicGoalsByIds { ids } => {
-                        export_strategic_goals_by_ids(&temp_dir_path, &ids).await?;
+                        let count = export_strategic_goals_by_ids(&temp_dir_path, &ids, include_blobs, &file_storage_clone2).await?;
+                        Ok::<i64, String>(count)
                     }
                     EntityFilter::ProjectsAll => {
                         export_projects(&temp_dir_path).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::ProjectsByIds { ids } => {
                         export_projects_by_ids(&temp_dir_path, &ids).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::ActivitiesAll => {
                         export_activities(&temp_dir_path).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::ActivitiesByIds { ids } => {
                         export_activities_by_ids(&temp_dir_path, &ids).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::DonorsAll => {
                         export_donors(&temp_dir_path).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::DonorsByIds { ids } => {
                         export_donors_by_ids(&temp_dir_path, &ids).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::FundingAll => {
                         export_fundings(&temp_dir_path).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::FundingByIds { ids } => {
                         export_fundings_by_ids(&temp_dir_path, &ids).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::LivelihoodsAll => {
                         export_livelihoods(&temp_dir_path).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::LivelihoodsByIds { ids } => {
                         export_livelihoods_by_ids(&temp_dir_path, &ids).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::WorkshopsAll { include_participants } => {
                         export_workshops(&temp_dir_path, include_participants).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::WorkshopsByIds { ids, include_participants } => {
                         export_workshops_by_ids(&temp_dir_path, &ids, include_participants).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::WorkshopParticipantsAll => {
                         export_workshop_participants(&temp_dir_path).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::WorkshopParticipantsByIds { ids } => {
                         export_workshop_participants_by_ids(&temp_dir_path, &ids).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::MediaDocumentsByRelatedEntity { related_table, related_id } => {
                         export_media_documents(
@@ -183,6 +331,7 @@ async fn perform_export_job(
                             &file_storage_clone2,
                         )
                         .await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::MediaDocumentsByIds { ids } => {
                         export_media_documents_by_ids(
@@ -192,29 +341,41 @@ async fn perform_export_job(
                             &file_storage_clone2,
                         )
                         .await?;
+                        Ok::<i64, String>(0)
                     }
 
                     // --- Date-range variants ---
                     EntityFilter::StrategicGoalsByDateRange { start_date, end_date, status_id } => {
                         export_strategic_goals_by_date_range(&temp_dir_path, start_date, end_date, status_id).await?;
+                        Ok::<i64, String>(0)
+                    }
+                    EntityFilter::StrategicGoalsByFilter { filter } => {
+                        export_strategic_goals_by_filter(&temp_dir_path, &filter).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::ProjectsByDateRange { start_date, end_date } => {
                         export_projects_by_date_range(&temp_dir_path, start_date, end_date).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::ActivitiesByDateRange { start_date, end_date } => {
                         export_activities_by_date_range(&temp_dir_path, start_date, end_date).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::DonorsByDateRange { start_date, end_date } => {
                         export_donors_by_date_range(&temp_dir_path, start_date, end_date).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::FundingByDateRange { start_date, end_date } => {
                         export_fundings_by_date_range(&temp_dir_path, start_date, end_date).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::LivelihoodsByDateRange { start_date, end_date } => {
                         export_livelihoods_by_date_range(&temp_dir_path, start_date, end_date).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::WorkshopsByDateRange { start_date, end_date, include_participants } => {
                         export_workshops_by_date_range(&temp_dir_path, start_date, end_date, include_participants).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::MediaDocumentsByDateRange { start_date, end_date } => {
                         export_media_documents_by_date_range(
@@ -224,26 +385,31 @@ async fn perform_export_job(
                             include_blobs,
                             &file_storage_clone2,
                         ).await?;
+                        Ok::<i64, String>(0)
                     }
 
                     // Unified variants
                     EntityFilter::UnifiedAllDomains { include_type_tags } => {
                         export_unified(&temp_dir_path, None, include_type_tags, include_blobs, &file_storage_clone2).await?;
+                        Ok::<i64, String>(0)
                     }
                     EntityFilter::UnifiedByDateRange { start_date, end_date, include_type_tags } => {
                         export_unified(&temp_dir_path, Some((start_date, end_date)), include_type_tags, include_blobs, &file_storage_clone2).await?;
+                        Ok::<i64, String>(0)
                     }
                 }
-                Ok::<(), String>(())
             };
             tasks.push(task_fut);
         }
 
-        // Wait for all tasks to finish
+        // Wait for all tasks to finish and collect entity counts
         let results = join_all(tasks).await;
         for res in results {
-            if let Err(e) = res {
-                return Err(e);
+            match res {
+                Ok(count) => {
+                    total_entities.fetch_add(count, Ordering::Relaxed);
+                },
+                Err(e) => return Err(e),
             }
         }
 
@@ -264,7 +430,7 @@ async fn perform_export_job(
 
         let metadata = std::fs::metadata(&dest_path)
             .map_err(|e| format!("failed to stat zip: {e}"))?;
-        total_bytes = metadata.len() as i64;
+        total_bytes.store(metadata.len() as i64, Ordering::Relaxed);
 
         Ok(dest_path.to_string_lossy().to_string())
     }
@@ -278,8 +444,8 @@ async fn perform_export_job(
                     ExportStatus::Completed,
                     None,
                     Some(path_str),
-                    Some(total_entities),
-                    Some(total_bytes),
+                    Some(total_entities.load(Ordering::Relaxed)),
+                    Some(total_bytes.load(Ordering::Relaxed)),
                 )
                 .await;
         }
@@ -290,8 +456,8 @@ async fn perform_export_job(
                     ExportStatus::Failed,
                     Some(err_msg),
                     None,
-                    Some(total_entities),
-                    Some(total_bytes),
+                    Some(total_entities.load(Ordering::Relaxed)),
+                    Some(total_bytes.load(Ordering::Relaxed)),
                 )
                 .await;
         }
@@ -303,10 +469,10 @@ async fn perform_export_job(
 async fn export_strategic_goals(dest_dir: &Path, status_id: Option<i64>) -> Result<(), String> {
     let repo = globals::get_strategic_goal_repo().map_err(|e| e.to_string())?;
     let file_path = dest_dir.join("strategic_goals.jsonl");
-    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    let mut writer = OptimizedJsonLWriter::new(&file_path)?;
 
     let mut page: u32 = 1;
-    let per_page = 200;
+    let per_page = 500; // Increased page size for better performance
     loop {
         let params = PaginationParams { page, per_page };
         let page_result = if let Some(status) = status_id {
@@ -316,8 +482,7 @@ async fn export_strategic_goals(dest_dir: &Path, status_id: Option<i64>) -> Resu
         };
 
         for entity in page_result.items {
-            let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
-            writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+            writer.write_entity(&entity)?;
         }
 
         if page >= page_result.total_pages {
@@ -325,28 +490,31 @@ async fn export_strategic_goals(dest_dir: &Path, status_id: Option<i64>) -> Resu
         }
         page += 1;
     }
+    
+    writer.finalize()?;
     Ok(())
 }
 
 async fn export_projects(dest_dir: &Path) -> Result<(), String> {
     let repo = globals::get_project_repo().map_err(|e| e.to_string())?;
     let file_path = dest_dir.join("projects.jsonl");
-    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    let mut writer = OptimizedJsonLWriter::new(&file_path)?;
 
     let mut page: u32 = 1;
-    let per_page = 200;
+    let per_page = 500;
     loop {
         let params = PaginationParams { page, per_page };
         let page_result = repo.find_all(params).await.map_err(|e| e.to_string())?;
         for entity in page_result.items {
-            let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
-            writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+            writer.write_entity(&entity)?;
         }
         if page >= page_result.total_pages {
             break;
         }
         page += 1;
     }
+    
+    writer.finalize()?;
     Ok(())
 }
 
@@ -491,43 +659,27 @@ async fn export_media_documents(
             writeln!(file, "{}", json).map_err(|e| e.to_string())?;
 
             if include_blobs {
-                let mut file_exported = false;
+                // Use helper function to select the best file path
+                let (source_file_path, file_source_type) = select_best_file_path_with_storage(doc, file_storage);
                 
-                // Try to export the best available file (compressed if completed, original otherwise)
-                let file_path_to_export = if doc.compression_status == "completed" && doc.compressed_file_path.is_some() {
-                    doc.compressed_file_path.as_ref().unwrap()
-                } else {
-                    &doc.file_path
-                };
-                
-                let abs_path = file_storage.get_absolute_path(file_path_to_export);
+                let abs_path = file_storage.get_absolute_path(source_file_path);
                 if abs_path.exists() {
                     let blobs_dir = dest_dir.join("blobs");
                     std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
-                    if let Some(filename) = abs_path.file_name() {
+                    if let Some(_filename) = abs_path.file_name() {
                         // Use original filename for consistency
-                        let export_filename = if file_path_to_export == &doc.file_path {
-                            filename.to_os_string()
-                        } else {
-                            // For compressed files, use original filename to maintain consistency
-                            std::ffi::OsString::from(&doc.original_filename)
-                        };
-                        std::fs::copy(&abs_path, blobs_dir.join(export_filename)).map_err(|e| e.to_string())?;
-                        file_exported = true;
-                    }
-                }
-                
-                // Fallback: if primary file failed and we have both paths, try the other one
-                if !file_exported && doc.compressed_file_path.is_some() && file_path_to_export != &doc.file_path {
-                    let fallback_path = &doc.file_path;
-                    let abs_fallback = file_storage.get_absolute_path(fallback_path);
-                    if abs_fallback.exists() {
-                        let blobs_dir = dest_dir.join("blobs");
-                        std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
-                        if let Some(filename) = abs_fallback.file_name() {
-                            std::fs::copy(&abs_fallback, blobs_dir.join(&doc.original_filename)).map_err(|e| e.to_string())?;
+                        let export_filename = std::ffi::OsString::from(&doc.original_filename);
+                        match std::fs::copy(&abs_path, blobs_dir.join(export_filename)) {
+                            Ok(_) => {
+                                log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, &doc.original_filename);
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                            }
                         }
                     }
+                } else {
+                    log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
                 }
             }
         }
@@ -592,6 +744,49 @@ fn write_jsonl_line<T: serde::Serialize>(
         let json = serde_json::to_string(entity).map_err(|e| e.to_string())?;
         writeln!(file, "{}", json).map_err(|e| e.to_string())
     }
+}
+
+// Helper function to determine the best file path for export
+fn select_best_file_path_with_storage<'a>(
+    document: &'a crate::domains::document::types::MediaDocument,
+    file_storage: &Arc<dyn FileStorageService>
+) -> (&'a str, &'static str) {
+    // First priority: compressed file if compression is completed and file exists
+    if document.compression_status == "completed" {
+        if let Some(ref compressed_path) = document.compressed_file_path {
+            let abs_compressed = file_storage.get_absolute_path(compressed_path);
+            if abs_compressed.exists() {
+                log::info!("Using compressed file for export: {}", compressed_path);
+                return (compressed_path.as_str(), "compressed");
+            } else {
+                log::warn!("Compressed file marked as completed but not found at: {}", abs_compressed.display());
+                // Fall back to original if it exists
+                let abs_original = file_storage.get_absolute_path(&document.file_path);
+                if abs_original.exists() {
+                    log::info!("Falling back to original file: {}", &document.file_path);
+                    return (document.file_path.as_str(), "original_fallback");
+                } else {
+                    log::error!("Neither compressed ({}) nor original ({}) file exists for document {}", 
+                        abs_compressed.display(), abs_original.display(), document.id);
+                    return (document.file_path.as_str(), "missing");
+                }
+            }
+        } else {
+            log::warn!("Compression marked as completed but no compressed_file_path for document {}", document.id);
+            return (document.file_path.as_str(), "original");
+        }
+    } else {
+        // Compression not completed or in progress, use original
+        log::info!("Using original file (compression status: {}): {}", document.compression_status, &document.file_path);
+        return (document.file_path.as_str(), "original");
+    }
+}
+
+// Legacy helper function for backward compatibility - now just delegates
+fn select_best_file_path(document: &crate::domains::document::types::MediaDocument) -> (&str, &str) {
+    // For functions that don't have access to file storage, default to original
+    log::info!("Using original file (legacy path selection): {}", &document.file_path);
+    return (document.file_path.as_str(), "original");
 }
 
 // NEW unified export helper
@@ -751,13 +946,24 @@ async fn export_unified(
             for doc in &page_result.items {
                 write_jsonl_line(&mut file, doc, "media_document", include_type_tags)?;
                 if include_blobs {
-                    let rel_path = &doc.file_path;
-                    let abs = file_storage.get_absolute_path(rel_path);
+                    // Use helper function to select the best file path
+                    let (source_file_path, file_source_type) = select_best_file_path_with_storage(doc, file_storage);
+                    
+                    let abs = file_storage.get_absolute_path(source_file_path);
                     if abs.exists() {
                         let blobs_dir = dest_dir.join("blobs");
                         std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
-                        let file_name = abs.file_name().ok_or("bad file name")?;
-                        std::fs::copy(&abs, blobs_dir.join(file_name)).map_err(|e| e.to_string())?;
+                        let export_filename = std::ffi::OsString::from(&doc.original_filename);
+                        match std::fs::copy(&abs, blobs_dir.join(export_filename)) {
+                            Ok(_) => {
+                                log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, &doc.original_filename);
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                            }
+                        }
+                    } else {
+                        log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
                     }
                 }
             }
@@ -951,43 +1157,28 @@ async fn export_media_documents_by_date_range(
             writeln!(file, "{}", json).map_err(|e| e.to_string())?;
 
             if include_blobs {
-                let mut file_exported = false;
                 
-                // Try to export the best available file (compressed if completed, original otherwise)
-                let file_path_to_export = if doc.compression_status == "completed" && doc.compressed_file_path.is_some() {
-                    doc.compressed_file_path.as_ref().unwrap()
-                } else {
-                    &doc.file_path
-                };
+                // Use helper function to select the best file path
+                let (source_file_path, file_source_type) = select_best_file_path_with_storage(doc, file_storage);
                 
-                let abs_path = file_storage.get_absolute_path(file_path_to_export);
+                let abs_path = file_storage.get_absolute_path(source_file_path);
                 if abs_path.exists() {
                     let blobs_dir = dest_dir.join("blobs");
                     std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
-                    if let Some(filename) = abs_path.file_name() {
+                    if let Some(_filename) = abs_path.file_name() {
                         // Use original filename for consistency
-                        let export_filename = if file_path_to_export == &doc.file_path {
-                            filename.to_os_string()
-                        } else {
-                            // For compressed files, use original filename to maintain consistency
-                            std::ffi::OsString::from(&doc.original_filename)
-                        };
-                        std::fs::copy(&abs_path, blobs_dir.join(export_filename)).map_err(|e| e.to_string())?;
-                        file_exported = true;
-                    }
-                }
-                
-                // Fallback: if primary file failed and we have both paths, try the other one
-                if !file_exported && doc.compressed_file_path.is_some() && file_path_to_export != &doc.file_path {
-                    let fallback_path = &doc.file_path;
-                    let abs_fallback = file_storage.get_absolute_path(fallback_path);
-                    if abs_fallback.exists() {
-                        let blobs_dir = dest_dir.join("blobs");
-                        std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
-                        if let Some(filename) = abs_fallback.file_name() {
-                            std::fs::copy(&abs_fallback, blobs_dir.join(&doc.original_filename)).map_err(|e| e.to_string())?;
+                        let export_filename = std::ffi::OsString::from(&doc.original_filename);
+                        match std::fs::copy(&abs_path, blobs_dir.join(export_filename)) {
+                            Ok(_) => {
+                                log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, &doc.original_filename);
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                            }
                         }
                     }
+                } else {
+                    log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
                 }
             }
         }
@@ -1002,23 +1193,195 @@ async fn export_media_documents_by_date_range(
 
 // === ID-based Export Functions ===
 
-async fn export_strategic_goals_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+async fn export_strategic_goals_by_ids(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
     if ids.is_empty() {
-        return Ok(());
+        log::info!("Export strategic goals by IDs: empty IDs list");
+        return Ok(0);
     }
 
-    let repo = globals::get_strategic_goal_repo().map_err(|e| e.to_string())?;
-    let file_path = dest_dir.join("strategic_goals.jsonl");
-    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    log::info!("Export strategic goals by IDs: {} IDs, include_documents: {}", ids.len(), include_documents);
 
+    let strategic_goal_repo = globals::get_strategic_goal_repo().map_err(|e| e.to_string())?;
+    
+    // Get strategic goals
     let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
-    let result = repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+    log::info!("Calling repo.find_by_ids with params: page={}, per_page={}", params.page, params.per_page);
+    let result = strategic_goal_repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
 
-    for entity in result.items {
-        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
-        writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+    log::info!("Repository returned {} items, total={}", result.items.len(), result.total);
+
+    // Export strategic goals using optimized writer
+    let strategic_goals_file_path = dest_dir.join("strategic_goals.jsonl");
+    let mut strategic_goals_writer = OptimizedJsonLWriter::new(&strategic_goals_file_path)?;
+
+    let mut total_documents_exported = 0;
+    let mut total_files_copied = 0;
+
+    if include_documents {
+        let media_doc_repo = globals::get_media_document_repo().map_err(|e| e.to_string())?;
+        
+        // Get all goal IDs
+        let goal_ids: Vec<Uuid> = result.items.iter().map(|g| g.id).collect();
+        log::info!("Fetching all documents for {} strategic goals efficiently", goal_ids.len());
+        
+        // Fetch ALL documents for ALL goals in a single query - this solves the N+1 problem
+        let all_documents = media_doc_repo
+            .find_by_related_entities("strategic_goals", &goal_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        // Group documents by related_id (goal_id) for efficient lookup
+        let mut documents_by_goal: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                documents_by_goal.entry(related_id).or_insert_with(Vec::new).push(document);
+            }
+        }
+        
+        log::info!("Found {} total documents across all goals", documents_by_goal.values().map(|v| v.len()).sum::<usize>());
+
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing entity {} to file: id={}", i + 1, entity.id);
+            
+            // Get document count from our pre-fetched data
+            let document_count = documents_by_goal.get(&entity.id).map(|docs| docs.len()).unwrap_or(0);
+            let metadata = serde_json::json!({
+                "document_count": document_count,
+                "has_documents": document_count > 0
+            });
+            
+            strategic_goals_writer.write_enhanced_entity(entity, metadata)?;
+        }
+
+        // Export associated media documents and files
+        log::info!("Exporting associated media documents");
+        let mut documents_writer_opt: Option<OptimizedJsonLWriter> = None;
+        let mut files_dir_created = false;
+        let files_dir = dest_dir.join("files");
+        
+        // Check if we actually have documents before processing
+        let total_docs_count: usize = documents_by_goal.values().map(|docs| docs.len()).sum();
+        log::info!("Total documents to export: {}", total_docs_count);
+        
+        if total_docs_count > 0 {
+            // Process all documents we already fetched (no more database calls!)
+            for documents in documents_by_goal.values() {
+                for document in documents {
+                    // Lazy create documents writer on first document
+                    if documents_writer_opt.is_none() {
+                        let documents_file_path = dest_dir.join("media_documents.jsonl");
+                        documents_writer_opt = Some(OptimizedJsonLWriter::new(&documents_file_path)?);
+                    }
+                
+                // Use helper function to select the best file path
+                let (source_file_path, file_source_type) = select_best_file_path_with_storage(&document, file_storage);
+                
+                // Generate unique filename for export (avoid conflicts)
+                let original_filename = std::path::Path::new(&document.original_filename)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
+                let extension = std::path::Path::new(&document.original_filename)
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("bin");
+                let unique_filename = format!("{}_{}.{}", original_filename, &document.id.to_string()[..8], extension);
+                let dest_file_path = files_dir.join(&unique_filename);
+                
+                // Copy the file if it exists (use file storage service to get absolute path)
+                let mut file_copied = false;
+                let abs_source_path = file_storage.get_absolute_path(source_file_path);
+                if abs_source_path.exists() {
+                    // Lazy create files directory on first successful file
+                    if !files_dir_created {
+                        std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+                        files_dir_created = true;
+                    }
+                    
+                    match std::fs::copy(&abs_source_path, &dest_file_path) {
+                        Ok(_) => {
+                            log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, unique_filename);
+                            file_copied = true;
+                            total_files_copied += 1;
+                        }
+                        Err(e) => {
+                            log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                        }
+                    }
+                } else {
+                    log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
+                }
+                
+                // Create enhanced document metadata with export file path
+                let mut doc_json = serde_json::to_value(&document).map_err(|e| e.to_string())?;
+                if let serde_json::Value::Object(ref mut map) = doc_json {
+                    if file_copied {
+                        map.insert("export_file_path".to_string(), serde_json::Value::String(format!("files/{}", unique_filename)));
+                        map.insert("file_available".to_string(), serde_json::Value::Bool(true));
+                        map.insert("export_source_type".to_string(), serde_json::Value::String(file_source_type.to_string()));
+                        map.insert("exported_from_path".to_string(), serde_json::Value::String(source_file_path.to_string()));
+                    } else {
+                        map.insert("file_available".to_string(), serde_json::Value::Bool(false));
+                        map.insert("attempted_source_type".to_string(), serde_json::Value::String(file_source_type.to_string()));
+                        map.insert("attempted_file_path".to_string(), serde_json::Value::String(source_file_path.to_string()));
+                    }
+                }
+                
+                if let Some(ref mut documents_writer) = documents_writer_opt {
+                    documents_writer.write_entity(&doc_json)?;
+                }
+                total_documents_exported += 1;
+                }
+            }
+            
+            // Finalize documents writer if created
+            if let Some(documents_writer) = documents_writer_opt {
+                documents_writer.finalize()?;
+            }
+        } else {
+            log::info!("No documents found, skipping document export files");
+        }
+    } else {
+        // Export strategic goals without document metadata
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing entity {} to file: id={}", i + 1, entity.id);
+            strategic_goals_writer.write_entity(entity)?;
+        }
     }
-    Ok(())
+    
+    // Finalize strategic goals writer
+    strategic_goals_writer.finalize()?;
+    
+    // Create manifest file with export summary
+    let mut manifest_files = serde_json::json!({
+        "strategic_goals.jsonl": format!("{} strategic goals", result.items.len())
+    });
+    
+    if include_documents && total_documents_exported > 0 {
+        if let serde_json::Value::Object(ref mut map) = manifest_files {
+            map.insert("media_documents.jsonl".to_string(), serde_json::Value::String(format!("{} document records", total_documents_exported)));
+            if total_files_copied > 0 {
+                map.insert("files/".to_string(), serde_json::Value::String(format!("{} actual document files", total_files_copied)));
+            }
+        }
+    }
+    
+    let manifest = serde_json::json!({
+        "export_type": if include_documents { "strategic_goals_with_documents" } else { "strategic_goals_only" },
+        "export_date": chrono::Utc::now().to_rfc3339(),
+        "strategic_goals_count": result.items.len(),
+        "documents_count": total_documents_exported,
+        "files_copied": total_files_copied,
+        "include_documents": include_documents,
+        "files": manifest_files
+    });
+    
+    let manifest_path = dest_dir.join("manifest.json");
+    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    std::fs::write(manifest_path, manifest_json).map_err(|e| e.to_string())?;
+    
+    log::info!("Export strategic goals by IDs completed: wrote {} goals, {} documents, {} files", result.items.len(), total_documents_exported, total_files_copied);
+    Ok(result.items.len() as i64)
 }
 
 async fn export_projects_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
@@ -1194,43 +1557,27 @@ async fn export_media_documents_by_ids(
 
         // Handle blob export if requested and entity has file_path
         if include_blobs {
-            let mut file_exported = false;
+            // Use helper function to select the best file path
+            let (source_file_path, file_source_type) = select_best_file_path_with_storage(&entity, file_storage);
             
-            // Try to export the best available file (compressed if completed, original otherwise)
-            let file_path_to_export = if entity.compression_status == "completed" && entity.compressed_file_path.is_some() {
-                entity.compressed_file_path.as_ref().unwrap()
-            } else {
-                &entity.file_path
-            };
-            
-            let abs_path = file_storage.get_absolute_path(file_path_to_export);
+            let abs_path = file_storage.get_absolute_path(source_file_path);
             if abs_path.exists() {
                 let blobs_dir = dest_dir.join("blobs");
                 std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
-                if let Some(filename) = abs_path.file_name() {
+                if let Some(_filename) = abs_path.file_name() {
                     // Use original filename for consistency
-                    let export_filename = if file_path_to_export == &entity.file_path {
-                        filename.to_os_string()
-                    } else {
-                        // For compressed files, use original filename to maintain consistency
-                        std::ffi::OsString::from(&entity.original_filename)
-                    };
-                    std::fs::copy(&abs_path, blobs_dir.join(export_filename)).map_err(|e| e.to_string())?;
-                    file_exported = true;
-                }
-            }
-            
-            // Fallback: if primary file failed and we have both paths, try the other one
-            if !file_exported && entity.compressed_file_path.is_some() && file_path_to_export != &entity.file_path {
-                let fallback_path = &entity.file_path;
-                let abs_fallback = file_storage.get_absolute_path(fallback_path);
-                if abs_fallback.exists() {
-                    let blobs_dir = dest_dir.join("blobs");
-                    std::fs::create_dir_all(&blobs_dir).map_err(|e| e.to_string())?;
-                    if let Some(filename) = abs_fallback.file_name() {
-                        std::fs::copy(&abs_fallback, blobs_dir.join(&entity.original_filename)).map_err(|e| e.to_string())?;
+                    let export_filename = std::ffi::OsString::from(&entity.original_filename);
+                    match std::fs::copy(&abs_path, blobs_dir.join(export_filename)) {
+                        Ok(_) => {
+                            log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, &entity.original_filename);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                        }
                     }
                 }
+            } else {
+                log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
             }
         }
     }
@@ -1278,4 +1625,82 @@ async fn export_workshop_participants_by_ids(dest_dir: &Path, ids: &[Uuid]) -> R
         writeln!(file, "{}", json).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+// NEW: Helper function for strategic goals export by complex filter
+async fn export_strategic_goals_by_filter(
+    dest_dir: &Path,
+    filter: &crate::domains::strategic_goal::types::StrategicGoalFilter,
+) -> Result<(), String> {
+    let repo = crate::globals::get_strategic_goal_repo().map_err(|e| e.to_string())?;
+    
+    // First, get all IDs that match the filter
+    let matching_ids = repo.find_ids_by_filter(filter.clone()).await
+        .map_err(|e| format!("Failed to get filtered IDs: {}", e))?;
+    
+    if matching_ids.is_empty() {
+        // No matching goals, create empty file
+        let file_path = dest_dir.join("strategic_goals.jsonl");
+        let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+        // File is already empty, just return
+        return Ok(());
+    }
+    
+    // Now fetch the actual entities in batches using the IDs
+    let file_path = dest_dir.join("strategic_goals.jsonl");
+    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    let per_page = 200;
+    
+    for chunk in matching_ids.chunks(per_page) {
+        let params = PaginationParams { 
+            page: 1, // Always page 1 since we're passing specific IDs
+            per_page: chunk.len() as u32 
+        };
+        
+        let result = repo.find_by_ids(chunk, params).await
+            .map_err(|e| format!("Failed to fetch goals by IDs: {}", e))?;
+        
+        for entity in result.items {
+            let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
+            writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
 } 
+
+// Generic optimized export helper for basic entity exports  
+async fn export_entities_optimized<T, R>(
+    dest_dir: &Path,
+    filename: &str,
+    repo_getter: impl Fn() -> Result<R, String>,
+    fetcher: impl Fn(&R, PaginationParams) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::types::PaginatedResult<T>, String>> + Send>>,
+) -> Result<(), String>
+where
+    T: serde::Serialize + Send,
+    R: Send,
+{
+    let repo = repo_getter()?;
+    let file_path = dest_dir.join(filename);
+    let mut writer = OptimizedJsonLWriter::new(&file_path)?;
+
+    let mut page: u32 = 1;
+    let per_page = 500; // Optimized page size
+    
+    loop {
+        let params = PaginationParams { page, per_page };
+        let page_result = fetcher(&repo, params).await?;
+        
+        for entity in page_result.items {
+            writer.write_entity(&entity)?;
+        }
+        
+        if page >= page_result.total_pages {
+            break;
+        }
+        page += 1;
+    }
+    
+    writer.finalize()?;
+    Ok(())
+}

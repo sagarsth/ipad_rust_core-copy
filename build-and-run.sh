@@ -46,7 +46,8 @@ cd ActionAidSwiftUI
 xcodebuild -project ActionAidSwiftUI.xcodeproj \
     -scheme ActionAidSwiftUI \
     -destination "platform=iOS Simulator,name=iPad (10th generation)" \
-    build
+    -configuration Debug \
+    clean build
 cd ..
 print_success "Swift project built"
 

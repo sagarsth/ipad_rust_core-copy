@@ -675,38 +675,48 @@ impl StrategicGoalRepository for SqliteStrategicGoalRepository {
             return Ok(PaginatedResult::new(Vec::new(), 0, params));
         }
 
+        log::info!("Repository find_by_ids called with {} IDs: {:?}", ids.len(), ids);
+
         let offset = (params.page - 1) * params.per_page;
 
-        // Build COUNT query with dynamic placeholders
-        let count_placeholders = vec!["?"; ids.len()].join(", ");
-        let count_query = format!(
-            "SELECT COUNT(*) FROM strategic_goals WHERE id IN ({}) AND deleted_at IS NULL",
-            count_placeholders
-        );
-
-        let mut count_builder = QueryBuilder::new(&count_query);
+        // Build COUNT query using QueryBuilder properly
+        let mut count_builder = QueryBuilder::new("SELECT COUNT(*) FROM strategic_goals WHERE id IN (");
+        let mut count_separated = count_builder.separated(", ");
         for id in ids {
-            count_builder.push_bind(id.to_string());
+            let id_str = id.to_string();
+            log::info!("Adding ID to query: '{}'", id_str);
+            count_separated.push_bind(id_str);
         }
+        count_builder.push(") AND deleted_at IS NULL");
+        
+        log::info!("Executing count query for strategic goals");
 
         let total: i64 = count_builder
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await
             .map_err(DbError::from)?;
-
-        // Build SELECT query with dynamic placeholders
-        let select_placeholders = vec!["?"; ids.len()].join(", ");
-        let select_query = format!(
-            "SELECT * FROM strategic_goals WHERE id IN ({}) AND deleted_at IS NULL ORDER BY objective_code ASC LIMIT ? OFFSET ?",
-            select_placeholders
-        );
-
-        let mut select_builder = QueryBuilder::new(&select_query);
-        for id in ids {
-            select_builder.push_bind(id.to_string());
+            
+        log::info!("Count query returned: {} matching records", total);
+        
+        // Debug: Show some sample IDs from database
+        if total == 0 {
+            let sample_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM strategic_goals WHERE deleted_at IS NULL LIMIT 5")
+                .fetch_all(&self.pool)
+                .await
+                .unwrap_or_default();
+            log::info!("Sample IDs in database: {:?}", sample_ids);
         }
+
+        // Build SELECT query using QueryBuilder properly
+        let mut select_builder = QueryBuilder::new("SELECT * FROM strategic_goals WHERE id IN (");
+        let mut select_separated = select_builder.separated(", ");
+        for id in ids {
+            select_separated.push_bind(id.to_string());
+        }
+        select_builder.push(") AND deleted_at IS NULL ORDER BY objective_code ASC LIMIT ");
         select_builder.push_bind(params.per_page as i64);
+        select_builder.push(" OFFSET ");
         select_builder.push_bind(offset as i64);
 
         let rows = select_builder

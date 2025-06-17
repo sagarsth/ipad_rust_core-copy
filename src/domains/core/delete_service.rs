@@ -145,7 +145,7 @@ pub struct FailedDeleteDetail<E>
 where 
     E: Send + Sync,
 {
-    pub id: Uuid,
+    pub id: String,  // Changed to String for consistency
     pub entity_data: Option<E>,
     pub entity_type: String,
     pub reason: FailureReason,
@@ -170,20 +170,22 @@ pub enum FailureReason {
 }
 
 /// Result of a batch delete operation
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BatchDeleteResult {
     /// Successfully hard deleted record IDs
-    pub hard_deleted: Vec<Uuid>,
+    #[serde(rename = "hardDeleted")]
+    pub hard_deleted: Vec<String>,  // Changed to String for Swift compatibility
     /// Successfully soft deleted record IDs (includes those soft-deleted due to fallback)
-    pub soft_deleted: Vec<Uuid>,
+    #[serde(rename = "softDeleted")]
+    pub soft_deleted: Vec<String>,  // Changed to String for Swift compatibility
     /// Failed to delete record IDs (includes dependencies prevented, not found, errors)
-    pub failed: Vec<Uuid>,
+    pub failed: Vec<String>,  // Changed to String for Swift compatibility
     /// Map of ID to dependencies that *would have* prevented hard delete
     /// (Populated for both SoftDeletedDueToDependencies and DependenciesPrevented)
-    pub dependencies: HashMap<Uuid, Vec<String>>,
+    pub dependencies: HashMap<String, Vec<String>>,  // Changed key to String for Swift compatibility
     /// Map of ID to specific failure errors (if captured)
     /// Optional: Requires enhancing `batch_delete` to store errors
-    pub errors: HashMap<Uuid, DomainError>, 
+    pub errors: HashMap<String, String>,  // Changed to String for Swift compatibility
 }
 
 /// Trait combining repository operations needed for delete service
@@ -664,34 +666,35 @@ where
         
         // Process each ID
         for &id in ids {
+            let id_str = id.to_string();
             match self.delete(id, auth, options.clone()).await {
                 Ok(DeleteResult::HardDeleted) => {
-                    result.hard_deleted.push(id);
+                    result.hard_deleted.push(id_str);
                 },
                 
                 Ok(DeleteResult::SoftDeleted { dependencies }) => {
-                    result.soft_deleted.push(id);
+                    result.soft_deleted.push(id_str.clone());
                     if !dependencies.is_empty() {
-                        result.dependencies.insert(id, dependencies);
+                        result.dependencies.insert(id_str, dependencies);
                     }
                 },
                 
                 Ok(DeleteResult::DependenciesPrevented { dependencies }) => {
-                    result.failed.push(id);
-                    result.dependencies.insert(id, dependencies);
+                    result.failed.push(id_str.clone());
+                    result.dependencies.insert(id_str, dependencies);
                 },
                 
                 Err(e @ DomainError::AuthorizationFailed(_)) => {
-                    result.failed.push(id);
-                    result.errors.insert(id, e);
+                    result.failed.push(id_str.clone());
+                    result.errors.insert(id_str, e.to_string());
                 },
                 Err(e @ DomainError::EntityNotFound(_, _)) => {
-                    result.failed.push(id);
-                    result.errors.insert(id, e);
+                    result.failed.push(id_str.clone());
+                    result.errors.insert(id_str, e.to_string());
                 },
                 Err(e) => {
-                    result.failed.push(id);
-                    result.errors.insert(id, e);
+                    result.failed.push(id_str.clone());
+                    result.errors.insert(id_str, e.to_string());
                 }
             }
         }
@@ -753,29 +756,39 @@ where
         let mut details = Vec::new();
         let entity_type_name = self.repo.entity_name().to_string(); // Corrected: Use instance method
 
-        for &id in &batch_result.failed {
-            // Attempt to fetch the entity data (might fail if already deleted or never existed)
-            // Note: This assumes find_by_id doesn't require specific permissions beyond auth context validity,
-            // or that the auth context used here has sufficient read permissions.
-            let entity_data_result = self.repo.find_by_id(id).await;
-
-            let entity_data = match entity_data_result {
-                 Ok(entity) => Some(entity),
-                 Err(DomainError::EntityNotFound(_, _)) => None, // Expected if it was never found
-                 Err(_) => None, // Other error fetching, treat as data unavailable
+        for id_str in &batch_result.failed {
+            // Convert string ID back to UUID for repository lookup
+            let entity_data = if let Ok(id_uuid) = Uuid::parse_str(id_str) {
+                // Attempt to fetch the entity data (might fail if already deleted or never existed)
+                // Note: This assumes find_by_id doesn't require specific permissions beyond auth context validity,
+                // or that the auth context used here has sufficient read permissions.
+                match self.repo.find_by_id(id_uuid).await {
+                     Ok(entity) => Some(entity),
+                     Err(DomainError::EntityNotFound(_, _)) => None, // Expected if it was never found
+                     Err(_) => None, // Other error fetching, treat as data unavailable
+                }
+            } else {
+                None // Invalid UUID string
             };
 
-            // Determine the failure reason
-            let (reason, deps) = match batch_result.errors.get(&id) {
-                Some(DomainError::EntityNotFound(_, _)) => (FailureReason::NotFound, Vec::new()),
-                Some(DomainError::AuthorizationFailed(_)) => (FailureReason::AuthorizationFailed, Vec::new()),
-                Some(DomainError::Database(db_err)) => (FailureReason::DatabaseError(db_err.to_string()), Vec::new()),
-                // Use wildcard _ to catch any other DomainError variant or None
-                Some(_) | None => { 
-                    // If Conflict or no specific error, check dependencies map
-                    if let Some(dep_tables) = batch_result.dependencies.get(&id) {
+            // Determine the failure reason from error string
+            let (reason, deps) = match batch_result.errors.get(id_str) {
+                Some(error_msg) => {
+                    if error_msg.contains("EntityNotFound") || error_msg.contains("not found") {
+                        (FailureReason::NotFound, Vec::new())
+                    } else if error_msg.contains("AuthorizationFailed") || error_msg.contains("authorization") {
+                        (FailureReason::AuthorizationFailed, Vec::new())
+                    } else if error_msg.contains("Database") || error_msg.contains("database") {
+                        (FailureReason::DatabaseError(error_msg.clone()), Vec::new())
+                    } else {
+                        (FailureReason::DatabaseError(error_msg.clone()), Vec::new())
+                    }
+                },
+                None => { 
+                    // If no specific error, check dependencies map
+                    if let Some(dep_tables) = batch_result.dependencies.get(id_str) {
                          // Check if it was actually soft-deleted (meaning dependencies prevented hard delete)
-                         if batch_result.soft_deleted.contains(&id) {
+                         if batch_result.soft_deleted.contains(id_str) {
                               (FailureReason::SoftDeletedDueToDependencies, dep_tables.clone())
                          } else {
                              // If it's in failed *and* dependencies, it was prevented entirely
@@ -786,11 +799,10 @@ where
                          (FailureReason::Unknown, Vec::new())
                     }
                 },
-                 // _ => (FailureReason::Unknown, Vec::new()), // This arm is unreachable and removed
             };
 
             details.push(FailedDeleteDetail {
-                id,
+                id: id_str.clone(),
                 entity_data,
                 entity_type: entity_type_name.clone(),
                 reason,

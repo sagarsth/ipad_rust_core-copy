@@ -53,6 +53,10 @@ pub enum EntityFilter {
         end_date: DateTime<Utc>,
         status_id: Option<i64> 
     },
+    /// Export strategic goals using complex filter (matches UI filtering logic)
+    StrategicGoalsByFilter { 
+        filter: crate::domains::strategic_goal::types::StrategicGoalFilter 
+    },
     /// Export all projects.
     ProjectsAll,
     /// Export projects by specific IDs

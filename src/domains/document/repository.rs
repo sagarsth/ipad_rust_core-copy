@@ -563,6 +563,13 @@ pub trait MediaDocumentRepository:
         end_date: DateTime<Utc>,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<MediaDocument>>;
+
+    /// Find all media documents for a list of related entities
+    async fn find_by_related_entities(
+        &self,
+        related_table: &str,
+        related_ids: &[Uuid],
+    ) -> DomainResult<Vec<MediaDocument>>;
 }
 
 pub struct SqliteMediaDocumentRepository {
@@ -1686,6 +1693,46 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             .map(Self::map_row)
             .collect::<DomainResult<Vec<_>>>()?;
         Ok(PaginatedResult::new(items, total as u64, params))
+    }
+
+    async fn find_by_related_entities(
+        &self,
+        related_table: &str,
+        related_ids: &[Uuid],
+    ) -> DomainResult<Vec<MediaDocument>> {
+        if related_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let ids_as_strings: Vec<String> =
+            related_ids.iter().map(|id| id.to_string()).collect();
+
+        let mut query_builder = QueryBuilder::new(
+            "SELECT * FROM media_documents WHERE related_table = ",
+        );
+        query_builder.push_bind(related_table);
+        query_builder.push(" AND related_id IN (");
+
+        let mut separated = query_builder.separated(", ");
+        for id_str in ids_as_strings {
+            separated.push_bind(id_str);
+        }
+        separated.push_unseparated(")");
+        query_builder.push(" AND deleted_at IS NULL ORDER BY created_at DESC");
+
+        let query = query_builder.build_query_as::<MediaDocumentRow>();
+        let result = query.fetch_all(&self.pool).await;
+
+        match result {
+            Ok(rows) => {
+                let entities: DomainResult<Vec<MediaDocument>> = rows
+                    .into_iter()
+                    .map(Self::map_row)
+                    .collect();
+                entities
+            }
+            Err(e) => Err(DomainError::Database(DbError::from(e))),
+        }
     }
 }
 

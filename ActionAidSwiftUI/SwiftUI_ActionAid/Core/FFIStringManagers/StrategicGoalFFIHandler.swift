@@ -113,6 +113,11 @@ class StrategicGoalFFIHandler {
         return await executeOperation(payload: payload, ffiCall: strategic_goal_delete)
     }
 
+    func bulkDelete(ids: [String], hardDelete: Bool?, force: Bool?, auth: AuthContextPayload) async -> Result<BatchDeleteResult, Error> {
+        let payload = StrategicGoalBulkDeleteRequest(ids: ids, hardDelete: hardDelete, force: force, auth: auth)
+        return await executeOperation(payload: payload, ffiCall: strategic_goal_bulk_delete)
+    }
+
     // MARK: - Document Integration
     
     func createWithDocuments(

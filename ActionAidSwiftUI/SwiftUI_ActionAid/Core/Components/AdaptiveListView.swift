@@ -93,6 +93,9 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
     let userRole: String? // Add user role for button visibility
     let onFilterBasedSelectAll: (() -> Void)? // Callback for backend filter selection
     
+    // Authentication manager for export functionality
+    @EnvironmentObject var authManager: AuthenticationManager
+    
     @State private var groupedItems: [(monthYear: String, items: [Item])] = []
     @State private var showColumnCustomizer = false
     @StateObject private var columnPreferenceManager = ColumnPreferenceManager()
@@ -110,6 +113,8 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
     @State private var selectedMonths: Set<Int> = [] // 1-12
     @State private var showYearPicker = false
     @State private var showMonthPicker = false
+    
+
     
     private let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -219,6 +224,8 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
             if viewStyle == .table && isInSelectionMode {
                 advancedSelectionControlsView
             }
+            
+
             
             // Content
             if groupedItems.isEmpty {
@@ -376,104 +383,10 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
                     .cornerRadius(8)
                 }
                 .disabled(isSelectAllExplicitlyPressed)
-                
-                // Clear button - smaller with X
-                Button(action: {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        selectedItems.removeAll()
-                        selectedYears.removeAll()
-                        selectedMonths.removeAll()
-                        isSelectAllExplicitlyPressed = false
-                        isInSelectionMode = false
-                    }
-                }) {
-                    Image(systemName: "xmark")
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundColor(.red)
-                }
-                .frame(width: 50, height: 50) // Square button
-                .background(Color.red.opacity(0.1))
-                .cornerRadius(8)
             }
             .padding(.horizontal)
             
-            // Action buttons row (only show when items are selected)
-            if !selectedItems.isEmpty {
-                HStack(spacing: 12) {
-                    // Export button for admin and tl
-                    if let role = userRole, (role.lowercased() == "admin" || role.lowercased() == "tl") {
-                        Button(action: {
-                            // TODO: Handle export action
-                            print("Export \(selectedItems.count) items")
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "square.and.arrow.up")
-                                    .font(.caption)
-                                Text("Export")
-                                    .font(.caption2)
-                                    .fontWeight(.medium)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.blue.opacity(0.1))
-                            .foregroundColor(.blue)
-                            .cornerRadius(6)
-                        }
-                    }
-                    
-                    // Soft delete button for officer and field tl
-                    if let role = userRole, (role.lowercased() == "officer" || role.lowercased() == "field_tl" || role.lowercased() == "fieldtl") {
-                        Button(action: {
-                            // TODO: Handle soft delete action
-                            print("Soft delete \(selectedItems.count) items")
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "trash")
-                                    .font(.caption)
-                                Text("Archive")
-                                    .font(.caption2)
-                                    .fontWeight(.medium)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.orange.opacity(0.1))
-                            .foregroundColor(.orange)
-                            .cornerRadius(6)
-                        }
-                    }
-                    
-                    // Hard delete button for admin only
-                    if let role = userRole, role.lowercased() == "admin" {
-                        Button(action: {
-                            // TODO: Handle hard delete action
-                            print("Hard delete \(selectedItems.count) items")
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "trash.fill")
-                                    .font(.caption)
-                                Text("Delete")
-                                    .font(.caption2)
-                                    .fontWeight(.medium)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.red.opacity(0.1))
-                            .foregroundColor(.red)
-                            .cornerRadius(6)
-                        }
-                    }
-                    
-                    Spacer()
-                }
-                .padding(.horizontal)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-            
-            // Selected count
-            Text("\(selectedItems.count) selected")
-                .font(.caption)
-                .foregroundColor(.secondary)
+
         }
         .padding(.vertical, 8)
         .background(Color(.systemGray6).opacity(0.8))
@@ -565,7 +478,7 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
         
         // Group current items by month-year
         let grouped = Dictionary(grouping: items) { item in
-            let dateString = item.createdAt.isEmpty ? item.updatedAt : item.createdAt
+            let dateString = item.updatedAt.isEmpty ? item.createdAt : item.updatedAt
             
             if let date = isoFormatter.date(from: dateString) {
                 return calendar.dateInterval(of: .month, for: date)?.start ?? Date()
@@ -785,7 +698,44 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
         }
     }
     
+
+    
     // MARK: - Helper Methods
+    
+    private func openInFilesApp(path: String) {
+        let fileURL = URL(fileURLWithPath: path)
+        
+        // Try to open Files app to the specific folder
+        if #available(iOS 14.0, *) {
+            // Modern approach - this will open Files app and navigate to the folder
+            let activityViewController = UIActivityViewController(
+                activityItems: [fileURL],
+                applicationActivities: nil
+            )
+            
+            // Get the root view controller to present from
+            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+               let window = windowScene.windows.first,
+               let rootViewController = window.rootViewController {
+                
+                // For iPad - configure popover
+                if let popover = activityViewController.popoverPresentationController {
+                    popover.sourceView = rootViewController.view
+                    popover.sourceRect = CGRect(x: rootViewController.view.bounds.midX, 
+                                              y: rootViewController.view.bounds.midY, 
+                                              width: 0, height: 0)
+                    popover.permittedArrowDirections = []
+                }
+                
+                rootViewController.present(activityViewController, animated: true)
+            }
+        } else {
+            // Fallback for older iOS versions
+            let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            UIApplication.shared.open(documentsURL)
+        }
+    }
+    
     private func toggleSelection(for itemId: String) {
         if selectedItems.contains(itemId) {
             selectedItems.remove(itemId)
@@ -1038,5 +988,85 @@ class ViewStylePreferenceManager: ObservableObject {
     
     func setViewStyle(_ style: ListViewStyle, for domain: String) {
         userDefaults.set(style.rawValue, forKey: "viewStyle_\(domain)")
+    }
+}
+
+// MARK: - Export Options Sheet
+struct ExportOptionsSheet: View {
+    let onExport: (Bool) -> Void
+    @Binding var isExporting: Bool
+    @Binding var exportError: String?
+    @Environment(\.dismiss) var dismiss
+    
+    @State private var includeBlobs = false
+    
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 20) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Export Options")
+                        .font(.headline)
+                    
+                    Toggle("Include file attachments", isOn: $includeBlobs)
+                        .font(.subheadline)
+                    
+                    Text("This will export all strategic goals that match your current filter settings.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    if let error = exportError {
+                        Text("Error: \(error)")
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+                }
+                .padding()
+                .background(Color(.systemGray6))
+                .cornerRadius(12)
+                
+                Spacer()
+                
+                VStack(spacing: 12) {
+                    Button(action: {
+                        onExport(includeBlobs)
+                    }) {
+                        HStack {
+                            if isExporting {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: "square.and.arrow.up")
+                            }
+                            Text(isExporting ? "Exporting..." : "Start Export")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding()
+                        .background(isExporting ? Color.gray : Color.blue)
+                        .foregroundColor(.white)
+                        .cornerRadius(10)
+                    }
+                    .disabled(isExporting)
+                    
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color(.systemGray5))
+                    .foregroundColor(.primary)
+                    .cornerRadius(10)
+                }
+            }
+            .padding()
+            .navigationTitle("Export Data")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
+        }
     }
 } 

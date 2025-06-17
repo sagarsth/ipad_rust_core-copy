@@ -98,39 +98,47 @@ impl Compressor for OfficeCompressor {
         
         // Finally, reconstruct ZIP in blocking task
         task::spawn_blocking(move || -> DomainResult<Vec<u8>> {
+            // 🔧 FIX: Use Vec<u8> directly instead of Cursor for better control
             let mut compressed_data = Vec::new();
-            let mut zip_writer = ZipWriter::new(Cursor::new(&mut compressed_data));
+            {
+                let mut zip_writer = ZipWriter::new(Cursor::new(&mut compressed_data));
+                
+                let options = FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated)
+                    .compression_level(Some(9));
+                
+                // Add compressed images
+                for (name, image_data) in compressed_images {
+                    println!("📷 [OFFICE_COMPRESSOR] Adding compressed image: {} ({} bytes)", name, image_data.len());
+                    zip_writer.start_file(&name, options)
+                        .map_err(|e| DomainError::Internal(format!("Failed to create file in ZIP: {}", e)))?;
+                    zip_writer.write_all(&image_data)
+                        .map_err(|e| DomainError::Internal(format!("Failed to write image to ZIP: {}", e)))?;
+                }
+                
+                // Add other files
+                for (name, file_data) in other_files {
+                    println!("📄 [OFFICE_COMPRESSOR] Adding file: {} ({} bytes)", name, file_data.len());
+                    zip_writer.start_file(&name, options)
+                        .map_err(|e| DomainError::Internal(format!("Failed to create file in ZIP: {}", e)))?;
+                    zip_writer.write_all(&file_data)
+                        .map_err(|e| DomainError::Internal(format!("Failed to write file to ZIP: {}", e)))?;
+                }
+                
+                // 🔧 FIX: Properly finish the ZIP writer
+                zip_writer.finish()
+                    .map_err(|e| DomainError::Internal(format!("Failed to finalize ZIP: {}", e)))?;
+                
+            } // ZipWriter is dropped here, data is written to compressed_data
             
-            let options = FileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated)
-                .compression_level(Some(9));
+            println!("✅ [OFFICE_COMPRESSOR] Successfully compressed office document: {} bytes output", compressed_data.len());
             
-            // Add compressed images
-            for (name, image_data) in compressed_images {
-                println!("📷 [OFFICE_COMPRESSOR] Using pre-compressed image: {}", name);
-                zip_writer.start_file(&name, options)
-                    .map_err(|e| DomainError::Internal(format!("Failed to create file in ZIP: {}", e)))?;
-                zip_writer.write_all(&image_data)
-                    .map_err(|e| DomainError::Internal(format!("Failed to write to ZIP: {}", e)))?;
+            // 🔧 FIX: Validate output size
+            if compressed_data.is_empty() {
+                return Err(DomainError::Internal("Office compression produced empty output".to_string()));
             }
             
-            // Add other files
-            for (name, file_data) in other_files {
-                zip_writer.start_file(&name, options)
-                    .map_err(|e| DomainError::Internal(format!("Failed to create file in ZIP: {}", e)))?;
-                zip_writer.write_all(&file_data)
-                    .map_err(|e| DomainError::Internal(format!("Failed to write to ZIP: {}", e)))?;
-            }
-            
-            let mut result = zip_writer.finish()
-                .map_err(|e| DomainError::Internal(format!("Failed to finalize ZIP: {}", e)))?;
-            
-            let mut output = Vec::new();
-            result.read_to_end(&mut output)
-                .map_err(|e| DomainError::Internal(format!("Failed to read compressed result: {}", e)))?;
-            
-            println!("✅ [OFFICE_COMPRESSOR] Successfully compressed office document: {} bytes output", output.len());
-            Ok(output)
+            Ok(compressed_data)
         }).await.map_err(|e| DomainError::Internal(format!("Task join error: {}", e)))?
     }
 }
