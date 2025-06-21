@@ -24,6 +24,7 @@ use super::compressors::{
     office_compressor::OfficeCompressor,
     generic_compressor::GenericCompressor,
     get_extension,
+    get_compressed_extension,
     video_compressor::VideoCompressor,
 };
 use crate::domains::core::repository::FindById;
@@ -758,22 +759,27 @@ impl CompressionService for CompressionServiceImpl {
             )));
         };
         
-        // Create compressed filename with suffix
+        // Create compressed filename with proper compression extension
         let file_stem = Path::new(&document.original_filename)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("compressed");
             
-        let file_ext = Path::new(&document.original_filename)
+        let original_ext = Path::new(&document.original_filename)
             .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+            .and_then(|s| s.to_str());
             
-        let compressed_filename = if file_ext.is_empty() {
-            format!("{}_compressed", file_stem)
-        } else {
-            format!("{}_compressed.{}", file_stem, file_ext)
-        };
+        // Determine the proper extension based on compression method and compressor type
+        let compressed_ext = get_compressed_extension(
+            config.method, 
+            original_ext, 
+            compressor.compressor_name()
+        );
+        
+        let compressed_filename = format!("{}_compressed.{}", file_stem, compressed_ext);
+        
+        println!("🗜️ [COMPRESSION_SERVICE] Creating compressed file: {} -> {} (method: {:?}, compressor: {})", 
+                 &document.original_filename, &compressed_filename, config.method, compressor.compressor_name());
         
         // Save compressed file
         println!("💾 [COMPRESSION_SERVICE] Saving compressed file for document {}", document_id);

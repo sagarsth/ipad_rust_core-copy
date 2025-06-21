@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use crate::auth::AuthContext;
 use crate::errors::{ServiceError, ServiceResult};
 use crate::domains::core::file_storage_service::FileStorageService;
-use crate::domains::export::types::{EntityFilter};
+use crate::domains::export::types::{EntityFilter, ExportFormat, ExportError, ExportStats, ExportMetadata};
+use crate::domains::export::writer::{UnifiedExportWriter, WriterFactory, DeviceCapabilities};
 
 use super::repository::ExportJobRepository;
 use super::types::{ExportRequest, ExportSummary, ExportJob, ExportStatus};
@@ -24,14 +25,14 @@ use std::path::{PathBuf, Path};
 use crate::domains::document::repository::MediaDocumentRepository;
 
 // Performance-optimized JSON Lines writer
-struct OptimizedJsonLWriter {
+pub struct OptimizedJsonLWriter {
     writer: BufWriter<std::fs::File>,
     buffer: String,
     entities_written: usize,
 }
 
 impl OptimizedJsonLWriter {
-    fn new(file_path: &Path) -> Result<Self, String> {
+    pub fn new(file_path: &Path) -> Result<Self, String> {
         let file = std::fs::File::create(file_path).map_err(|e| e.to_string())?;
         let writer = BufWriter::with_capacity(4 * 1024 * 1024, file); // 4MB buffer
         Ok(Self {
@@ -93,38 +94,53 @@ impl OptimizedJsonLWriter {
     }
 }
 
-// Future-proof format abstraction
-#[derive(Debug, Clone, Copy)]
-pub enum ExportFormat {
-    JsonLines,
-    Csv,
-    Parquet,
-}
-
-impl ExportFormat {
-    fn file_extension(&self) -> &'static str {
-        match self {
-            ExportFormat::JsonLines => "jsonl",
-            ExportFormat::Csv => "csv",
-            ExportFormat::Parquet => "parquet",
-        }
+// Implement UnifiedExportWriter for OptimizedJsonLWriter
+#[async_trait]
+impl UnifiedExportWriter for OptimizedJsonLWriter {
+    async fn write_json_entity(&mut self, entity: &serde_json::Value) -> Result<(), ExportError> {
+        self.write_entity(entity).map_err(|e| ExportError::Serialization(e))
+    }
+    
+    async fn finalize(self: Box<Self>) -> Result<ExportMetadata, ExportError> {
+        let entities_written = (*self).finalize().map_err(|e| ExportError::Io(e))?;
+        
+        let stats = ExportStats {
+            entities_written,
+            bytes_written: 0, // We don't track this in the current implementation
+            duration_ms: 0,   // We don't track this in the current implementation
+            memory_peak_mb: 0, // We don't track this in the current implementation
+            compression_ratio: None,
+        };
+        
+        Ok(ExportMetadata {
+            format: ExportFormat::JsonLines,
+            stats,
+            file_paths: vec![], // We don't track file paths in the current implementation
+            schema_version: 1,
+            checksum: None,
+        })
+    }
+    
+    async fn flush(&mut self) -> Result<(), ExportError> {
+        self.writer.flush().map_err(|e| ExportError::Io(e.to_string()))
+    }
+    
+    fn format(&self) -> ExportFormat {
+        ExportFormat::JsonLines
     }
 }
 
-// Simplified approach - use concrete type for now, abstract later when needed
-fn create_export_writer(format: ExportFormat, file_path: &Path) -> Result<OptimizedJsonLWriter, String> {
+// Legacy format abstraction - now using the one from types.rs
+
+// Modernized approach using the new writer factory
+fn create_export_writer(format: ExportFormat, file_path: &Path) -> Result<Box<dyn UnifiedExportWriter>, ExportError> {
     match format {
         ExportFormat::JsonLines => {
-            OptimizedJsonLWriter::new(file_path)
+            let writer = OptimizedJsonLWriter::new(file_path)
+                .map_err(|e| ExportError::Io(e.to_string()))?;
+            Ok(Box::new(writer))
         }
-        ExportFormat::Csv => {
-            // TODO: Implement CSV writer when needed
-            Err("CSV format not yet implemented".to_string())
-        }
-        ExportFormat::Parquet => {
-            // TODO: Implement Parquet writer when needed
-            Err("Parquet format not yet implemented".to_string())
-        }
+        _ => Err(ExportError::InvalidConfig("Only JsonLines format supported in legacy writer".to_string()))
     }
 }
 
@@ -693,7 +709,7 @@ async fn export_media_documents(
     Ok(())
 }
 
-fn create_zip_from_dir(src_dir: &Path, dest_zip: &Path) -> Result<(), String> {
+pub fn create_zip_from_dir(src_dir: &Path, dest_zip: &Path) -> Result<(), String> {
     let file = std::fs::File::create(dest_zip).map_err(|e| e.to_string())?;
     let mut zip = ZipWriter::new(file);
     let options = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -747,7 +763,7 @@ fn write_jsonl_line<T: serde::Serialize>(
 }
 
 // Helper function to determine the best file path for export
-fn select_best_file_path_with_storage<'a>(
+pub fn select_best_file_path_with_storage<'a>(
     document: &'a crate::domains::document::types::MediaDocument,
     file_storage: &Arc<dyn FileStorageService>
 ) -> (&'a str, &'static str) {
@@ -1193,7 +1209,7 @@ async fn export_media_documents_by_date_range(
 
 // === ID-based Export Functions ===
 
-async fn export_strategic_goals_by_ids(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
+pub async fn export_strategic_goals_by_ids(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
     if ids.is_empty() {
         log::info!("Export strategic goals by IDs: empty IDs list");
         return Ok(0);
@@ -1267,76 +1283,30 @@ async fn export_strategic_goals_by_ids(dest_dir: &Path, ids: &[Uuid], include_do
             // Process all documents we already fetched (no more database calls!)
             for documents in documents_by_goal.values() {
                 for document in documents {
-                    // Lazy create documents writer on first document
-                    if documents_writer_opt.is_none() {
-                        let documents_file_path = dest_dir.join("media_documents.jsonl");
-                        documents_writer_opt = Some(OptimizedJsonLWriter::new(&documents_file_path)?);
-                    }
-                
-                // Use helper function to select the best file path
-                let (source_file_path, file_source_type) = select_best_file_path_with_storage(&document, file_storage);
-                
-                // Generate unique filename for export (avoid conflicts)
-                let original_filename = std::path::Path::new(&document.original_filename)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown");
-                let extension = std::path::Path::new(&document.original_filename)
-                    .extension()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("bin");
-                let unique_filename = format!("{}_{}.{}", original_filename, &document.id.to_string()[..8], extension);
-                let dest_file_path = files_dir.join(&unique_filename);
-                
-                // Copy the file if it exists (use file storage service to get absolute path)
-                let mut file_copied = false;
-                let abs_source_path = file_storage.get_absolute_path(source_file_path);
-                if abs_source_path.exists() {
-                    // Lazy create files directory on first successful file
                     if !files_dir_created {
                         std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
                         files_dir_created = true;
                     }
-                    
-                    match std::fs::copy(&abs_source_path, &dest_file_path) {
-                        Ok(_) => {
-                            log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, unique_filename);
-                            file_copied = true;
-                            total_files_copied += 1;
+
+                    let (source_file_path, file_source_type) = select_best_file_path_with_storage(&document, file_storage);
+                    let unique_filename = format!("{}_{}", document.id, document.original_filename);
+                    let dest_file_path = files_dir.join(&unique_filename);
+                    let abs_source_path = file_storage.get_absolute_path(source_file_path);
+
+                    if abs_source_path.exists() {
+                        match std::fs::copy(&abs_source_path, &dest_file_path) {
+                            Ok(_) => {
+                                log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, unique_filename);
+                                total_files_copied += 1;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                            }
                         }
-                        Err(e) => {
-                            log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
-                        }
-                    }
-                } else {
-                    log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
-                }
-                
-                // Create enhanced document metadata with export file path
-                let mut doc_json = serde_json::to_value(&document).map_err(|e| e.to_string())?;
-                if let serde_json::Value::Object(ref mut map) = doc_json {
-                    if file_copied {
-                        map.insert("export_file_path".to_string(), serde_json::Value::String(format!("files/{}", unique_filename)));
-                        map.insert("file_available".to_string(), serde_json::Value::Bool(true));
-                        map.insert("export_source_type".to_string(), serde_json::Value::String(file_source_type.to_string()));
-                        map.insert("exported_from_path".to_string(), serde_json::Value::String(source_file_path.to_string()));
                     } else {
-                        map.insert("file_available".to_string(), serde_json::Value::Bool(false));
-                        map.insert("attempted_source_type".to_string(), serde_json::Value::String(file_source_type.to_string()));
-                        map.insert("attempted_file_path".to_string(), serde_json::Value::String(source_file_path.to_string()));
+                        log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
                     }
                 }
-                
-                if let Some(ref mut documents_writer) = documents_writer_opt {
-                    documents_writer.write_entity(&doc_json)?;
-                }
-                total_documents_exported += 1;
-                }
-            }
-            
-            // Finalize documents writer if created
-            if let Some(documents_writer) = documents_writer_opt {
-                documents_writer.finalize()?;
             }
         } else {
             log::info!("No documents found, skipping document export files");
@@ -1351,34 +1321,6 @@ async fn export_strategic_goals_by_ids(dest_dir: &Path, ids: &[Uuid], include_do
     
     // Finalize strategic goals writer
     strategic_goals_writer.finalize()?;
-    
-    // Create manifest file with export summary
-    let mut manifest_files = serde_json::json!({
-        "strategic_goals.jsonl": format!("{} strategic goals", result.items.len())
-    });
-    
-    if include_documents && total_documents_exported > 0 {
-        if let serde_json::Value::Object(ref mut map) = manifest_files {
-            map.insert("media_documents.jsonl".to_string(), serde_json::Value::String(format!("{} document records", total_documents_exported)));
-            if total_files_copied > 0 {
-                map.insert("files/".to_string(), serde_json::Value::String(format!("{} actual document files", total_files_copied)));
-            }
-        }
-    }
-    
-    let manifest = serde_json::json!({
-        "export_type": if include_documents { "strategic_goals_with_documents" } else { "strategic_goals_only" },
-        "export_date": chrono::Utc::now().to_rfc3339(),
-        "strategic_goals_count": result.items.len(),
-        "documents_count": total_documents_exported,
-        "files_copied": total_files_copied,
-        "include_documents": include_documents,
-        "files": manifest_files
-    });
-    
-    let manifest_path = dest_dir.join("manifest.json");
-    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(manifest_path, manifest_json).map_err(|e| e.to_string())?;
     
     log::info!("Export strategic goals by IDs completed: wrote {} goals, {} documents, {} files", result.items.len(), total_documents_exported, total_files_copied);
     Ok(result.items.len() as i64)

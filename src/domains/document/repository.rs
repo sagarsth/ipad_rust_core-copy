@@ -570,6 +570,13 @@ pub trait MediaDocumentRepository:
         related_table: &str,
         related_ids: &[Uuid],
     ) -> DomainResult<Vec<MediaDocument>>;
+
+    /// Count media documents for a list of related entities (optimized for performance)
+    async fn count_by_related_entities(
+        &self,
+        related_table: &str,
+        related_ids: &[Uuid],
+    ) -> DomainResult<usize>;
 }
 
 pub struct SqliteMediaDocumentRepository {
@@ -1733,6 +1740,35 @@ impl MediaDocumentRepository for SqliteMediaDocumentRepository {
             }
             Err(e) => Err(DomainError::Database(DbError::from(e))),
         }
+    }
+
+    /// Count media documents for a list of related entities (optimized for performance)
+    async fn count_by_related_entities(
+        &self,
+        related_table: &str,
+        related_ids: &[Uuid],
+    ) -> DomainResult<usize> {
+        if related_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Use a single query with IN clause for better performance
+        let id_strings: Vec<String> = related_ids.iter().map(|id| id.to_string()).collect();
+        let placeholders = "?,".repeat(related_ids.len());
+        let placeholders = &placeholders[..placeholders.len() - 1]; // Remove last comma
+        
+        let query = format!(
+            "SELECT COUNT(*) FROM media_documents WHERE related_table = ? AND related_id IN ({}) AND deleted_at IS NULL",
+            placeholders
+        );
+        
+        let mut query_builder = sqlx::query_scalar::<_, i64>(&query).bind(related_table);
+        for id_str in &id_strings {
+            query_builder = query_builder.bind(id_str);
+        }
+        
+        let count = query_builder.fetch_one(&self.pool).await.map_err(DbError::from)?;
+        Ok(count as usize)
     }
 }
 

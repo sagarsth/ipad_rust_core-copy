@@ -15,9 +15,13 @@
 
 use crate::ffi::{handle_status_result, error::FFIError};
 use crate::auth::AuthContext;
-use crate::domains::export::types::{ExportRequest, ExportSummary, EntityFilter, ExportStatus};
-use crate::domains::export::service::{ExportService, ExportServiceImpl};
+use crate::domains::export::types::{ExportRequest, ExportSummary, EntityFilter, ExportStatus, ExportFormat};
+// Removed redundant v1 service import
+use crate::domains::export::service_v2::{ExportServiceV2, ExportProgress};
 use crate::domains::export::repository::SqliteExportJobRepository;
+use crate::domains::export::repository_v2::SqliteStreamingRepository;
+use crate::globals;
+use tokio::runtime::Runtime;
 use std::ffi::{c_char, CStr, CString};
 use std::os::raw::c_int;
 use uuid::Uuid;
@@ -28,6 +32,10 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use crate::types::UserRole;
 use std::str::FromStr;
+
+lazy_static::lazy_static! {
+    static ref RUNTIME: Runtime = Runtime::new().unwrap();
+}
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -66,14 +74,18 @@ fn create_json_response<T: serde::Serialize>(data: T) -> Result<*mut c_char, FFI
     Ok(c_string.into_raw())
 }
 
-/// Helper to build export service
-fn build_export_service() -> Result<impl ExportService, FFIError> {
+// Removed redundant v1 service builder - use V2 only
+
+/// Helper to build modern V2 export service with streaming and iOS optimizations
+fn build_export_service_v2() -> Result<ExportServiceV2, FFIError> {
     let pool = crate::globals::get_db_pool()
         .map_err(|e| FFIError::internal(format!("Failed to get DB pool: {}", e)))?;
     let file_storage = crate::globals::get_file_storage_service()
         .map_err(|e| FFIError::internal(format!("Failed to get file storage service: {}", e)))?;
-    let job_repo = Arc::new(SqliteExportJobRepository::new(pool));
-    Ok(ExportServiceImpl::new(job_repo, file_storage))
+    let job_repo = Arc::new(SqliteExportJobRepository::new(pool.clone()));
+    let streaming_repo = Arc::new(SqliteStreamingRepository::new(pool));
+    let service = ExportServiceV2::new(job_repo, streaming_repo, file_storage);
+    Ok(Arc::try_unwrap(service).unwrap())
 }
 
 /// Helper to format export job response
@@ -153,9 +165,10 @@ pub unsafe extern "C" fn export_create_export(
         let export_request: ExportRequest = parse_json_payload(json_str)?;
         let auth_context = create_auth_context_from_token(token_str)?;
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
-            .map_err(|e| FFIError::internal(format!("Export creation failed: {}", e)))?;
+        // Always use V2 service for modern streaming, CSV/Parquet support with iOS optimizations
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
+            .map_err(|e| FFIError::internal(format!("V2 Export creation failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
         *result = create_json_response(response)?;
@@ -186,8 +199,9 @@ pub unsafe extern "C" fn export_get_status(
         let id = Uuid::parse_str(id_str)
             .map_err(|_| FFIError::invalid_argument("Invalid UUID format"))?;
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.get_export_status(id))
+        // Use V2 service for all operations
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.get_export_status(id))
             .map_err(|e| FFIError::internal(format!("Failed to get export status: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -226,6 +240,7 @@ pub unsafe extern "C" fn export_strategic_goals_by_ids(
             ids: Vec<String>,
             include_blobs: Option<bool>,
             target_path: Option<String>,
+            format: Option<ExportFormat>,
         }
         
         let options: ExportByIdsOptions = parse_json_payload(json_str)?;
@@ -253,10 +268,19 @@ pub unsafe extern "C" fn export_strategic_goals_by_ids(
             filters,
             include_blobs,
             target_path,
+            format: options.format.or_else(|| Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            })),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        // Use V2 service for proper CSV/Parquet streaming with iOS optimizations
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Export creation failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -301,10 +325,18 @@ pub unsafe extern "C" fn export_strategic_goals_all(
             filters: vec![EntityFilter::StrategicGoals { status_id }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Strategic goals export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -352,10 +384,18 @@ pub unsafe extern "C" fn export_projects_all(
             filters: vec![EntityFilter::ProjectsAll],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Projects export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -399,10 +439,18 @@ pub unsafe extern "C" fn export_activities_all(
             filters: vec![EntityFilter::ActivitiesAll],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Activities export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -446,10 +494,18 @@ pub unsafe extern "C" fn export_donors_all(
             filters: vec![EntityFilter::DonorsAll],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Donors export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -493,10 +549,18 @@ pub unsafe extern "C" fn export_funding_all(
             filters: vec![EntityFilter::FundingAll],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Funding export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -540,10 +604,18 @@ pub unsafe extern "C" fn export_livelihoods_all(
             filters: vec![EntityFilter::LivelihoodsAll],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Livelihoods export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -587,10 +659,18 @@ pub unsafe extern "C" fn export_workshops_all(
             filters: vec![EntityFilter::WorkshopsAll { include_participants: true }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Workshops export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -635,10 +715,18 @@ pub unsafe extern "C" fn export_unified_all_domains(
             filters: vec![EntityFilter::UnifiedAllDomains { include_type_tags }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Unified export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -691,10 +779,18 @@ pub unsafe extern "C" fn export_strategic_goals_by_date_range(
             filters: vec![EntityFilter::StrategicGoalsByDateRange { start_date, end_date, status_id }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service = build_export_service_v2()?;
+        let summary = block_on_async(export_service.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Strategic goals date range export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -750,10 +846,18 @@ pub unsafe extern "C" fn export_strategic_goals_by_filter(
             filters: vec![EntityFilter::StrategicGoalsByFilter { filter: strategic_goal_filter }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Strategic goals filter export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -801,10 +905,18 @@ pub unsafe extern "C" fn export_projects_by_date_range(
             filters: vec![EntityFilter::ProjectsByDateRange { start_date, end_date }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service = build_export_service_v2()?;
+        let summary = block_on_async(export_service.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Projects date range export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -852,10 +964,18 @@ pub unsafe extern "C" fn export_activities_by_date_range(
             filters: vec![EntityFilter::ActivitiesByDateRange { start_date, end_date }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service = build_export_service_v2()?;
+        let summary = block_on_async(export_service.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Activities date range export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -903,10 +1023,18 @@ pub unsafe extern "C" fn export_donors_by_date_range(
             filters: vec![EntityFilter::DonorsByDateRange { start_date, end_date }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service = build_export_service_v2()?;
+        let summary = block_on_async(export_service.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Donors date range export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -954,10 +1082,18 @@ pub unsafe extern "C" fn export_funding_by_date_range(
             filters: vec![EntityFilter::FundingByDateRange { start_date, end_date }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service = build_export_service_v2()?;
+        let summary = block_on_async(export_service.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Funding date range export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -1005,10 +1141,18 @@ pub unsafe extern "C" fn export_livelihoods_by_date_range(
             filters: vec![EntityFilter::LivelihoodsByDateRange { start_date, end_date }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service = build_export_service_v2()?;
+        let summary = block_on_async(export_service.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Livelihoods date range export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -1056,10 +1200,18 @@ pub unsafe extern "C" fn export_workshops_by_date_range(
             filters: vec![EntityFilter::WorkshopsByDateRange { start_date, end_date, include_participants: true }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service = build_export_service_v2()?;
+        let summary = block_on_async(export_service.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Workshops date range export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -1107,10 +1259,18 @@ pub unsafe extern "C" fn export_media_documents_by_date_range(
             filters: vec![EntityFilter::MediaDocumentsByDateRange { start_date, end_date }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service = build_export_service_v2()?;
+        let summary = block_on_async(export_service.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Media documents date range export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -1159,10 +1319,18 @@ pub unsafe extern "C" fn export_unified_by_date_range(
             filters: vec![EntityFilter::UnifiedByDateRange { start_date, end_date, include_type_tags }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service = build_export_service_v2()?;
+        let summary = block_on_async(export_service.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Unified date range export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -1216,10 +1384,18 @@ pub unsafe extern "C" fn export_media_documents_by_entity(
             filters: vec![EntityFilter::MediaDocumentsByRelatedEntity { related_table, related_id }],
             include_blobs,
             target_path,
+            format: Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            }),
+            use_compression: false,
+            use_background: false,
         };
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Media documents by entity export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -1260,8 +1436,8 @@ pub unsafe extern "C" fn export_create_custom(
         let export_request: ExportRequest = parse_json_payload(json_str)?;
         let auth_context = create_auth_context_from_token(token_str)?;
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(export_request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Custom export failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
@@ -1371,12 +1547,20 @@ pub unsafe extern "C" fn export_create(
         let payload: LegacyPayload = parse_json_payload(json_str)?;
         let auth_context = dto_to_auth(payload.auth)?;
         
-        let export_service = build_export_service()?;
-        let summary = block_on_async(export_service.create_export(payload.request, &auth_context))
+        let export_service_v2 = build_export_service_v2()?;
+        let summary = block_on_async(export_service_v2.export_streaming(payload.request, &auth_context))
             .map_err(|e| FFIError::internal(format!("Legacy export creation failed: {}", e)))?;
         
         let response = format_export_job_response(summary);
         *result = create_json_response(response)?;
         Ok(())
     })
+}
+
+/// Simple ping function to test FFI.
+#[unsafe(no_mangle)]
+pub extern "C" fn ping(message: *const c_char) -> *mut c_char {
+    let message_str = unsafe { CStr::from_ptr(message).to_str().unwrap() };
+    let response = format!("pong: {}", message_str);
+    CString::new(response).unwrap().into_raw()
 } 

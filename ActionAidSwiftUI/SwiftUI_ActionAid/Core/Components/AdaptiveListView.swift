@@ -993,80 +993,295 @@ class ViewStylePreferenceManager: ObservableObject {
 
 // MARK: - Export Options Sheet
 struct ExportOptionsSheet: View {
-    let onExport: (Bool) -> Void
+    let selectedItemCount: Int
+    let onExport: (Bool, ExportFormat) -> Void
     @Binding var isExporting: Bool
     @Binding var exportError: String?
     @Environment(\.dismiss) var dismiss
     
     @State private var includeBlobs = false
+    @State private var selectedFormat: ExportFormat = .default
+    @State private var showFormatRecommendation = false
     
     var body: some View {
         NavigationView {
-            VStack(spacing: 20) {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Export Options")
-                        .font(.headline)
+            ScrollView {
+                VStack(spacing: 24) {
+                    // Smart recommendation banner
+                    if showFormatRecommendation {
+                        recommendationBanner
+                    }
                     
-                    Toggle("Include file attachments", isOn: $includeBlobs)
-                        .font(.subheadline)
-                    
-                    Text("This will export all strategic goals that match your current filter settings.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    exportFormatSelection
+                    exportOptionsSection
+                    exportInfoSection
                     
                     if let error = exportError {
-                        Text("Error: \(error)")
-                            .font(.caption)
-                            .foregroundColor(.red)
+                        errorSection(error)
                     }
                 }
                 .padding()
-                .background(Color(.systemGray6))
-                .cornerRadius(12)
-                
-                Spacer()
-                
-                VStack(spacing: 12) {
-                    Button(action: {
-                        onExport(includeBlobs)
-                    }) {
-                        HStack {
-                            if isExporting {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                            } else {
-                                Image(systemName: "square.and.arrow.up")
-                            }
-                            Text(isExporting ? "Exporting..." : "Start Export")
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(isExporting ? Color.gray : Color.blue)
-                        .foregroundColor(.white)
-                        .cornerRadius(10)
-                    }
-                    .disabled(isExporting)
-                    
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding()
-                    .background(Color(.systemGray5))
-                    .foregroundColor(.primary)
-                    .cornerRadius(10)
-                }
             }
-            .padding()
-            .navigationTitle("Export Data")
+            .navigationTitle("Export Options")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
-                        dismiss()
+                    Button("Export") {
+                        onExport(includeBlobs, selectedFormat)
                     }
+                    .disabled(isExporting)
+                }
+            }
+            .onAppear {
+                // Set recommended format based on selected item count
+                let recommendedFormat = ExportFormat.recommended(for: selectedItemCount)
+                if selectedFormat.id == ExportFormat.default.id {
+                    selectedFormat = recommendedFormat
+                    showFormatRecommendation = true
                 }
             }
         }
+    }
+    
+    private var exportFormatSelection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Export Format")
+                .font(.headline)
+                .foregroundColor(.primary)
+            
+            LazyVGrid(columns: [
+                GridItem(.flexible()),
+                GridItem(.flexible()),
+                GridItem(.flexible())
+            ], spacing: 12) {
+                ForEach(ExportFormat.allCases, id: \.id) { format in
+                    FormatCard(
+                        format: format,
+                        isSelected: selectedFormat.id == format.id,
+                        onSelect: { selectedFormat = format }
+                    )
+                }
+            }
+            
+            // Format-specific options
+            formatSpecificOptions
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    @ViewBuilder
+    private var formatSpecificOptions: some View {
+        switch selectedFormat {
+        case .csv(let options):
+            csvOptionsView(options)
+        case .parquet(let options):
+            parquetOptionsView(options)
+        case .jsonLines:
+            EmptyView()
+        }
+    }
+    
+    private func csvOptionsView(_ options: CsvOptions) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("CSV Options")
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundColor(.secondary)
+            
+            Toggle("Compress output file", isOn: Binding(
+                get: { options.compress },
+                set: { newValue in
+                    selectedFormat = .csv(CsvOptions(
+                        delimiter: options.delimiter,
+                        quoteChar: options.quoteChar,
+                        escapeChar: options.escapeChar,
+                        compress: newValue
+                    ))
+                }
+            ))
+            
+            Text(options.compress ? 
+                "Compressed CSV saves space but needs decompression to view" : 
+                "Uses comma delimiter and double quotes")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(.top, 8)
+    }
+    
+    private func parquetOptionsView(_ options: ParquetOptions) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Parquet Options")
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundColor(.secondary)
+            
+            HStack {
+                Text("Compression:")
+                    .font(.caption)
+                Spacer()
+                Text(options.compression.displayName)
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+            
+            HStack {
+                Text("Row Group Size:")
+                    .font(.caption)
+                Spacer()
+                Text("\(options.rowGroupSize)")
+                    .font(.caption)
+                    .fontWeight(.medium)
+            }
+            
+            Text("Optimized for large datasets and analytics")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(.top, 8)
+    }
+    
+    private var exportOptionsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Additional Options")
+                .font(.headline)
+                .foregroundColor(.primary)
+            
+            Toggle("Include file attachments", isOn: $includeBlobs)
+                .font(.subheadline)
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    private var exportInfoSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Export Information")
+                .font(.headline)
+                .foregroundColor(.primary)
+            
+            Text("This will export all strategic goals that match your current filter settings.")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            
+            // Format-specific info
+            formatInfoView
+        }
+        .padding()
+        .background(Color(.systemGray6))
+        .cornerRadius(12)
+    }
+    
+    @ViewBuilder
+    private var formatInfoView: some View {
+        switch selectedFormat {
+        case .jsonLines:
+            Label("Best for data processing and APIs", systemImage: "gearshape.2")
+                .font(.caption)
+                .foregroundColor(.blue)
+        case .csv:
+            Label("Opens in Excel, Google Sheets, and most tools", systemImage: "tablecells")
+                .font(.caption)
+                .foregroundColor(.green)
+        case .parquet:
+            Label("Smallest file size, fastest for large datasets", systemImage: "speedometer")
+                .font(.caption)
+                .foregroundColor(.purple)
+        }
+    }
+    
+    private var recommendationBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Smart Recommendation", systemImage: "lightbulb.fill")
+                    .font(.headline)
+                    .foregroundColor(.orange)
+                
+                Spacer()
+                
+                Button("Dismiss") {
+                    withAnimation {
+                        showFormatRecommendation = false
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+            
+            Text("For \(selectedItemCount) items, we recommend \(selectedFormat.displayName) format")
+                .font(.subheadline)
+                .foregroundColor(.primary)
+            
+            Text(selectedFormat.description)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding()
+        .background(Color.orange.opacity(0.1))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+        )
+    }
+    
+    private func errorSection(_ error: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Export Error", systemImage: "exclamationmark.triangle")
+                .font(.headline)
+                .foregroundColor(.red)
+            
+            Text(error)
+                .font(.subheadline)
+                .foregroundColor(.red)
+        }
+        .padding()
+        .background(Color.red.opacity(0.1))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.red.opacity(0.3), lineWidth: 1)
+        )
+    }
+}
+
+// MARK: - Format Card Component
+struct FormatCard: View {
+    let format: ExportFormat
+    let isSelected: Bool
+    let onSelect: () -> Void
+    
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(spacing: 8) {
+                Image(systemName: format.icon)
+                    .font(.title2)
+                    .foregroundColor(isSelected ? .white : .primary)
+                
+                Text(format.displayName)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundColor(isSelected ? .white : .primary)
+                
+                Text(format.fileExtension.uppercased())
+                    .font(.caption2)
+                    .foregroundColor(isSelected ? .white.opacity(0.8) : .secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(isSelected ? Color.blue : Color(.systemBackground))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isSelected ? Color.clear : Color(.systemGray4), lineWidth: 1)
+            )
+            .cornerRadius(8)
+        }
+        .buttonStyle(PlainButtonStyle())
     }
 } 

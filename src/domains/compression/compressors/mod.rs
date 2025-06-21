@@ -24,11 +24,59 @@ pub trait Compressor: Send + Sync {
         method: CompressionMethod,
         quality_level: i32,
     ) -> DomainResult<Vec<u8>>;
+    
+    /// Get the compressor type name for extension determination
+    fn compressor_name(&self) -> &'static str;
 }
 
 /// Utility function to get file extension from filename
 pub fn get_extension(filename: &str) -> Option<&str> {
     Path::new(filename).extension().and_then(|ext| ext.to_str())
+}
+
+/// Determine the appropriate extension for a compressed file based on the compression method and original extension
+pub fn get_compressed_extension(method: CompressionMethod, original_extension: Option<&str>, compressor_name: &str) -> String {
+    match method {
+        CompressionMethod::Lossless => {
+            // Generic compressor uses gzip, others preserve their format with "_compressed"
+            if compressor_name == "GenericCompressor" {
+                "gz".to_string()
+            } else if compressor_name == "ImageCompressor" {
+                // Image compressor converts to PNG for lossless
+                "png".to_string()
+            } else {
+                // Office, PDF, Video compressors typically preserve their format
+                original_extension.unwrap_or("compressed").to_string()
+            }
+        },
+        CompressionMethod::Lossy => {
+            match compressor_name {
+                "ImageCompressor" => "jpg".to_string(), // Most images become JPEG for lossy
+                "GenericCompressor" => "gz".to_string(), // Generic still uses gzip
+                _ => original_extension.unwrap_or("compressed").to_string()
+            }
+        },
+        CompressionMethod::PdfOptimize => "pdf".to_string(),
+        CompressionMethod::OfficeOptimize => {
+            // Office documents maintain their extension
+            original_extension.unwrap_or("docx").to_string()
+        },
+        CompressionMethod::VideoOptimize => {
+            // Video maintains its extension  
+            original_extension.unwrap_or("mp4").to_string()
+        },
+        CompressionMethod::None => {
+            // No compression, keep original extension
+            original_extension.unwrap_or("file").to_string()
+        }
+    }
+}
+
+/// Get the compressor name for extension determination
+pub fn get_compressor_name<T: Compressor + ?Sized>(compressor: &T) -> &'static str {
+    // This is a workaround to identify compressor types
+    // In a real implementation, you might add a method to the Compressor trait
+    std::any::type_name::<T>().split("::").last().unwrap_or("UnknownCompressor")
 }
 
 /// Utility function to guess MIME type from extension

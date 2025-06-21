@@ -285,6 +285,21 @@ pub enum ServiceError {
     
     #[error("External service error: {0}")]
     ExternalService(String),
+    
+    #[error("Internal error: {0}")]
+    InternalError(String),
+    
+    #[error("Database error: {0}")]
+    DatabaseError(String),
+    
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+    
+    #[error("Serialization error: {0}")]
+    SerializationError(String),
+    
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 }
 
 /// Sync-specific errors

@@ -59,6 +59,10 @@ impl Compressor for VideoCompressor {
         )
     }
     
+    fn compressor_name(&self) -> &'static str {
+        "VideoCompressor"
+    }
+    
     async fn compress(
         &self,
         data: Vec<u8>,

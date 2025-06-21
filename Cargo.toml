@@ -35,8 +35,13 @@ refinery = { version = "0.8.16", features = ["rusqlite"] }
 
 # Async runtime
 tokio = { version = "1.44.1", features = ["full"] }
-futures = "0.3" 
+futures = "0.3"
 async-trait = "0.1.88"
+tokio-stream = "0.1"
+
+# Export format support
+arrow = { version = "55.1.0", features = ["csv"] }
+parquet = { version = "55.1.0", features = ["async"] }
 
 # UUID and time
 uuid = { version = "1.16.0", features = ["serde", "v4"] }

@@ -20,6 +20,10 @@ impl Compressor for GenericCompressor {
         true
     }
     
+    fn compressor_name(&self) -> &'static str {
+        "GenericCompressor"
+    }
+    
     async fn compress(
         &self,
         data: Vec<u8>,

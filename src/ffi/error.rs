@@ -316,8 +316,21 @@ impl From<ServiceError> for FFIError {
             ServiceError::ExternalService(msg) => {
                 Self::new(ErrorCode::ExternalServiceError, &msg)
             },
-            // Ensure all ServiceError variants are handled or add a catch-all
-            // _ => Self::new(ErrorCode::ServiceGeneral, &err.to_string()),
+            ServiceError::InternalError(msg) => {
+                Self::new(ErrorCode::InternalError, &msg)
+            },
+            ServiceError::DatabaseError(msg) => {
+                Self::new(ErrorCode::DatabaseGeneral, &msg)
+            },
+            ServiceError::ValidationError(msg) => {
+                Self::new(ErrorCode::ValidationFailed, &msg)
+            },
+            ServiceError::SerializationError(msg) => {
+                Self::new(ErrorCode::InternalError, &format!("Serialization error: {}", msg))
+            },
+            ServiceError::NotImplemented(msg) => {
+                Self::new(ErrorCode::InternalError, &format!("Not implemented: {}", msg))
+            },
         }
     }
 }

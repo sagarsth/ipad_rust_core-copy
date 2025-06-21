@@ -28,6 +28,10 @@ impl Compressor for PdfCompressor {
         mime_type == "application/pdf" || extension == Some("pdf")
     }
     
+    fn compressor_name(&self) -> &'static str {
+        "PdfCompressor"
+    }
+    
     async fn compress(
         &self,
         data: Vec<u8>,

@@ -236,8 +236,9 @@ struct StrategicGoalsView: View {
         }
         .sheet(isPresented: $showExportOptions) {
             ExportOptionsSheet(
-                onExport: { includeBlobs in
-                    performExportFromSelection(includeBlobs: includeBlobs)
+                selectedItemCount: selectedItems.count,
+                onExport: { includeBlobs, format in
+                    performExportFromSelection(includeBlobs: includeBlobs, format: format)
                 },
                 isExporting: $isExporting,
                 exportError: $exportError
@@ -1137,13 +1138,13 @@ struct StrategicGoalsView: View {
     
     // MARK: - Export Methods
     
-    private func performExportFromSelection(includeBlobs: Bool = false) {
+    private func performExportFromSelection(includeBlobs: Bool = false, format: ExportFormat = .default) {
         guard !selectedItems.isEmpty else { return }
         
         isExporting = true
         exportError = nil
         
-        print("🔄 Starting export from selection mode for \(selectedItems.count) items, includeBlobs: \(includeBlobs)")
+        print("🔄 Starting export from selection mode for \(selectedItems.count) items, includeBlobs: \(includeBlobs), format: \(format.displayName)")
         
         Task {
             guard let currentUser = authManager.currentUser else {
@@ -1176,7 +1177,7 @@ struct StrategicGoalsView: View {
                 timestampFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
                 let timestamp = timestampFormatter.string(from: Date())
                 
-                let exportFileName = "strategic_goals_selected_\(timestamp).zip"
+                let exportFileName = "strategic_goals_selected_\(timestamp).\(format.fileExtension)"
                 let targetPath = exportFolderURL.appendingPathComponent(exportFileName).path
                 
                 print("📁 Export target path: \(targetPath)")
@@ -1196,10 +1197,11 @@ struct StrategicGoalsView: View {
                     return
                 }
                 
-                print("🚀 Calling export by IDs service...")
+                print("🚀 Calling export by IDs service with format: \(format.displayName)...")
                 let exportResponse = try await service.exportStrategicGoalsByIds(
                     ids: selectedIdsArray,
                     includeBlobs: includeBlobs,
+                    format: format,
                     targetPath: targetPath,
                     token: token
                 )
@@ -3065,6 +3067,9 @@ struct DocumentUploadSheet: View {
             
             print("📸 [PHOTO_SELECTION] Processing \(newPhotos.count) photos from Photos app")
             
+            // CRITICAL FIX: Add sequence counter to prevent filename collisions
+            let baseTimestamp = Date().timeIntervalSince1970
+            
             for (index, photo) in newPhotos.enumerated() {
                 print("📸 [PHOTO_\(index + 1)/\(newPhotos.count)] Processing photo: \(photo.itemIdentifier ?? "unknown")")
                 print("📸 [PHOTO_\(index + 1)] Supported content types: \(photo.supportedContentTypes.map(\.identifier))")
@@ -3096,7 +3101,8 @@ struct DocumentUploadSheet: View {
                         
                         // Generate filename based on photo identifier and supported types
                         print("📸 [PHOTO_\(index + 1)] Calling generatePhotoFilename...")
-                        let filename = generatePhotoFilename(for: photo)
+                        // CRITICAL FIX: Pass base timestamp and sequence index to ensure uniqueness
+                        let filename = generatePhotoFilename(for: photo, baseTimestamp: baseTimestamp, sequenceIndex: index)
                         print("📸 [PHOTO_\(index + 1)] Generated filename: \(filename)")
                         
                         // Debug: Check if filename indicates video
@@ -3167,8 +3173,16 @@ struct DocumentUploadSheet: View {
         }
     }
     
-    private func generatePhotoFilename(for photo: PhotosPickerItem, contentType: UTType? = nil) -> String {
-        let timestamp = Date().timeIntervalSince1970
+    // CRITICAL FIX: Updated function signature to accept base timestamp and sequence for uniqueness
+    private func generatePhotoFilename(for photo: PhotosPickerItem, contentType: UTType? = nil, baseTimestamp: TimeInterval? = nil, sequenceIndex: Int = 0) -> String {
+        // Use provided base timestamp with microsecond precision + sequence, or generate new one
+        let timestamp: TimeInterval
+        if let baseTimestamp = baseTimestamp {
+            // Add microseconds and sequence index to ensure uniqueness
+            timestamp = baseTimestamp + (Double(sequenceIndex) * 0.001) + (Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1))
+        } else {
+            timestamp = Date().timeIntervalSince1970
+        }
         
         // Create identifier for filename (use itemIdentifier if available, otherwise generate one)
         let shortId: String
@@ -3176,12 +3190,17 @@ struct DocumentUploadSheet: View {
             shortId = String(identifier.prefix(8))
             print("📸 [FILENAME_GEN] Using photo identifier: \(shortId)")
         } else {
-            shortId = "no-id"
-            print("📸 [FILENAME_GEN] No photo identifier available, using: \(shortId)")
+            // CRITICAL FIX: Include sequence index in fallback ID to ensure uniqueness
+            shortId = "seq\(sequenceIndex)"
+            print("📸 [FILENAME_GEN] No photo identifier available, using sequence: \(shortId)")
         }
+        
+        // Create a microsecond-precision timestamp string for absolute uniqueness
+        let microsecondTimestamp = String(format: "%.6f", timestamp).replacingOccurrences(of: ".", with: "")
         
         // Debug: Print all supported content types for troubleshooting
         print("📸 [FILENAME_GEN] Photo \(shortId) supported types: \(photo.supportedContentTypes.map(\.identifier))")
+        print("📸 [FILENAME_GEN] Using unique timestamp: \(microsecondTimestamp)")
         print("📸 [FILENAME_GEN] Starting video detection for \(photo.supportedContentTypes.count) types...")
         
         // PRIORITY 1: Check ALL supported types for video indicators FIRST (ALWAYS RUN, REGARDLESS OF IDENTIFIER)
@@ -3191,48 +3210,48 @@ struct DocumentUploadSheet: View {
             // MP4 video detection - multiple ways to detect (MOST SPECIFIC FIRST)
             if supportedType.identifier == "public.mpeg-4" {
                 print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via exact match: \(supportedType.identifier)")
-                return "video_\(shortId)_\(Int(timestamp)).mp4"
+                return "video_\(shortId)_\(microsecondTimestamp).mp4"
             }
             
             if supportedType.identifier == "com.apple.quicktime-movie" {
                 print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via exact match: \(supportedType.identifier)")
-                return "video_\(shortId)_\(Int(timestamp)).mov"
+                return "video_\(shortId)_\(microsecondTimestamp).mov"
             }
             
             if supportedType.identifier.contains("mpeg-4") {
                 print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via contains mpeg-4: \(supportedType.identifier)")
-                return "video_\(shortId)_\(Int(timestamp)).mp4"
+                return "video_\(shortId)_\(microsecondTimestamp).mp4"
             }
             
             if supportedType.identifier.contains("mp4") {
                 print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via contains mp4: \(supportedType.identifier)")
-                return "video_\(shortId)_\(Int(timestamp)).mp4"
+                return "video_\(shortId)_\(microsecondTimestamp).mp4"
             }
             
             if supportedType.identifier.contains("quicktime") {
                 print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via contains quicktime: \(supportedType.identifier)")
-                return "video_\(shortId)_\(Int(timestamp)).mov"
+                return "video_\(shortId)_\(microsecondTimestamp).mov"
             }
             
             if supportedType.identifier.contains("video") {
                 print("📸 [FILENAME_GEN] ✅ DETECTED GENERIC VIDEO via contains video: \(supportedType.identifier)")
-                return "video_\(shortId)_\(Int(timestamp)).mp4"
+                return "video_\(shortId)_\(microsecondTimestamp).mp4"
             }
             
             // UTType conformance checks (might be more reliable)
             if supportedType.conforms(to: .mpeg4Movie) {
                 print("📸 [FILENAME_GEN] ✅ DETECTED MP4 VIDEO via UTType.mpeg4Movie conformance: \(supportedType.identifier)")
-                return "video_\(shortId)_\(Int(timestamp)).mp4"
+                return "video_\(shortId)_\(microsecondTimestamp).mp4"
             }
             
             if supportedType.conforms(to: .quickTimeMovie) {
                 print("📸 [FILENAME_GEN] ✅ DETECTED QuickTime VIDEO via UTType.quickTimeMovie conformance: \(supportedType.identifier)")
-                return "video_\(shortId)_\(Int(timestamp)).mov"
+                return "video_\(shortId)_\(microsecondTimestamp).mov"
             }
             
             if supportedType.conforms(to: .video) {
                 print("📸 [FILENAME_GEN] ✅ DETECTED GENERIC VIDEO via UTType.video conformance: \(supportedType.identifier)")
-                return "video_\(shortId)_\(Int(timestamp)).mp4"
+                return "video_\(shortId)_\(microsecondTimestamp).mp4"
             }
             
             print("📸 [FILENAME_GEN] [\(index + 1)/\(photo.supportedContentTypes.count)] ❌ No video match for: \(supportedType.identifier)")
@@ -3249,35 +3268,35 @@ struct DocumentUploadSheet: View {
             // Image types (only after video check fails)
             if type.conforms(to: .heif) || type.identifier == "public.heif" {
                 print("📸 [FILENAME_GEN] ✅ DETECTED HEIF IMAGE")
-                return "photo_\(shortId)_\(Int(timestamp)).heif"
+                return "photo_\(shortId)_\(microsecondTimestamp).heif"
             } else if type.conforms(to: .heic) || type.identifier == "public.heic" {
                 print("📸 [FILENAME_GEN] ✅ DETECTED HEIC IMAGE")
-                return "photo_\(shortId)_\(Int(timestamp)).heic"
+                return "photo_\(shortId)_\(microsecondTimestamp).heic"
             } else if type.conforms(to: .jpeg) || type.identifier == "public.jpeg" {
                 print("📸 [FILENAME_GEN] ✅ DETECTED JPEG IMAGE")
-                return "photo_\(shortId)_\(Int(timestamp)).jpg"
+                return "photo_\(shortId)_\(microsecondTimestamp).jpg"
             } else if type.conforms(to: .png) || type.identifier == "public.png" {
                 print("📸 [FILENAME_GEN] ✅ DETECTED PNG IMAGE")
-                return "photo_\(shortId)_\(Int(timestamp)).png"
+                return "photo_\(shortId)_\(microsecondTimestamp).png"
             } else if type.conforms(to: .webP) {
                 print("📸 [FILENAME_GEN] ✅ DETECTED WebP IMAGE")
-                return "photo_\(shortId)_\(Int(timestamp)).webp"
+                return "photo_\(shortId)_\(microsecondTimestamp).webp"
             } else if type.conforms(to: .gif) {
                 print("📸 [FILENAME_GEN] ✅ DETECTED GIF IMAGE")
-                return "photo_\(shortId)_\(Int(timestamp)).gif"
+                return "photo_\(shortId)_\(microsecondTimestamp).gif"
             }
         }
         
         // PRIORITY 3: Standard image fallbacks based on supported types
         if photo.supportedContentTypes.contains(.heif) || photo.supportedContentTypes.contains(.heic) {
             print("📸 [FILENAME_GEN] ✅ FALLBACK: HEIC IMAGE")
-            return "photo_\(shortId)_\(Int(timestamp)).heic"
+            return "photo_\(shortId)_\(microsecondTimestamp).heic"
         } else if photo.supportedContentTypes.contains(.jpeg) {
             print("📸 [FILENAME_GEN] ✅ FALLBACK: JPEG IMAGE")
-            return "photo_\(shortId)_\(Int(timestamp)).jpg"
+            return "photo_\(shortId)_\(microsecondTimestamp).jpg"
         } else if photo.supportedContentTypes.contains(.png) {
             print("📸 [FILENAME_GEN] ✅ FALLBACK: PNG IMAGE")
-            return "photo_\(shortId)_\(Int(timestamp)).png"
+            return "photo_\(shortId)_\(microsecondTimestamp).png"
         }
         
         // FINAL FALLBACK - but make it more specific
@@ -3288,11 +3307,11 @@ struct DocumentUploadSheet: View {
         for supportedType in photo.supportedContentTypes {
             if supportedType.identifier == "public.mpeg-4" {
                 print("📸 [FILENAME_GEN] 🎬 FINAL FALLBACK: Detected MP4 in fallback!")
-                return "video_fallback_\(Int(timestamp)).mp4"
+                return "video_fallback_\(microsecondTimestamp).mp4"
             }
         }
         
-        return "media_\(Int(timestamp)).unknown"
+        return "media_\(microsecondTimestamp).unknown"
     }
     
     private func detectDocumentType(from filename: String) -> String {

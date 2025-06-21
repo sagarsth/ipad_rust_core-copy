@@ -690,11 +690,13 @@ struct StrategicGoalExportOptions: Codable {
     let includeBlobs: Bool
     let targetPath: String?
     let filter: StrategicGoalFilter
+    let format: ExportFormat
     
     enum CodingKeys: String, CodingKey {
         case includeBlobs = "include_blobs"
         case targetPath = "target_path" 
         case filter
+        case format
     }
 }
 
@@ -702,11 +704,13 @@ struct StrategicGoalExportByIdsOptions: Codable {
     let ids: [String]
     let includeBlobs: Bool?
     let targetPath: String?
+    let format: ExportFormat
     
     enum CodingKeys: String, CodingKey {
         case ids
         case includeBlobs = "include_blobs"
         case targetPath = "target_path"
+        case format
     }
 }
 
@@ -763,5 +767,172 @@ enum ExportStatus: String, Codable, CaseIterable {
     
     var isInProgress: Bool {
         self == .pending || self == .running
+    }
+}
+
+// MARK: - Export Format Support
+
+/// Export formats supported by the system
+enum ExportFormat: Codable, CaseIterable, Identifiable {
+    case jsonLines
+    case csv(CsvOptions)
+    case parquet(ParquetOptions)
+    
+    var id: String {
+        switch self {
+        case .jsonLines: return "jsonl"
+        case .csv: return "csv" 
+        case .parquet: return "parquet"
+        }
+    }
+    
+    var displayName: String {
+        switch self {
+        case .jsonLines: return "JSON Lines"
+        case .csv: return "CSV"
+        case .parquet: return "Parquet"
+        }
+    }
+    
+    var fileExtension: String {
+        switch self {
+        case .jsonLines: return "jsonl"
+        case .csv(let options): return options.compress ? "csv.gz" : "csv"
+        case .parquet: return "parquet"
+        }
+    }
+    
+    var description: String {
+        switch self {
+        case .jsonLines: return "Lightweight format, best for data processing"
+        case .csv(let options): return options.compress ? "Compressed CSV (smaller file, requires decompression)" : "Universal CSV format, opens in Excel/Sheets"
+        case .parquet: return "Compressed format, optimal for large datasets"
+        }
+    }
+    
+    var icon: String {
+        switch self {
+        case .jsonLines: return "curlybraces"
+        case .csv: return "tablecells"
+        case .parquet: return "arrow.down.circle.fill"
+        }
+    }
+    
+    var isRecommendedForLargeDatasets: Bool {
+        switch self {
+        case .parquet: return true
+        case .csv(let options): return options.compress
+        case .jsonLines: return false
+        }
+    }
+    
+    // Static list for CaseIterable conformance
+    static var allCases: [ExportFormat] {
+        [
+            .jsonLines,
+            .csv(CsvOptions.default),
+            .parquet(ParquetOptions.default)
+        ]
+    }
+    
+    // Default format
+    static var `default`: ExportFormat {
+        .jsonLines
+    }
+    
+    // Recommended format based on selection size
+    static func recommended(for itemCount: Int) -> ExportFormat {
+        if itemCount > 1000 {
+            return .parquet(ParquetOptions.optimized)
+        } else if itemCount > 50 {
+            return .csv(CsvOptions.default) // Use uncompressed CSV for better compatibility
+        } else {
+            return .jsonLines
+        }
+    }
+}
+
+/// CSV export options
+struct CsvOptions: Codable {
+    let delimiter: UInt8
+    let quoteChar: UInt8
+    let escapeChar: UInt8?
+    let compress: Bool
+    
+    static let `default` = CsvOptions(
+        delimiter: 44, // comma
+        quoteChar: 34, // double quote
+        escapeChar: nil,
+        compress: false
+    )
+    
+    static let compressed = CsvOptions(
+        delimiter: 44,
+        quoteChar: 34,
+        escapeChar: nil,
+        compress: true
+    )
+    
+    enum CodingKeys: String, CodingKey {
+        case delimiter, quoteChar = "quote_char", escapeChar = "escape_char", compress
+    }
+}
+
+/// Parquet compression types
+enum ParquetCompression: String, Codable, CaseIterable {
+    case none = "None"
+    case snappy = "Snappy"
+    case gzip = "Gzip"
+    case lzo = "Lzo"
+    case brotli = "Brotli"
+    case lz4 = "Lz4"
+    case zstd = "Zstd"
+    
+    var displayName: String {
+        switch self {
+        case .none: return "No Compression"
+        case .snappy: return "Snappy (Fast)"
+        case .gzip: return "GZip (Balanced)"
+        case .lzo: return "LZO (Fast)"
+        case .brotli: return "Brotli (Best Compression)"
+        case .lz4: return "LZ4 (Fastest)"
+        case .zstd: return "ZStandard (Modern)"
+        }
+    }
+    
+    var isRecommended: Bool {
+        switch self {
+        case .snappy, .zstd: return true
+        default: return false
+        }
+    }
+}
+
+/// Parquet export options
+struct ParquetOptions: Codable {
+    let compression: ParquetCompression
+    let rowGroupSize: Int
+    let enableStatistics: Bool
+    
+    static let `default` = ParquetOptions(
+        compression: .snappy,
+        rowGroupSize: 10000,
+        enableStatistics: true
+    )
+    
+    static let optimized = ParquetOptions(
+        compression: .zstd,
+        rowGroupSize: 50000,
+        enableStatistics: true
+    )
+    
+    static let fast = ParquetOptions(
+        compression: .lz4,
+        rowGroupSize: 5000,
+        enableStatistics: false
+    )
+    
+    enum CodingKeys: String, CodingKey {
+        case compression, rowGroupSize = "row_group_size", enableStatistics = "enable_statistics"
     }
 } 

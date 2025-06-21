@@ -27,6 +27,10 @@ impl Compressor for ImageCompressor {
         )
     }
     
+    fn compressor_name(&self) -> &'static str {
+        "ImageCompressor"
+    }
+    
     async fn compress(
         &self,
         data: Vec<u8>,

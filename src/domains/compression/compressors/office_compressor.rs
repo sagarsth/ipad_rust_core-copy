@@ -39,6 +39,10 @@ impl Compressor for OfficeCompressor {
         )
     }
     
+    fn compressor_name(&self) -> &'static str {
+        "OfficeCompressor"
+    }
+    
     async fn compress(
         &self,
         data: Vec<u8>,

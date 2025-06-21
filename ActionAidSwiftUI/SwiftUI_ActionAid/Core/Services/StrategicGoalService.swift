@@ -53,6 +53,7 @@ class StrategicGoalService {
     func exportStrategicGoalsByFilter(
         filter: StrategicGoalFilter,
         includeBlobs: Bool = false,
+        format: ExportFormat = .default,
         targetPath: String? = nil,
         token: String
     ) async throws -> ExportJobResponse {
@@ -60,7 +61,8 @@ class StrategicGoalService {
             let exportOptions = StrategicGoalExportOptions(
                 includeBlobs: includeBlobs,
                 targetPath: targetPath,
-                filter: filter
+                filter: filter,
+                format: format
             )
             
             guard let optionsData = try? JSONEncoder().encode(exportOptions),
@@ -96,18 +98,20 @@ class StrategicGoalService {
         }
     }
     
-    /// Export strategic goals by specific IDs
+    /// Export strategic goals by IDs with format support
     func exportStrategicGoalsByIds(
         ids: [String],
         includeBlobs: Bool = false,
-        targetPath: String? = nil,
+        format: ExportFormat = .default,
+        targetPath: String,
         token: String
     ) async throws -> ExportJobResponse {
         return try await withCheckedThrowingContinuation { continuation in
             let exportOptions = StrategicGoalExportByIdsOptions(
                 ids: ids,
                 includeBlobs: includeBlobs,
-                targetPath: targetPath
+                targetPath: targetPath,
+                format: format
             )
             
             guard let optionsData = try? JSONEncoder().encode(exportOptions),
@@ -115,6 +119,9 @@ class StrategicGoalService {
                 continuation.resume(throwing: FFIError.stringConversionFailed)
                 return
             }
+            
+            print("🚀 [EXPORT_SERVICE] Calling backend with format: \(format.displayName)")
+            print("🚀 [EXPORT_SERVICE] Export options JSON: \(optionsString)")
             
             var result: UnsafeMutablePointer<CChar>?
             
@@ -126,19 +133,26 @@ class StrategicGoalService {
             
             if status == 0, let resultPtr = result {
                 let resultString = String(cString: resultPtr)
-                export_free(resultPtr)
+                strategic_goal_free(resultPtr)
                 
                 do {
                     let exportResponse = try JSONDecoder().decode(ExportJobResponse.self, from: Data(resultString.utf8))
+                    print("✅ [EXPORT_SERVICE] Export job created: \(exportResponse.job.id)")
                     continuation.resume(returning: exportResponse)
                 } catch {
+                    print("❌ [EXPORT_SERVICE] Failed to decode export response: \(error)")
                     continuation.resume(throwing: FFIError.rustError("Failed to decode export response: \(error.localizedDescription)"))
                 }
             } else {
                 if let resultPtr = result {
-                    export_free(resultPtr)
+                    let errorString = String(cString: resultPtr)
+                    strategic_goal_free(resultPtr)
+                    print("❌ [EXPORT_SERVICE] Backend error: \(errorString)")
+                    continuation.resume(throwing: FFIError.rustError("Export failed: \(errorString)"))
+                } else {
+                    print("❌ [EXPORT_SERVICE] Unknown export error")
+                    continuation.resume(throwing: FFIError.rustError("Export failed: Unknown error"))
                 }
-                continuation.resume(throwing: FFIError.rustError("Export operation failed"))
             }
         }
     }
@@ -146,27 +160,38 @@ class StrategicGoalService {
     /// Get export job status
     func getExportStatus(jobId: String) async throws -> ExportJobResponse {
         return try await withCheckedThrowingContinuation { continuation in
+            print("🔄 [EXPORT_STATUS] Checking status for job: \(jobId)")
+            
             var result: UnsafeMutablePointer<CChar>?
             
-            let status = jobId.withCString { jobCStr in
-                export_get_status(jobCStr, &result)
+            let status = jobId.withCString { jobIdCStr in
+                export_get_status(jobIdCStr, &result)
             }
             
             if status == 0, let resultPtr = result {
                 let resultString = String(cString: resultPtr)
                 export_free(resultPtr)
                 
+                print("🔄 [EXPORT_STATUS] Raw response: \(resultString)")
+                
                 do {
-                    let exportResponse = try JSONDecoder().decode(ExportJobResponse.self, from: Data(resultString.utf8))
-                    continuation.resume(returning: exportResponse)
+                    let statusResponse = try JSONDecoder().decode(ExportJobResponse.self, from: Data(resultString.utf8))
+                    print("✅ [EXPORT_STATUS] Job status: \(statusResponse.job.status)")
+                    continuation.resume(returning: statusResponse)
                 } catch {
-                    continuation.resume(throwing: FFIError.rustError("Failed to decode export status: \(error.localizedDescription)"))
+                    print("❌ [EXPORT_STATUS] Failed to decode status response: \(error)")
+                    continuation.resume(throwing: FFIError.rustError("Failed to decode status response: \(error.localizedDescription)"))
                 }
             } else {
                 if let resultPtr = result {
+                    let errorString = String(cString: resultPtr)
                     export_free(resultPtr)
+                    print("❌ [EXPORT_STATUS] Backend error: \(errorString)")
+                    continuation.resume(throwing: FFIError.rustError("Status check failed: \(errorString)"))
+                } else {
+                    print("❌ [EXPORT_STATUS] Unknown status check error")
+                    continuation.resume(throwing: FFIError.rustError("Status check failed: Unknown error"))
                 }
-                continuation.resume(throwing: FFIError.rustError("Failed to get export status"))
             }
         }
     }
