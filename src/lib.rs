@@ -15,6 +15,25 @@ mod utils;
 
 use crate::ffi::error::FFIResult;
 
+// Conditional printing macro for performance optimization
+#[macro_export]
+macro_rules! debug_println {
+    ($($arg:tt)*) => {
+        #[cfg(debug_assertions)]
+        {
+            println!($($arg)*);
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            // Only print if explicitly enabled via environment variable
+            if std::env::var("IPAD_RUST_VERBOSE").unwrap_or_else(|_| "false".to_string()) == "true" {
+                println!($($arg)*);
+            }
+        }
+    };
+}
+
+
 // Entry point for initialization
 /// Initialize the library with the given database URL, device ID, offline mode, and JWT secret.
 /// This function must be called before any other function in the library.

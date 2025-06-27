@@ -102,7 +102,7 @@ fn create_video_type() -> NewDocumentType {
         allowed_extensions: "mp4,mov,m4v,avi,mkv,webm,3gp".to_string(),
         max_size: 500_000_000, // 500MB - long training videos
         compression_level: 4, // Increased from 2 - more aggressive for training videos
-        compression_method: Some("video_optimize".to_string()), // Custom video optimization
+        compression_method: Some("lossy".to_string()), // Use lossy compression for videos
         min_size_for_compression: Some(25_000_000), // 25MB - compress smaller videos (down from 50MB)
         related_tables: Some(r#"["all"]"#.to_string()),
     }
@@ -229,7 +229,7 @@ pub fn get_compression_settings_for_type(type_name: &str) -> Option<(i32, String
         "Document" => Some((6, "lossless".to_string(), Some(1_000_000))),
         "Spreadsheet" => Some((4, "lossless".to_string(), Some(2_000_000))),
         "Presentation" => Some((6, "lossless".to_string(), Some(5_000_000))),
-        "Video" => Some((4, "video_optimize".to_string(), Some(25_000_000))),
+        "Video" => Some((4, "lossy".to_string(), Some(25_000_000))),
         "Audio" => Some((3, "lossy".to_string(), Some(10_000_000))),
         "Archive" => Some((0, "none".to_string(), None)),
         "Code" => Some((5, "lossless".to_string(), Some(100_000))),

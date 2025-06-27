@@ -1,7 +1,7 @@
 use crate::errors::{DomainError, ValidationError, DomainResult};
 use crate::validation::{Validate, ValidationBuilder};
 use crate::types::PaginatedResult; // Keep this if needed
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap; // Keep for DocumentSummary if used
 use std::str::FromStr;
@@ -921,6 +921,26 @@ impl MediaDocumentRow {
             })
         };
         
+        // Helper function to parse datetime with multiple fallback formats
+        let parse_datetime_robust = |dt_str: &str| -> DomainResult<DateTime<Utc>> {
+            // Try RFC3339 first (preferred format)
+            if let Ok(dt) = DateTime::parse_from_rfc3339(dt_str) {
+                return Ok(dt.with_timezone(&Utc));
+            }
+            
+            // Try parsing as "YYYY-MM-DD HH:MM:SS" (missing T and timezone)
+            if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(dt_str, "%Y-%m-%d %H:%M:%S") {
+                return Ok(DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc));
+            }
+            
+            // Try parsing as "YYYY-MM-DDTHH:MM:SS" (missing timezone)
+            if let Ok(naive_dt) = chrono::NaiveDateTime::parse_from_str(dt_str, "%Y-%m-%dT%H:%M:%S") {
+                return Ok(DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc));
+            }
+            
+            Err(DomainError::Internal(format!("Invalid date format - could not parse: {}", dt_str)))
+        };
+        
         Ok(MediaDocument {
             id: Uuid::parse_str(&self.id).map_err(|_| DomainError::InvalidUuid(self.id.clone()))?,
             related_table: self.related_table,
@@ -943,8 +963,8 @@ impl MediaDocumentRow {
             has_error: self.has_error,             
             error_type: self.error_type,           
             error_message: self.error_message,     
-            created_at: DateTime::parse_from_rfc3339(&self.created_at).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid created_at: {}", self.created_at)))?,
-            updated_at: DateTime::parse_from_rfc3339(&self.updated_at).map(|dt| dt.with_timezone(&Utc)).map_err(|_| DomainError::Internal(format!("Invalid updated_at: {}", self.updated_at)))?,
+            created_at: parse_datetime_robust(&self.created_at)?,
+            updated_at: parse_datetime_robust(&self.updated_at)?,
             created_by_user_id: parse_uuid(&self.created_by_user_id).transpose()?,
             updated_by_user_id: parse_uuid(&self.updated_by_user_id).transpose()?,
             deleted_at: parse_datetime(&self.deleted_at).transpose()?,

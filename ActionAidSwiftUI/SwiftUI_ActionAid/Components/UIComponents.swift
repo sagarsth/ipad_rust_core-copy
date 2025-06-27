@@ -353,7 +353,7 @@ struct ProgressBar: View {
                     
                     RoundedRectangle(cornerRadius: height / 2)
                         .fill(color)
-                        .frame(width: geometry.size.width * value, height: height)
+                        .frame(width: max(0, geometry.size.width * max(0, min(value.isNaN ? 0 : value, 1.0))), height: height)
                 }
             }
             .frame(height: height)

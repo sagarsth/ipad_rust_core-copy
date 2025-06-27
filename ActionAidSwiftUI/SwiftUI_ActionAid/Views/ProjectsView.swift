@@ -33,12 +33,26 @@ struct Project: Identifiable, Codable {
         let total = endDate.timeIntervalSince(startDate)
         let elapsed = now.timeIntervalSince(startDate)
         
-        return min(max(elapsed / total, 0), 1)
+        // Guard against division by zero and invalid calculations
+        guard total > 0 else { return 0 }
+        let rawProgress = elapsed / total
+        
+        // Ensure progress is a valid number and within bounds
+        if rawProgress.isNaN || rawProgress.isInfinite {
+            return 0
+        }
+        return min(max(rawProgress, 0), 1)
     }
     
     var budgetUtilization: Double {
         guard budget > 0 else { return 0 }
-        return spent / budget
+        let utilization = spent / budget
+        
+        // Ensure utilization is a valid number
+        if utilization.isNaN || utilization.isInfinite {
+            return 0
+        }
+        return max(0, utilization)
     }
     
     var daysRemaining: Int {

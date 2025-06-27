@@ -16,6 +16,16 @@ class DocumentFFIHandler {
     private let queue = DispatchQueue(label: "com.actionaid.document.ffi", qos: .userInitiated)
     private let jsonEncoder = JSONEncoder()
     private let jsonDecoder = JSONDecoder()
+    
+    init() {
+        jsonEncoder.keyEncodingStrategy = .convertToSnakeCase
+        
+        // Set up date formatting to match backend RFC3339 format (only applies to actual Date types)
+        jsonEncoder.dateEncodingStrategy = .iso8601
+        
+        // For decoding, all our models use String fields for dates, so this shouldn't interfere
+        jsonDecoder.dateDecodingStrategy = .iso8601
+    }
 
     // MARK: - Document Type Management
 
@@ -114,7 +124,18 @@ class DocumentFFIHandler {
             let include: [DocumentIncludeDto]?
             let auth: AuthCtxDto
         }
+        
+        print("🔍 [listDocumentsByEntity] Creating payload with:")
+        print("  - relatedTable: \(relatedTable)")
+        print("  - relatedId: \(relatedId)")
+        print("  - pagination: \(String(describing: pagination))")
+        print("  - include: \(String(describing: include))")
+        print("  - auth.userId: \(auth.userId)")
+        print("  - auth.deviceId: \(auth.deviceId)")
+        
         let payload = Payload(related_table: relatedTable, related_id: relatedId, pagination: pagination, include: include, auth: auth)
+        
+        print("🔍 [listDocumentsByEntity] About to call executeOperation")
         return await executeOperation(payload: payload, ffiCall: document_list_by_entity)
     }
     
@@ -177,6 +198,17 @@ class DocumentFFIHandler {
             queue.async {
                 do {
                     let jsonString = try self.encode(payload)
+                    
+                    // DEBUG: Print the exact JSON being sent to Rust
+                    print("🔍 [DocumentFFIHandler] Sending JSON to Rust:")
+                    print(jsonString)
+                    
+                    // DEBUG: Check for any Date objects in the payload
+                    if jsonString.contains("2025-06-25") {
+                        print("❌ [DocumentFFIHandler] FOUND PROBLEMATIC DATE IN PAYLOAD!")
+                        print("Full payload: \(jsonString)")
+                    }
+                    
                     let ffiResult = FFIHelper.execute(
                         call: { resultPtr in
                             jsonString.withCString { cString in
@@ -184,6 +216,10 @@ class DocumentFFIHandler {
                             }
                         },
                         parse: { responseString in
+                            // DEBUG: Print response from Rust
+                            print("🔍 [DocumentFFIHandler] Received from Rust:")
+                            print(responseString)
+                            
                             guard let data = responseString.data(using: .utf8) else { throw FFIError.stringConversionFailed }
                             return try self.jsonDecoder.decode(R.self, from: data)
                         },
@@ -257,10 +293,21 @@ class DocumentFFIHandler {
     }
     
     private func encode<T: Encodable>(_ value: T) throws -> String {
+        // DEBUG: Print the type being encoded
+        print("🔍 [DocumentFFIHandler] Encoding type: \(type(of: value))")
+        
         let data = try jsonEncoder.encode(value)
         guard let string = String(data: data, encoding: .utf8) else {
             throw FFIError.stringConversionFailed
         }
+        
+        // DEBUG: Check for problematic dates in the encoded string
+        if string.contains("2025-06-25") || string.contains("updated_at") {
+            print("❌ [DocumentFFIHandler] PROBLEMATIC JSON DETECTED:")
+            print("Encoding: \(type(of: value))")
+            print("JSON: \(string)")
+        }
+        
         return string
     }
 } 

@@ -12,6 +12,16 @@ class CompressionFFIHandler {
     private let queue = DispatchQueue(label: "com.actionaid.compression.ffi", qos: .userInitiated)
     private let jsonEncoder = JSONEncoder()
     private let jsonDecoder = JSONDecoder()
+    
+    init() {
+        jsonEncoder.keyEncodingStrategy = .convertToSnakeCase
+        
+        // Set up date formatting to match backend RFC3339 format (only applies to actual Date types)
+        jsonEncoder.dateEncodingStrategy = .iso8601
+        
+        // For decoding, all our models use String fields for dates, so this shouldn't interfere
+        jsonDecoder.dateDecodingStrategy = .iso8601
+    }
 
     // MARK: - Document Compression
     

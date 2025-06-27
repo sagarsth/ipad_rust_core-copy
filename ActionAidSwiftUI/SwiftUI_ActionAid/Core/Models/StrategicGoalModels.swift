@@ -34,7 +34,7 @@ enum SyncPriority: String, Codable {
 // MARK: - Core DTOs
 
 struct NewStrategicGoal: Codable {
-    var id: UUID?
+    var id: String?
     let objectiveCode: String
     let outcome: String?
     let kpi: String?
@@ -43,7 +43,7 @@ struct NewStrategicGoal: Codable {
     let statusId: Int64?
     let responsibleTeam: String?
     let syncPriority: SyncPriority
-    let createdByUserId: UUID?
+    let createdByUserId: String?
 
     enum CodingKeys: String, CodingKey {
         case id, kpi, outcome
@@ -63,9 +63,10 @@ struct UpdateStrategicGoal: Codable {
     let kpi: String?
     let targetValue: Double?
     let actualValue: Double?
-    let statusId: Int?
+    let statusId: Int64?
     let responsibleTeam: String?
     let syncPriority: SyncPriority?
+    let updatedByUserId: String?
 
     enum CodingKeys: String, CodingKey {
         case kpi, outcome
@@ -75,6 +76,7 @@ struct UpdateStrategicGoal: Codable {
         case statusId = "status_id"
         case responsibleTeam = "responsible_team"
         case syncPriority = "sync_priority"
+        case updatedByUserId = "updated_by_user_id"
     }
 }
 
@@ -349,7 +351,7 @@ struct StrategicGoalResponse: Codable, Identifiable, MonthGroupable, Equatable {
     let targetValue: Double?
     let actualValue: Double?
     let progressPercentage: Double?
-    let statusId: Int?
+    let statusId: Int64?
     let responsibleTeam: String?
     let createdAt: String
     let updatedAt: String
@@ -385,13 +387,21 @@ struct StrategicGoalResponse: Codable, Identifiable, MonthGroupable, Equatable {
     }
 
     var displayLastSyncedAt: String {
-        guard let syncedAt = lastSyncedAt, let date = ISO8601DateFormatter().date(from: syncedAt) else {
+        guard let syncedAt = lastSyncedAt else {
             return "Not synced yet"
         }
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
+        
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        
+        guard let date = formatter.date(from: syncedAt) else {
+            return "Not synced yet"
+        }
+        
+        let displayFormatter = DateFormatter()
+        displayFormatter.dateStyle = .medium
+        displayFormatter.timeStyle = .short
+        return displayFormatter.string(from: date)
     }
     
     var hasDocuments: Bool {

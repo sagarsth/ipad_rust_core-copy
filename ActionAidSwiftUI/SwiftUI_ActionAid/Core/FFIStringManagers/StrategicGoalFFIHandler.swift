@@ -14,6 +14,14 @@ class StrategicGoalFFIHandler {
 
     init() {
         jsonEncoder.keyEncodingStrategy = .convertToSnakeCase
+        
+        // Set up date formatting to match backend RFC3339 format (only applies to actual Date types)
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        jsonEncoder.dateEncodingStrategy = .iso8601
+        
+        // For decoding, all our models use String fields for dates, so this shouldn't interfere
+        jsonDecoder.dateDecodingStrategy = .iso8601
     }
 
     private func encode<T: Encodable>(_ value: T) throws -> String {

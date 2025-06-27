@@ -30,7 +30,7 @@ class StrategicGoalService {
             
             if status == 0, let resultPtr = result {
                 let resultString = String(cString: resultPtr)
-                strategic_goal_free(resultPtr)
+                strategic_goal_free(resultPtr) 
                 
                 do {
                     let ids = try JSONDecoder().decode([String].self, from: Data(resultString.utf8))

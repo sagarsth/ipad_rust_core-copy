@@ -534,6 +534,16 @@ async fn initialize_internal(
         })?;
     println!("✅ [GLOBALS] Status types verified");
     
+    // Initialize document types IMMEDIATELY after status types and BEFORE starting any background workers
+    // This prevents database concurrency issues with compression worker polling
+    println!("📄 [GLOBALS] Ensuring document types initialized...");
+    ensure_document_types_initialized(&pool).await
+        .map_err(|e| {
+            println!("❌ [GLOBALS] Document types initialization failed: {}", e);
+            e
+        })?;
+    println!("✅ [GLOBALS] Document types verified");
+    
     // Initialize document types after repositories are created
     // Note: We'll do this after the document_type_repo is created below
 
@@ -1260,14 +1270,7 @@ async fn initialize_internal(
     *ENTITY_MERGER_GLOBAL.lock().map_err(|_| FFIError::internal("ENTITY_MERGER_GLOBAL lock poisoned".to_string()))? = Some(central_merger);
     *SYNC_SERVICE_GLOBAL.lock().map_err(|_| FFIError::internal("SYNC_SERVICE_GLOBAL lock poisoned".to_string()))? = Some(sync_service);
 
-    // Initialize document types after all services are set up
-    println!("📄 [GLOBALS] Ensuring document types initialized...");
-    ensure_document_types_initialized(&pool).await
-        .map_err(|e| {
-            println!("❌ [GLOBALS] Document types initialization failed: {}", e);
-            e
-        })?;
-    println!("✅ [GLOBALS] Document types verified");
+    // Document types are already initialized before workers started - no need to do it again here
 
     Ok(())
 }
@@ -1343,94 +1346,167 @@ async fn ensure_status_types_initialized(pool: &SqlitePool) -> FFIResult<()> {
 async fn ensure_document_types_initialized(pool: &SqlitePool) -> FFIResult<()> {
     println!("🔍 [GLOBALS] Checking document_types table...");
     
-    // Check if document_types table exists and has data
-    let count_result = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM document_types WHERE deleted_at IS NULL")
-        .fetch_one(pool)
-        .await;
-    
-    match count_result {
-        Ok(count) => {
-            if count >= 9 { // We expect 9 standard document types
-                println!("✅ [GLOBALS] Document types table has {} entries, looks good", count);
-                return Ok(());
-            } else {
-                println!("⚠️ [GLOBALS] Document types table only has {} entries, initializing...", count);
-            }
-        },
-        Err(e) => {
-            println!("❌ [GLOBALS] Error checking document_types table: {}", e);
-            return Err(FFIError::internal(format!("Failed to check document_types: {}", e)));
-        }
-    }
+    // Use an explicit transaction to ensure atomicity and handle strict SQLite configurations
+    // on newer iOS versions (iOS 18+) which have stricter isolation
+    let mut tx = pool.begin().await
+        .map_err(|e| FFIError::internal(format!("Failed to begin document types transaction: {}", e)))?;
     
     // Get the standard document types from our initialization module
     let standard_types = initialization::initialize_standard_document_types();
+    let expected_count = standard_types.len();
     
-    println!("🌱 [GLOBALS] Seeding {} document types...", standard_types.len());
+    println!("🌱 [GLOBALS] Ensuring {} standard document types are present...", expected_count);
     let now = chrono::Utc::now().to_rfc3339();
     
+    // Use upsert logic (INSERT OR REPLACE) to handle existing types properly
     for doc_type in standard_types {
         let doc_type_id = Uuid::new_v4().to_string();
         
-        let query = r#"
-            INSERT OR IGNORE INTO document_types (
-                id, name, description, icon, default_priority,
-                allowed_extensions, max_size, compression_level, 
-                compression_method, min_size_for_compression, related_tables,
-                created_at, updated_at,
-                name_updated_at, allowed_extensions_updated_at,
-                max_size_updated_at, compression_level_updated_at,
-                compression_method_updated_at, min_size_for_compression_updated_at,
-                description_updated_at, default_priority_updated_at,
-                icon_updated_at, related_tables_updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        "#;
+        // First, check if this document type already exists by name
+        let existing_id = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM document_types WHERE name = ? AND deleted_at IS NULL"
+        )
+        .bind(&doc_type.name)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| FFIError::internal(format!("Failed to check existing document type {}: {}", doc_type.name, e)))?;
         
-        match sqlx::query(query)
-            .bind(&doc_type_id)
-            .bind(&doc_type.name)
-            .bind(&doc_type.description)
-            .bind(&doc_type.icon)
-            .bind(&doc_type.default_priority)
-            .bind(&doc_type.allowed_extensions)
-            .bind(doc_type.max_size)
-            .bind(doc_type.compression_level)
-            .bind(&doc_type.compression_method)
-            .bind(doc_type.min_size_for_compression)
-            .bind(&doc_type.related_tables)
-            .bind(&now)
-            .bind(&now)
-            .bind(&now) // name_updated_at
-            .bind(&now) // allowed_extensions_updated_at
-            .bind(&now) // max_size_updated_at
-            .bind(&now) // compression_level_updated_at
-            .bind(&now) // compression_method_updated_at
-            .bind(&now) // min_size_for_compression_updated_at
-            .bind(&now) // description_updated_at
-            .bind(&now) // default_priority_updated_at
-            .bind(&now) // icon_updated_at
-            .bind(&now) // related_tables_updated_at
-            .execute(pool)
-            .await
-        {
-            Ok(_) => println!("✅ [GLOBALS] Seeded document type: {}", doc_type.name),
-            Err(e) => {
-                println!("⚠️ [GLOBALS] Warning seeding {}: {}", doc_type.name, e);
-                // Don't fail on individual seed errors, might already exist
+        if let Some(existing_id) = existing_id {
+            // Update existing document type to ensure it has all current settings
+            let query = r#"
+                UPDATE document_types SET
+                    description = ?, icon = ?, default_priority = ?,
+                    allowed_extensions = ?, max_size = ?, compression_level = ?, 
+                    compression_method = ?, min_size_for_compression = ?, related_tables = ?,
+                    updated_at = ?,
+                    allowed_extensions_updated_at = ?, max_size_updated_at = ?,
+                    compression_level_updated_at = ?, compression_method_updated_at = ?,
+                    min_size_for_compression_updated_at = ?, description_updated_at = ?,
+                    default_priority_updated_at = ?, icon_updated_at = ?,
+                    related_tables_updated_at = ?
+                WHERE id = ? AND deleted_at IS NULL
+            "#;
+            
+            match sqlx::query(query)
+                .bind(&doc_type.description)
+                .bind(&doc_type.icon)
+                .bind(&doc_type.default_priority)
+                .bind(&doc_type.allowed_extensions)
+                .bind(doc_type.max_size)
+                .bind(doc_type.compression_level)
+                .bind(&doc_type.compression_method)
+                .bind(doc_type.min_size_for_compression)
+                .bind(&doc_type.related_tables)
+                .bind(&now)
+                .bind(&now) // allowed_extensions_updated_at
+                .bind(&now) // max_size_updated_at
+                .bind(&now) // compression_level_updated_at
+                .bind(&now) // compression_method_updated_at
+                .bind(&now) // min_size_for_compression_updated_at
+                .bind(&now) // description_updated_at
+                .bind(&now) // default_priority_updated_at
+                .bind(&now) // icon_updated_at
+                .bind(&now) // related_tables_updated_at
+                .bind(&existing_id)
+                .execute(&mut *tx)
+                .await
+            {
+                Ok(_) => println!("✅ [GLOBALS] Updated document type: {}", doc_type.name),
+                Err(e) => {
+                    println!("⚠️ [GLOBALS] Warning updating {}: {}", doc_type.name, e);
+                    // Continue with other types
+                }
+            }
+        } else {
+            // Insert new document type
+            let query = r#"
+                INSERT INTO document_types (
+                    id, name, description, icon, default_priority,
+                    allowed_extensions, max_size, compression_level, 
+                    compression_method, min_size_for_compression, related_tables,
+                    created_at, updated_at,
+                    name_updated_at, allowed_extensions_updated_at,
+                    max_size_updated_at, compression_level_updated_at,
+                    compression_method_updated_at, min_size_for_compression_updated_at,
+                    description_updated_at, default_priority_updated_at,
+                    icon_updated_at, related_tables_updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#;
+            
+            match sqlx::query(query)
+                .bind(&doc_type_id)
+                .bind(&doc_type.name)
+                .bind(&doc_type.description)
+                .bind(&doc_type.icon)
+                .bind(&doc_type.default_priority)
+                .bind(&doc_type.allowed_extensions)
+                .bind(doc_type.max_size)
+                .bind(doc_type.compression_level)
+                .bind(&doc_type.compression_method)
+                .bind(doc_type.min_size_for_compression)
+                .bind(&doc_type.related_tables)
+                .bind(&now)
+                .bind(&now)
+                .bind(&now) // name_updated_at
+                .bind(&now) // allowed_extensions_updated_at
+                .bind(&now) // max_size_updated_at
+                .bind(&now) // compression_level_updated_at
+                .bind(&now) // compression_method_updated_at
+                .bind(&now) // min_size_for_compression_updated_at
+                .bind(&now) // description_updated_at
+                .bind(&now) // default_priority_updated_at
+                .bind(&now) // icon_updated_at
+                .bind(&now) // related_tables_updated_at
+                .execute(&mut *tx)
+                .await
+            {
+                Ok(_) => println!("✅ [GLOBALS] Inserted document type: {}", doc_type.name),
+                Err(e) => {
+                    println!("⚠️ [GLOBALS] Warning inserting {}: {}", doc_type.name, e);
+                    // Continue with other types
+                }
             }
         }
     }
     
-    // Verify the seeding worked
+    // Commit the transaction before verification to ensure changes are visible
+    tx.commit().await
+        .map_err(|e| FFIError::internal(format!("Failed to commit document types transaction: {}", e)))?;
+    
+    // Verify that we have at least the expected number of standard document types
     let final_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM document_types WHERE deleted_at IS NULL")
         .fetch_one(pool)
         .await
-        .map_err(|e| FFIError::internal(format!("Failed to verify document_types after seeding: {}", e)))?;
+        .map_err(|e| FFIError::internal(format!("Failed to verify document_types after initialization: {}", e)))?;
     
-    if final_count >= 9 {
-        println!("✅ [GLOBALS] Document types successfully verified: {} entries", final_count);
+    // More flexible validation - ensure we have at least the standard types
+    let standard_type_names: Vec<String> = initialization::initialize_standard_document_types()
+        .into_iter()
+        .map(|dt| dt.name)
+        .collect();
+    
+    let mut missing_types = Vec::new();
+    for type_name in &standard_type_names {
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM document_types WHERE name = ? AND deleted_at IS NULL"
+        )
+        .bind(type_name)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| FFIError::internal(format!("Failed to check for document type {}: {}", type_name, e)))?;
+        
+        if exists == 0 {
+            missing_types.push(type_name.clone());
+        }
+    }
+    
+    if missing_types.is_empty() {
+        println!("✅ [GLOBALS] Document types successfully verified: {} total entries, all {} standard types present", final_count, expected_count);
         Ok(())
     } else {
-        Err(FFIError::internal(format!("Document types seeding failed: only {} entries after seeding", final_count)))
+        Err(FFIError::internal(format!(
+            "Document types initialization incomplete: missing types: {:?}. Total count: {}, expected at least: {}", 
+            missing_types, final_count, expected_count
+        )))
     }
 }

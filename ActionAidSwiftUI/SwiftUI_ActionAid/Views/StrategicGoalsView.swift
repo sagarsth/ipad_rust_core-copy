@@ -42,6 +42,8 @@ struct StrategicGoalsView: View {
     @State private var currentViewStyle: ListViewStyle = .cards
     @State private var isScrolling = false
     @State private var scrollOffset: CGFloat = 0
+    @State private var lastScrollValue: CGFloat = 0
+    @State private var isActionBarCollapsed: Bool = false
     
     // Selection state for AdaptiveListView
     @State private var isInSelectionMode = false
@@ -140,57 +142,27 @@ struct StrategicGoalsView: View {
         }
         .navigationTitle("Strategic Goals")
         .navigationBarTitleDisplayMode(shouldHideTopSection ? .inline : .large)
+        .navigationBarHidden(isActionBarCollapsed)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                HStack {
-                    // Debug button for compression issues
-                    Button(action: { 
-                        Task { await debugCompression() }
-                    }) {
-                        Image(systemName: "wrench.and.screwdriver")
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    }
-                    
-                    // Reset stuck compression jobs button
-                    Button(action: { 
-                        Task { await resetStuckCompressions() }
-                    }) {
-                        Image(systemName: "arrow.clockwise.circle.fill")
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-                    
-                    Button(action: { showCreateSheet = true }) {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.title3)
-                    }
-                    
-                    // Export button
-                    Button(action: {
-                        showExportOptions = true
-                    }) {
-                        Image(systemName: "square.and.arrow.up.fill")
-                            .font(.title2)
-                            .foregroundColor(.white)
-                            .padding()
-                            .background(Color.blue.opacity(0.8))
-                            .clipShape(Circle())
-                    }
+                Button(action: { showCreateSheet = true }) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title3)
                 }
             }
         }
         .overlay(
             // Selection action bar
             Group {
-                if isInSelectionMode && !selectedItems.isEmpty {
+                if isInSelectionMode && !selectedItems.isEmpty && !isActionBarCollapsed {
                     selectionActionBar
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             },
             alignment: .bottom
         )
         .sheet(isPresented: $showCreateSheet) {
-            CreateGoalSheet(onSave: { newGoal in
+            CreateGoalSheet(ffiHandler: self.ffiHandler, onSave: { newGoal in
                 loadGoals()
             })
         }
@@ -268,10 +240,27 @@ struct StrategicGoalsView: View {
         }
         .coordinateSpace(name: "scroll")
         .onPreferenceChange(ScrollOffsetPreferenceKey.self) { value in
+            let newScrollValue = value
+            // update scrollOffset for header collapse logic
             withAnimation(.easeInOut(duration: 0.1)) {
-                scrollOffset = -value
+                scrollOffset = -newScrollValue
             }
-            isScrolling = abs(value) > 50
+            // detect scroll direction to collapse/expand action bar
+            let delta = newScrollValue - lastScrollValue
+            if delta < -10 {
+                // scrolled up (content moved up) -> hide action bar
+                withAnimation(.easeIn(duration: 0.2)) {
+                    isActionBarCollapsed = true
+                }
+            } else if delta > 10 {
+                // scrolled down (content moved down) -> show action bar
+                withAnimation(.easeOut(duration: 0.2)) {
+                    isActionBarCollapsed = false
+                }
+            }
+            lastScrollValue = newScrollValue
+            // maintain isScrolling flag
+            isScrolling = abs(newScrollValue) > 50
         }
     }
     
@@ -1379,7 +1368,12 @@ struct GoalCard: View {
     let documentCounts: [String: Int]
     
     private var progress: Double {
-        goal.progressPercentage ?? 0.0
+        let rawProgress = goal.progressPercentage ?? 0.0
+        // Ensure progress is a valid number and within bounds
+        if rawProgress.isNaN || rawProgress.isInfinite {
+            return 0.0
+        }
+        return max(0.0, rawProgress)
     }
     
     private var statusInfo: (text: String, color: Color) {
@@ -1671,7 +1665,7 @@ struct MultiSelectFilterChip: View {
 struct CreateGoalSheet: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var authManager: AuthenticationManager
-    private let ffiHandler = StrategicGoalFFIHandler()
+    let ffiHandler: StrategicGoalFFIHandler
     let onSave: (StrategicGoalResponse) -> Void
     
     @State private var objectiveCode = ""
@@ -1685,23 +1679,51 @@ struct CreateGoalSheet: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     
+    // For focus management
+    private enum Field: Hashable {
+        case objectiveCode, outcome, kpi, targetValue, actualValue, responsibleTeam
+    }
+    @FocusState private var focusedField: Field?
+    
+    private var canSave: Bool {
+        !objectiveCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !outcome.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !isLoading
+    }
+    
     var body: some View {
         NavigationView {
             Form {
                 Section("Goal Information") {
                     TextField("Objective Code", text: $objectiveCode)
+                        .focused($focusedField, equals: .objectiveCode)
                         .textInputAutocapitalization(.characters)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
                     
                     TextField("Outcome", text: $outcome, axis: .vertical)
+                        .focused($focusedField, equals: .outcome)
                         .lineLimit(2...4)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
                     
                     TextField("KPI", text: $kpi)
+                        .focused($focusedField, equals: .kpi)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
                 }
                 
                 Section("Metrics") {
                     HStack {
                         TextField("Target Value", text: $targetValue)
+                            .focused($focusedField, equals: .targetValue)
                             .keyboardType(.decimalPad)
+                            .submitLabel(.next)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.plain) // Reduces rendering overhead
                         Text("Target")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -1709,7 +1731,11 @@ struct CreateGoalSheet: View {
                     
                     HStack {
                         TextField("Actual Value", text: $actualValue)
+                            .focused($focusedField, equals: .actualValue)
                             .keyboardType(.decimalPad)
+                            .submitLabel(.done)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.plain) // Reduces rendering overhead
                         Text("Actual")
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -1723,14 +1749,20 @@ struct CreateGoalSheet: View {
                         Text("Behind").tag(Int64(3))
                         Text("Completed").tag(Int64(4))
                     }
+                    .pickerStyle(.menu) // More responsive than default picker
                     
                     TextField("Responsible Team", text: $responsibleTeam)
+                        .focused($focusedField, equals: .responsibleTeam)
+                        .submitLabel(.done)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
                     
                     Picker("Sync Priority", selection: $syncPriority) {
                         Text("Low").tag(SyncPriority.low)
                         Text("Normal").tag(SyncPriority.normal)
                         Text("High").tag(SyncPriority.high)
                     }
+                    .pickerStyle(.menu) // More responsive than default picker
                 }
                 
                 if let error = errorMessage {
@@ -1745,13 +1777,19 @@ struct CreateGoalSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") { 
+                        // Haptic feedback for better UX
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        dismiss() 
+                    }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Save") {
+                        // Haptic feedback for better UX
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         createGoal()
                     }
-                    .disabled(isLoading || objectiveCode.isEmpty || outcome.isEmpty)
+                    .disabled(!canSave)
                 }
             }
             .disabled(isLoading)
@@ -1759,13 +1797,22 @@ struct CreateGoalSheet: View {
                 if isLoading {
                     Color.black.opacity(0.3)
                         .ignoresSafeArea()
-                    ProgressView()
+                    ProgressView("Creating goal...")
+                        .scaleEffect(1.2)
                 }
             }
-        }
-    }
-    
+        }     // end NavigationView
+         .interactiveDismissDisabled(isLoading) // Prevent accidental dismissal during creation
+         .onAppear {
+             // Give focus to the first field when the sheet appears
+             focusedField = .objectiveCode
+         }
+    } // end body of CreateGoalSheet
+
     private func createGoal() {
+        // Dismiss keyboard before starting creation
+        focusedField = nil
+        
         isLoading = true
         errorMessage = nil
         
@@ -1793,7 +1840,7 @@ struct CreateGoalSheet: View {
             statusId: statusId,
             responsibleTeam: responsibleTeam.isEmpty ? nil : responsibleTeam,
             syncPriority: syncPriority,
-            createdByUserId: UUID(uuidString: currentUser.userId)
+            createdByUserId: currentUser.userId
         )
 
         Task {
@@ -1803,15 +1850,227 @@ struct CreateGoalSheet: View {
                 isLoading = false
                 switch result {
                 case .success(let createdGoal):
+                    // Success haptic feedback
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
                     onSave(createdGoal)
                     dismiss()
                 case .failure(let error):
+                    // Error haptic feedback
+                    UINotificationFeedbackGenerator().notificationOccurred(.error)
                     errorMessage = "Failed to create goal: \(error.localizedDescription)"
+                }
+            }
+                    }
+            }
+}
+
+// MARK: - Edit Goal Sheet
+struct EditGoalSheet: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var authManager: AuthenticationManager
+    let goal: StrategicGoalResponse
+    let ffiHandler: StrategicGoalFFIHandler
+    let onSave: (StrategicGoalResponse) -> Void
+    
+    @State private var objectiveCode = ""
+    @State private var outcome = ""
+    @State private var kpi = ""
+    @State private var targetValue = ""
+    @State private var actualValue = ""
+    @State private var statusId: Int64 = 1
+    @State private var responsibleTeam = ""
+    @State private var syncPriority: SyncPriority = .normal
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    
+    // For focus management
+    private enum Field: Hashable {
+        case objectiveCode, outcome, kpi, targetValue, actualValue, responsibleTeam
+    }
+    @FocusState private var focusedField: Field?
+    
+    private var canSave: Bool {
+        !objectiveCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !outcome.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !isLoading
+    }
+    
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Goal Information") {
+                    TextField("Objective Code", text: $objectiveCode)
+                        .focused($focusedField, equals: .objectiveCode)
+                        .textInputAutocapitalization(.characters)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
+                    
+                    TextField("Outcome", text: $outcome, axis: .vertical)
+                        .focused($focusedField, equals: .outcome)
+                        .lineLimit(2...4)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
+                    
+                    TextField("KPI", text: $kpi)
+                        .focused($focusedField, equals: .kpi)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
+                }
+                
+                Section("Metrics") {
+                    HStack {
+                        TextField("Target Value", text: $targetValue)
+                            .focused($focusedField, equals: .targetValue)
+                            .keyboardType(.decimalPad)
+                            .submitLabel(.next)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.plain)
+                        Text("Target")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    HStack {
+                        TextField("Actual Value", text: $actualValue)
+                            .focused($focusedField, equals: .actualValue)
+                            .keyboardType(.decimalPad)
+                            .submitLabel(.done)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.plain)
+                        Text("Actual")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Section("Details") {
+                    Picker("Status", selection: $statusId) {
+                        Text("On Track").tag(Int64(1))
+                        Text("At Risk").tag(Int64(2))
+                        Text("Behind").tag(Int64(3))
+                        Text("Completed").tag(Int64(4))
+                    }
+                    .pickerStyle(.menu)
+                    
+                    TextField("Responsible Team", text: $responsibleTeam)
+                        .focused($focusedField, equals: .responsibleTeam)
+                        .submitLabel(.done)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
+                    
+                    Picker("Sync Priority", selection: $syncPriority) {
+                        Text("Low").tag(SyncPriority.low)
+                        Text("Normal").tag(SyncPriority.normal)
+                        Text("High").tag(SyncPriority.high)
+                    }
+                    .pickerStyle(.menu)
+                }
+                
+                if let error = errorMessage {
+                    Section {
+                        Text(error)
+                            .foregroundColor(.red)
+                            .font(.caption)
+                    }
+                }
+            }
+            .navigationTitle("Edit Strategic Goal")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { 
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        dismiss() 
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Save") {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        updateGoal()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+            .disabled(isLoading)
+            .overlay {
+                if isLoading {
+                    Color.black.opacity(0.3)
+                        .ignoresSafeArea()
+                    ProgressView("Updating goal...")
+                        .scaleEffect(1.2)
+                }
+            }
+        }
+        .interactiveDismissDisabled(isLoading)
+        .onAppear {
+            populateFields()
+            focusedField = .objectiveCode
+        }
+    }
+    
+    private func populateFields() {
+        objectiveCode = goal.objectiveCode
+        outcome = goal.outcome ?? ""
+        kpi = goal.kpi ?? ""
+        targetValue = goal.targetValue != nil ? String(goal.targetValue!) : ""
+        actualValue = goal.actualValue != nil ? String(goal.actualValue!) : ""
+        statusId = goal.statusId ?? 1
+        responsibleTeam = goal.responsibleTeam ?? ""
+        syncPriority = goal.syncPriority
+    }
+    
+    private func updateGoal() {
+        focusedField = nil
+        isLoading = true
+        errorMessage = nil
+        
+        guard let currentUser = authManager.currentUser else {
+            self.errorMessage = "User not authenticated."
+            self.isLoading = false
+            return
+        }
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+
+        let updateGoal = UpdateStrategicGoal(
+            objectiveCode: objectiveCode.isEmpty ? nil : objectiveCode,
+            outcome: outcome.isEmpty ? nil : outcome,
+            kpi: kpi.isEmpty ? nil : kpi,
+            targetValue: targetValue.isEmpty ? nil : Double(targetValue),
+            actualValue: actualValue.isEmpty ? nil : Double(actualValue),
+            statusId: statusId,
+            responsibleTeam: responsibleTeam.isEmpty ? nil : responsibleTeam,
+            syncPriority: syncPriority,
+            updatedByUserId: currentUser.userId
+        )
+
+        Task {
+            let result = await ffiHandler.update(id: goal.id, update: updateGoal, auth: authContext)
+            
+            await MainActor.run {
+                isLoading = false
+                switch result {
+                case .success(let updatedGoal):
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    onSave(updatedGoal)
+                    dismiss()
+                case .failure(let error):
+                    UINotificationFeedbackGenerator().notificationOccurred(.error)
+                    errorMessage = "Failed to update goal: \(error.localizedDescription)"
                 }
             }
         }
     }
 }
+
 
 // MARK: - Goal Detail View
 struct GoalDetailView: View {
@@ -1825,6 +2084,7 @@ struct GoalDetailView: View {
     @State private var showUploadSheet = false
     @State private var showDeleteConfirmation = false
     @State private var showDeleteOptions = false
+    @State private var showEditSheet = false
     @State private var isDeleting = false
     @State private var isLoadingDocuments = false
     @State private var showErrorAlert = false
@@ -1978,7 +2238,7 @@ struct GoalDetailView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
-                        Button(action: {}) {
+                        Button(action: { showEditSheet = true }) {
                             Label("Edit", systemImage: "pencil")
                         }
                         Divider()
@@ -2005,10 +2265,19 @@ struct GoalDetailView: View {
                     onUpdate()
                 })
             }
-            .sheet(isPresented: $showDeleteOptions) {
-                GoalDeleteOptionsSheet(onDelete: { hardDelete in
-                    deleteGoal(hardDelete: hardDelete)
+            .sheet(isPresented: $showEditSheet) {
+                EditGoalSheet(goal: goal, ffiHandler: self.ffiHandler, onSave: { updatedGoal in
+                    loadDocuments()
+                    onUpdate()
                 })
+            }
+            .sheet(isPresented: $showDeleteOptions) {
+                GoalDeleteOptionsSheet(
+                    userRole: authManager.currentUser?.role ?? "",
+                    onDelete: { hardDelete, force in
+                        deleteGoal(hardDelete: hardDelete, force: force)
+                    }
+                )
             }
             .fullScreenCover(item: $selectedDocumentURL) { identifiableURL in
                 NavigationView {
@@ -2036,7 +2305,7 @@ struct GoalDetailView: View {
             .alert("Delete Goal", isPresented: $showDeleteConfirmation) {
                 Button("Cancel", role: .cancel) { }
                 Button("Delete", role: .destructive) {
-                    deleteGoal(hardDelete: false) // Non-admin users get soft delete
+                    deleteGoal(hardDelete: false, force: false) // Non-admin users get soft delete
                 }
             } message: {
                 Text("Are you sure you want to delete this strategic goal? It will be archived and can be restored later.")
@@ -2171,7 +2440,7 @@ struct GoalDetailView: View {
         refreshTimer = nil
     }
     
-    private func deleteGoal(hardDelete: Bool = false) {
+    private func deleteGoal(hardDelete: Bool = false, force: Bool = false) {
         isDeleting = true
         
         Task {
@@ -2191,29 +2460,62 @@ struct GoalDetailView: View {
                 offline_mode: false
             )
             
-            print("🗑️ [DELETE] Starting \(hardDelete ? "hard" : "soft") delete for goal: \(goal.id)")
-            let result = await ffiHandler.delete(id: goal.id, hardDelete: hardDelete, auth: authContext)
-
-            await MainActor.run {
-                isDeleting = false
-                switch result {
-                case .success(let deleteResponse):
-                    print("✅ [DELETE] Goal \(hardDelete ? "hard" : "soft") delete result: \(deleteResponse)")
-                    
-                    if deleteResponse.wasDeleted {
-                        // Show success message using the response's display message
-                        print("✅ [DELETE] \(deleteResponse.displayMessage)")
-                        onUpdate()
-                        dismiss()
-                    } else {
-                        // Handle case where deletion was prevented by dependencies
-                        errorMessage = deleteResponse.displayMessage
+            if force {
+                // Use bulk delete with force option for single goal
+                print("🗑️ [DELETE] Starting force delete for goal: \(goal.id)")
+                let result = await ffiHandler.bulkDelete(ids: [goal.id], hardDelete: hardDelete, force: force, auth: authContext)
+                
+                await MainActor.run {
+                    isDeleting = false
+                    switch result {
+                    case .success(let batchResult):
+                        print("✅ [FORCE_DELETE] Force delete result: \(batchResult)")
+                        
+                        if !batchResult.hardDeleted.isEmpty || !batchResult.softDeleted.isEmpty {
+                            // Successfully deleted
+                            let wasHardDeleted = !batchResult.hardDeleted.isEmpty
+                            let message = wasHardDeleted ? "Goal permanently deleted" : "Goal archived"
+                            print("✅ [FORCE_DELETE] \(message)")
+                            onUpdate()
+                            dismiss()
+                        } else if !batchResult.failed.isEmpty {
+                            // Force delete failed (very rare)
+                            let errorMsg = batchResult.errors[goal.id] ?? "Force delete failed"
+                            errorMessage = errorMsg
+                            showErrorAlert = true
+                        }
+                    case .failure(let error):
+                        print("❌ [FORCE_DELETE] Failed to force delete goal: \(error)")
+                        errorMessage = "Failed to force delete strategic goal: \(error.localizedDescription)"
                         showErrorAlert = true
                     }
-                case .failure(let error):
-                    print("❌ [DELETE] Failed to delete goal: \(error)")
-                    errorMessage = "Failed to delete strategic goal: \(error.localizedDescription)"
-                    showErrorAlert = true
+                }
+            } else {
+                // Use regular delete (with dependency checks)
+                print("🗑️ [DELETE] Starting \(hardDelete ? "hard" : "soft") delete for goal: \(goal.id)")
+                let result = await ffiHandler.delete(id: goal.id, hardDelete: hardDelete, auth: authContext)
+
+                await MainActor.run {
+                    isDeleting = false
+                    switch result {
+                    case .success(let deleteResponse):
+                        print("✅ [DELETE] Goal \(hardDelete ? "hard" : "soft") delete result: \(deleteResponse)")
+                        
+                        if deleteResponse.wasDeleted {
+                            // Show success message using the response's display message
+                            print("✅ [DELETE] \(deleteResponse.displayMessage)")
+                            onUpdate()
+                            dismiss()
+                        } else {
+                            // Handle case where deletion was prevented by dependencies
+                            errorMessage = deleteResponse.displayMessage
+                            showErrorAlert = true
+                        }
+                    case .failure(let error):
+                        print("❌ [DELETE] Failed to delete goal: \(error)")
+                        errorMessage = "Failed to delete strategic goal: \(error.localizedDescription)"
+                        showErrorAlert = true
+                    }
                 }
             }
         }
@@ -2324,7 +2626,12 @@ struct GoalDetailView: View {
 // MARK: - Helper extensions for GoalDetailView
 extension StrategicGoalResponse {
     var progress: Double {
-        return progressPercentage ?? 0.0
+        let rawProgress = progressPercentage ?? 0.0
+        // Ensure progress is a valid number and within bounds
+        if rawProgress.isNaN || rawProgress.isInfinite {
+            return 0.0
+        }
+        return max(0.0, rawProgress)
     }
     
     var statusText: String {
@@ -3966,7 +4273,8 @@ struct UploadResult: Identifiable {
 
 // MARK: - Goal Delete Options Sheet
 struct GoalDeleteOptionsSheet: View {
-    let onDelete: (Bool) -> Void
+    let userRole: String
+    let onDelete: (Bool, Bool) -> Void  // (hardDelete, force)
     @Environment(\.dismiss) var dismiss
     
     var body: some View {
@@ -3979,7 +4287,10 @@ struct GoalDeleteOptionsSheet: View {
                 
                 VStack(spacing: 16) {
                     archiveButton
-                    deleteButton
+                    if userRole.lowercased() == "admin" {
+                        deleteButton
+                        forceDeleteButton
+                    }
                 }
                 .padding(.horizontal)
                 
@@ -3999,7 +4310,7 @@ struct GoalDeleteOptionsSheet: View {
     
     private var archiveButton: some View {
         Button(action: {
-            onDelete(false)
+            onDelete(false, false)
             dismiss()
         }) {
             VStack(alignment: .leading, spacing: 8) {
@@ -4013,7 +4324,7 @@ struct GoalDeleteOptionsSheet: View {
                     Spacer()
                 }
                 
-                Text("Move the goal to archive. It can be restored later. Associated documents will be preserved.")
+                Text("Move the goal to archive. It can be restored later. Associated documents will be preserved. Projects will remain linked.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.leading)
@@ -4027,7 +4338,7 @@ struct GoalDeleteOptionsSheet: View {
     
     private var deleteButton: some View {
         Button(action: {
-            onDelete(true)
+            onDelete(true, false)
             dismiss()
         }) {
             VStack(alignment: .leading, spacing: 8) {
@@ -4035,13 +4346,13 @@ struct GoalDeleteOptionsSheet: View {
                     Image(systemName: "trash.fill")
                         .foregroundColor(.red)
                         .font(.title2)
-                    Text("Permanently Delete")
+                    Text("Delete Goal")
                         .font(.headline)
                         .foregroundColor(.red)
                     Spacer()
                 }
                 
-                Text("Permanently remove the goal and all associated data. This action cannot be undone.")
+                Text("Permanently delete goal if no dependencies exist. Goals with projects will be archived instead.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.leading)
@@ -4052,6 +4363,38 @@ struct GoalDeleteOptionsSheet: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(Color.red.opacity(0.3), lineWidth: 1)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+    
+    private var forceDeleteButton: some View {
+        Button(action: {
+            onDelete(true, true)
+            dismiss()
+        }) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                        .font(.title2)
+                    Text("Force Delete")
+                        .font(.headline)
+                        .foregroundColor(.red)
+                    Spacer()
+                }
+                
+                Text("⚠️ DANGER: Force delete goal regardless of dependencies. Projects will lose their strategic goal link. This cannot be undone.")
+                    .font(.caption)
+                    .foregroundColor(.red)
+                    .multilineTextAlignment(.leading)
+            }
+            .padding()
+            .background(Color.red.opacity(0.2))
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.red, lineWidth: 2)
             )
         }
         .buttonStyle(PlainButtonStyle())
