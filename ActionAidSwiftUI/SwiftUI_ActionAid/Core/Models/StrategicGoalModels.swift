@@ -945,4 +945,40 @@ struct ParquetOptions: Codable {
     enum CodingKeys: String, CodingKey {
         case compression, rowGroupSize = "row_group_size", enableStatistics = "enable_statistics"
     }
+}
+
+// MARK: - Document Integration
+
+extension StrategicGoalResponse: DocumentIntegratable, DocumentCountTrackable {
+    var entityId: String {
+        return self.id
+    }
+    
+    var entityTableName: String {
+        return "strategic_goals"
+    }
+    
+    var linkableFields: [(String, String)] {
+        return [
+            ("", "None"),
+            ("outcome", "Outcome"),
+            ("kpi", "KPI"),
+            ("actual_value", "Actual Value"),
+            ("supporting_documentation", "Supporting Documentation"),
+            ("impact_assessment", "Impact Assessment"),
+            ("theory_of_change", "Theory of Change"),
+            ("baseline_data", "Baseline Data")
+        ]
+    }
+    
+    var entityTypeName: String {
+        return "Strategic Goal"
+    }
+}
+
+extension StrategicGoalResponse {
+    /// Convert this StrategicGoalResponse to a DocumentUploadable entity
+    func asDocumentUploadable() -> StrategicGoalDocumentAdapter {
+        return StrategicGoalDocumentAdapter(goal: self)
+    }
 } 
