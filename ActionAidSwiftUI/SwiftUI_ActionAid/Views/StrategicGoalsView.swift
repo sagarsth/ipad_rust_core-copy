@@ -33,13 +33,14 @@ struct StrategicGoalsView: View {
     @State private var lastScrollValue: CGFloat = 0
     @State private var isActionBarCollapsed: Bool = false
     
-    // Selection state for AdaptiveListView
-    @State private var isInSelectionMode = false
-    @State private var selectedItems: Set<String> = []
+    // Selection state using shared SelectionManager
+    @StateObject private var selectionManager = SelectionManager()
     
     // Filter-aware bulk selection state
     @State private var currentFilter = StrategicGoalFilter.all()
-    @State private var isLoadingFilteredIds = false
+    
+    // Export manager for shared export functionality
+    @StateObject private var exportManager = ExportManager(service: StrategicGoalExportService())
     
     // Document tracking
     @State private var goalDocumentCounts: [String: Int] = [:]
@@ -60,10 +61,8 @@ struct StrategicGoalsView: View {
     @State private var bulkDeleteResults: BatchDeleteResult?
     @State private var showBulkDeleteResults = false
     
-    // Export state
+    // Export state - using shared export manager
     @State private var showExportOptions = false
-    @State private var isExporting = false
-    @State private var exportError: String?
     
     // Computed property to determine if we should hide the top section
     private var shouldHideTopSection: Bool {
@@ -140,11 +139,24 @@ struct StrategicGoalsView: View {
             }
         }
         .overlay(
-            // Selection action bar
+            // Selection action bar using shared component
             Group {
-                if isInSelectionMode && !selectedItems.isEmpty && !isActionBarCollapsed {
-                    selectionActionBar
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                if selectionManager.isInSelectionMode && selectionManager.hasSelection && !isActionBarCollapsed {
+                    SelectionActionBar(
+                        selectedCount: selectionManager.selectedCount,
+                        userRole: authManager.currentUser?.role,
+                        isPerformingBulkOperation: isPerformingBulkDelete,
+                        onClearSelection: {
+                            selectionManager.clearSelection()
+                        },
+                        onExport: {
+                            showExportOptions = true
+                        },
+                        onDelete: {
+                            showBulkDeleteOptions = true
+                        }
+                    )
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             },
             alignment: .bottom
@@ -181,8 +193,9 @@ struct StrategicGoalsView: View {
             Text(errorMessage ?? "An error occurred")
         }
         .sheet(isPresented: $showBulkDeleteOptions) {
-            BulkDeleteOptionsSheet(
-                selectedCount: selectedItems.count,
+            EntityDeleteOptionsSheet(
+                config: .strategicGoal(isPlural: true),
+                selectedCount: selectionManager.selectedCount,
                 userRole: authManager.currentUser?.role ?? "",
                 onDelete: { hardDelete, force in
                     performBulkDelete(hardDelete: hardDelete, force: force)
@@ -191,17 +204,19 @@ struct StrategicGoalsView: View {
         }
         .sheet(isPresented: $showBulkDeleteResults) {
             if let results = bulkDeleteResults {
-                BulkDeleteResultsSheet(results: results)
+                DeleteResultsSheet(results: results, entityName: "Strategic Goal", entityNamePlural: "Strategic Goals")
             }
         }
         .sheet(isPresented: $showExportOptions) {
-            ExportOptionsSheet(
-                selectedItemCount: selectedItems.count,
+            GenericExportOptionsSheet(
+                selectedItemCount: selectionManager.selectedCount,
+                entityName: "Strategic Goal",
+                entityNamePlural: "Strategic Goals",
                 onExport: { includeBlobs, format in
                     performExportFromSelection(includeBlobs: includeBlobs, format: format)
                 },
-                isExporting: $isExporting,
-                exportError: $exportError
+                isExporting: $exportManager.isExporting,
+                exportError: $exportManager.exportError
             )
         }
         .onAppear {
@@ -337,8 +352,8 @@ struct StrategicGoalsView: View {
             },
             domainName: "strategic_goals",
             userRole: authManager.currentUser?.role,
-            isInSelectionMode: $isInSelectionMode,
-            selectedItems: $selectedItems,
+            isInSelectionMode: $selectionManager.isInSelectionMode,
+            selectedItems: $selectionManager.selectedItems,
             onFilterBasedSelectAll: {
                 // Trigger backend filter-aware selection
                 Task {
@@ -500,7 +515,7 @@ struct StrategicGoalsView: View {
     
     /// Get filtered goal IDs for bulk selection based on current UI filters (backend filters only)
     private func getFilteredGoalIds() async {
-        guard !isLoadingFilteredIds else { return }
+        guard !selectionManager.isLoadingFilteredIds else { return }
         
         // Update current filter based on UI state (backend filters only - year/month handled by AdaptiveListView)
         currentFilter = createCurrentFilter()
@@ -513,23 +528,18 @@ struct StrategicGoalsView: View {
             await MainActor.run {
                 // Select all currently visible items (respecting AdaptiveListView's year/month filtering)
                 let allVisibleIds = Set(filteredGoals.map(\.id))
-                selectedItems = allVisibleIds
-                
-                // Enter selection mode if not already active
-                if !selectedItems.isEmpty {
-                    isInSelectionMode = true
-                }
+                selectionManager.selectItems(allVisibleIds)
             }
             return
         }
         
         await MainActor.run {
-            isLoadingFilteredIds = true
+            selectionManager.isLoadingFilteredIds = true
         }
         
         guard let currentUser = authManager.currentUser else {
             await MainActor.run {
-                isLoadingFilteredIds = false
+                selectionManager.isLoadingFilteredIds = false
                 errorMessage = "User not authenticated."
                 showErrorAlert = true
             }
@@ -546,18 +556,13 @@ struct StrategicGoalsView: View {
         let result = await ffiHandler.getFilteredIds(filter: currentFilter, auth: authContext)
         
         await MainActor.run {
-            isLoadingFilteredIds = false
+            selectionManager.isLoadingFilteredIds = false
             switch result {
             case .success(let filteredIds):
                 // Only select IDs that are currently visible (intersection with loaded data)
                 let visibleIds = Set(filteredGoals.map(\.id))
                 let filteredVisibleIds = Set(filteredIds).intersection(visibleIds)
-                selectedItems = filteredVisibleIds
-                
-                // If we have selections, enter selection mode
-                if !selectedItems.isEmpty {
-                    isInSelectionMode = true
-                }
+                selectionManager.selectItems(filteredVisibleIds)
             case .failure(let error):
                 errorMessage = "Failed to get filtered IDs: \(error.localizedDescription)"
                 showErrorAlert = true
@@ -574,11 +579,11 @@ struct StrategicGoalsView: View {
         let hasBackendFilters = !searchText.isEmpty || !selectedStatuses.contains("all")
         
         // If in selection mode with backend filters, refresh the selection
-        if isInSelectionMode && hasBackendFilters {
+        if selectionManager.isInSelectionMode && hasBackendFilters {
             Task {
                 await getFilteredGoalIds()
             }
-        } else if !hasBackendFilters && isInSelectionMode {
+        } else if !hasBackendFilters && selectionManager.isInSelectionMode {
             // If no backend filters but still in selection mode, keep current selection
             // (Year/month filtering is handled by AdaptiveListView)
             // Don't clear selection automatically
@@ -1019,85 +1024,14 @@ struct StrategicGoalsView: View {
     }
     
     // MARK: - Selection Action Bar
-    
-    private var selectionActionBar: some View {
-        VStack {
-            Spacer()
-            HStack(spacing: 20) {
-                // Clear selection
-                Button(action: {
-                    withAnimation {
-                        selectedItems.removeAll()
-                        isInSelectionMode = false
-                    }
-                }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
-                        .foregroundColor(.white)
-                        .padding()
-                        .background(Color.gray.opacity(0.8))
-                        .clipShape(Circle())
-                }
-                
-                Spacer()
-                
-                // Export button
-                Button(action: {
-                    showExportOptions = true
-                }) {
-                    Image(systemName: "square.and.arrow.up.fill")
-                        .font(.title2)
-                        .foregroundColor(.white)
-                        .padding()
-                        .background(Color.blue.opacity(0.8))
-                        .clipShape(Circle())
-                }
-                
-                // Selection count indicator
-                Text("\(selectedItems.count)")
-                    .font(.headline)
-                    .fontWeight(.bold)
-                    .foregroundColor(.white)
-                    .frame(minWidth: 30)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.blue.opacity(0.8))
-                    .clipShape(Capsule())
-                
-                // Delete button (only for admins)
-                if authManager.currentUser?.role.lowercased() == "admin" {
-                    Button(action: {
-                        showBulkDeleteOptions = true
-                    }) {
-                        Image(systemName: "trash.fill")
-                            .font(.title2)
-                            .foregroundColor(.white)
-                            .padding()
-                            .background(Color.red.opacity(0.8))
-                            .clipShape(Circle())
-                    }
-                    .disabled(isPerformingBulkDelete)
-                }
-                
-                Spacer()
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
-            .liquidGlassEffect(cornerRadius: 25)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 30)
-        }
-    }
+    // Selection action bar is now using shared SelectionActionBar component
     
     // MARK: - Export Methods
     
     private func performExportFromSelection(includeBlobs: Bool = false, format: ExportFormat = .default) {
-        guard !selectedItems.isEmpty else { return }
+        guard !selectionManager.selectedItems.isEmpty else { return }
         
-        isExporting = true
-        exportError = nil
-        
-        print("🔄 Starting export from selection mode for \(selectedItems.count) items, includeBlobs: \(includeBlobs), format: \(format.displayName)")
+        print("🔄 Starting export from selection mode for \(selectionManager.selectedCount) items, includeBlobs: \(includeBlobs), format: \(format.displayName)")
         
         Task {
             guard let currentUser = authManager.currentUser else {
@@ -1108,158 +1042,35 @@ struct StrategicGoalsView: View {
                 return
             }
             
-            print("✅ User authenticated: \(currentUser.userId)")
+            let selectedIdsArray = Array(selectionManager.selectedItems)
             
-            let authContext = AuthContextPayload(
-                user_id: currentUser.userId,
-                role: currentUser.role,
-                device_id: authManager.getDeviceId(),
-                offline_mode: false
+            await exportManager.exportSelectedItems(
+                ids: selectedIdsArray,
+                includeBlobs: includeBlobs,
+                format: format,
+                authToken: currentUser.token,
+                onClearSelection: {
+                    // This will be called by the export manager when export completes
+                    self.selectionManager.clearSelection()
+                    self.showExportOptions = false
+                },
+                onCompletion: { success in
+                    // Handle completion if needed
+                    if !success {
+                        print("❌ Export completed with errors")
+                    }
+                }
             )
-            
-            // Create export directory in Documents (Files app accessible)
-            do {
-                let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-                let exportFolderURL = documentsURL.appendingPathComponent("ActionAid_Exports")
-                
-                // Create directory if it doesn't exist
-                try FileManager.default.createDirectory(at: exportFolderURL, withIntermediateDirectories: true)
-                
-                // Create timestamped export file
-                let timestampFormatter = DateFormatter()
-                timestampFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-                let timestamp = timestampFormatter.string(from: Date())
-                
-                let exportFileName = "strategic_goals_selected_\(timestamp).\(format.fileExtension)"
-                let targetPath = exportFolderURL.appendingPathComponent(exportFileName).path
-                
-                print("📁 Export target path: \(targetPath)")
-                
-                // Export specific selected items using IDs
-                let selectedIdsArray = Array(selectedItems)
-                print("📋 Exporting selected IDs: \(selectedIdsArray)")
-                
-                let service = StrategicGoalService.shared
-                
-                let token = currentUser.token
-                guard !token.isEmpty else {
-                    await MainActor.run {
-                        self.exportError = "Authentication token not available"
-                        self.isExporting = false
-                    }
-                    return
-                }
-                
-                print("🚀 Calling export by IDs service with format: \(format.displayName)...")
-                let exportResponse = try await service.exportStrategicGoalsByIds(
-                    ids: selectedIdsArray,
-                    includeBlobs: includeBlobs,
-                    format: format,
-                    targetPath: targetPath,
-                    token: token
-                )
-                
-                print("✅ Export job created: \(exportResponse.job.status)")
-                print("📊 Export job ID: \(exportResponse.job.id)")
-                
-                // Check if export completed immediately or needs polling
-                if exportResponse.job.status == "Completed" {
-                    print("🎉 Export completed immediately")
-                    await MainActor.run {
-                        self.showExportCompletion(exportResponse: exportResponse, targetPath: targetPath)
-                    }
-                } else {
-                    print("⏳ Export in progress, starting polling...")
-                    // Poll for completion
-                    await self.pollExportCompletion(jobId: exportResponse.job.id, targetPath: targetPath)
-                }
-                
-            } catch {
-                print("❌ Export failed: \(error)")
-                await MainActor.run {
-                    self.exportError = "Export failed: \(error.localizedDescription)"
-                    self.isExporting = false
-                }
-            }
         }
     }
     
     // MARK: - Export Helper Methods
-    
-    private func pollExportCompletion(jobId: String, targetPath: String) async {
-        let maxAttempts = 30 // 30 seconds max
-        var attempts = 0
-        
-        while attempts < maxAttempts {
-            do {
-                attempts += 1
-                let statusResponse = try await StrategicGoalService.shared.getExportStatus(jobId: jobId)
-                
-                print("📊 Export status poll \(attempts): \(statusResponse.job.status)")
-                
-                if statusResponse.job.status == "Completed" {
-                    print("🎉 Export completed after \(attempts) polls")
-                    await MainActor.run {
-                        self.showExportCompletion(exportResponse: statusResponse, targetPath: targetPath)
-                    }
-                    break
-                } else if statusResponse.job.status == "Failed" {
-                    print("❌ Export failed: \(statusResponse.job.errorMessage ?? "Unknown error")")
-                    await MainActor.run {
-                        self.exportError = statusResponse.job.errorMessage ?? "Export failed"
-                        self.isExporting = false
-                    }
-                    break
-                }
-                
-                // Wait 1 second before next poll
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                
-            } catch {
-                print("❌ Error polling export status: \(error)")
-                await MainActor.run {
-                    self.exportError = "Failed to check export status: \(error.localizedDescription)"
-                    self.isExporting = false
-                }
-                break
-            }
-        }
-        
-        if attempts >= maxAttempts {
-            print("⏰ Export polling timed out")
-            await MainActor.run {
-                self.exportError = "Export timed out - please check Files app later"
-                self.isExporting = false
-            }
-        }
-    }
-    
-    private func showExportCompletion(exportResponse: ExportJobResponse, targetPath: String) {
-        // Clear selection and export state
-        self.selectedItems.removeAll()
-        self.isInSelectionMode = false
-        self.isExporting = false
-        self.showExportOptions = false
-        
-        // Show success message
-        let entityCount = exportResponse.job.totalEntities ?? 0
-        print("🎉 Export successful: \(entityCount) records exported to \(targetPath)")
-        
-        if entityCount > 0 {
-            // Open Files app to the export location
-            if let url = URL(string: "shareddocuments://") {
-                UIApplication.shared.open(url)
-            }
-        } else {
-            // Show error if no records were exported
-            self.exportError = "No records were exported. The selected items may not exist or be accessible."
-        }
-    }
+    // Export functionality is now handled by ExportManager
     
     // MARK: - Bulk Delete Methods
     
     private func performBulkDelete(hardDelete: Bool, force: Bool = false) {
-        guard !selectedItems.isEmpty else { return }
+        guard !selectionManager.selectedItems.isEmpty else { return }
         
         isPerformingBulkDelete = true
         
@@ -1280,7 +1091,7 @@ struct StrategicGoalsView: View {
                 offline_mode: false
             )
             
-            let selectedIds = Array(selectedItems)
+            let selectedIds = Array(selectionManager.selectedItems)
             print("🗑️ [BULK_DELETE] Starting bulk delete for \(selectedIds.count) strategic goals")
             print("🗑️ [BULK_DELETE] Hard delete: \(hardDelete), Force: \(force)")
             
@@ -1304,9 +1115,8 @@ struct StrategicGoalsView: View {
                     // Store results for display
                     self.bulkDeleteResults = batchResult
                     
-                    // Clear selection and refresh data
-                    self.selectedItems.removeAll()
-                    self.isInSelectionMode = false
+                    // Clear selection and refresh data using shared manager
+                    self.selectionManager.clearSelection()
                     
                     // Refresh the goals list to reflect changes
                     loadGoals()
@@ -2688,251 +2498,9 @@ struct GoalDeleteOptionsSheet: View {
     }
 }
 
-// MARK: - Bulk Delete Options Sheet
-struct BulkDeleteOptionsSheet: View {
-    let selectedCount: Int
-    let userRole: String
-    let onDelete: (Bool, Bool) -> Void
-    @Environment(\.dismiss) var dismiss
-    
-    var body: some View {
-        NavigationView {
-            VStack(spacing: 20) {
-                Text("Delete \(selectedCount) strategic goals?")
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
-                    .padding(.top)
-                
-                VStack(spacing: 16) {
-                    archiveButton
-                    if userRole.lowercased() == "admin" {
-                        deleteButton
-                        forceDeleteButton
-                    }
-                }
-                .padding(.horizontal)
-                
-                Spacer()
-            }
-            .navigationTitle("Bulk Delete")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-    
-    private var archiveButton: some View {
-        Button(action: {
-            onDelete(false, false)
-            dismiss()
-        }) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "archivebox")
-                        .foregroundColor(.orange)
-                        .font(.title2)
-                    Text("Archive Goals")
-                        .font(.headline)
-                        .foregroundColor(.primary)
-                    Spacer()
-                }
-                
-                Text("Move goals to archive. They can be restored later. Documents will be preserved. Projects will remain linked.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.leading)
-            }
-            .padding()
-            .background(Color(.systemGray6))
-            .cornerRadius(12)
-        }
-        .buttonStyle(PlainButtonStyle())
-    }
-    
-    private var deleteButton: some View {
-        Button(action: {
-            onDelete(true, false)
-            dismiss()
-        }) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "trash.fill")
-                        .foregroundColor(.red)
-                        .font(.title2)
-                    Text("Delete Goals")
-                        .font(.headline)
-                        .foregroundColor(.red)
-                    Spacer()
-                }
-                
-                Text("Permanently delete goals if no dependencies exist. Goals with projects will be archived instead.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.leading)
-            }
-            .padding()
-            .background(Color.red.opacity(0.1))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.red.opacity(0.3), lineWidth: 1)
-            )
-        }
-        .buttonStyle(PlainButtonStyle())
-    }
-    
-    private var forceDeleteButton: some View {
-        Button(action: {
-            onDelete(true, true)
-            dismiss()
-        }) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.red)
-                        .font(.title2)
-                    Text("Force Delete")
-                        .font(.headline)
-                        .foregroundColor(.red)
-                    Spacer()
-                }
-                
-                Text("⚠️ DANGER: Force delete all goals regardless of dependencies. Projects will lose their strategic goal link. This cannot be undone.")
-                    .font(.caption)
-                    .foregroundColor(.red)
-                    .multilineTextAlignment(.leading)
-            }
-            .padding()
-            .background(Color.red.opacity(0.2))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.red, lineWidth: 2)
-            )
-        }
-        .buttonStyle(PlainButtonStyle())
-    }
-}
+// MARK: - Removed: BulkDeleteOptionsSheet (now using shared EntityDeleteOptionsSheet)
 
-// MARK: - Bulk Delete Results Sheet
-struct BulkDeleteResultsSheet: View {
-    let results: BatchDeleteResult
-    @Environment(\.dismiss) var dismiss
-    
-    var body: some View {
-        NavigationView {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // Summary
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Bulk Delete Summary")
-                            .font(.headline)
-                        
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("✅ Hard Deleted")
-                                    .font(.caption)
-                                    .foregroundColor(.green)
-                                Text("\(results.hardDeleted.count)")
-                                    .font(.title2)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.green)
-                            }
-                            
-                            Spacer()
-                            
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("📦 Archived")
-                                    .font(.caption)
-                                    .foregroundColor(.orange)
-                                Text("\(results.softDeleted.count)")
-                                    .font(.title2)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.orange)
-                            }
-                            
-                            Spacer()
-                            
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("❌ Failed")
-                                    .font(.caption)
-                                    .foregroundColor(.red)
-                                Text("\(results.failed.count)")
-                                    .font(.title2)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.red)
-                            }
-                        }
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
-                    
-                    // Failed items with dependencies
-                    if !results.failed.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Failed Deletions")
-                                .font(.headline)
-                            
-                            ForEach(results.failed, id: \.self) { failedId in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Goal ID: \(failedId)")
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-                                    
-                                    if let deps = results.dependencies[failedId], !deps.isEmpty {
-                                        Text("Dependencies: \(deps.joined(separator: ", "))")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    
-                                    if let error = results.errors[failedId] {
-                                        Text("Error: \(error)")
-                                            .font(.caption)
-                                            .foregroundColor(.red)
-                                    }
-                                }
-                                .padding()
-                                .background(Color.red.opacity(0.1))
-                                .cornerRadius(8)
-                            }
-                        }
-                    }
-                    
-                    // Dependencies information
-                    if !results.dependencies.isEmpty {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("Dependencies Detected")
-                                .font(.headline)
-                            
-                            Text("Some goals could not be hard deleted due to dependencies. They were archived instead to preserve data integrity.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .padding()
-                        .background(Color.orange.opacity(0.1))
-                        .cornerRadius(12)
-                    }
-                }
-                .padding()
-            }
-            .navigationTitle("Delete Results")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Done") {
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-}
+// MARK: - Removed: BulkDeleteResultsSheet (now using shared DeleteResultsSheet)
 
 // MARK: - Removed: QuickLook Support (now in DocumentManagement/Components/QuickLookView.swift)
 
