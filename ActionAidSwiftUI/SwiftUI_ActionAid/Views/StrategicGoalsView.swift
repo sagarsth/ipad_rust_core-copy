@@ -156,7 +156,7 @@ struct StrategicGoalsView: View {
                             showBulkDeleteOptions = true
                         }
                     )
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             },
             alignment: .bottom
@@ -326,8 +326,8 @@ struct StrategicGoalsView: View {
             title: "No goals found",
             actionTitle: showClearButton ? "Clear Filters" : nil,
             action: showClearButton ? {
-                searchText = ""
-                selectedStatuses = ["all"]
+                    searchText = ""
+                    selectedStatuses = ["all"]
             } : nil
         )
     }
@@ -1045,9 +1045,9 @@ struct StrategicGoalsView: View {
             let selectedIdsArray = Array(selectionManager.selectedItems)
             
             await exportManager.exportSelectedItems(
-                ids: selectedIdsArray,
-                includeBlobs: includeBlobs,
-                format: format,
+                    ids: selectedIdsArray,
+                    includeBlobs: includeBlobs,
+                    format: format,
                 authToken: currentUser.token,
                 onClearSelection: {
                     // This will be called by the export manager when export completes
@@ -1877,10 +1877,10 @@ struct GoalDetailView: View {
                     entity: goal.asDocumentUploadable(),
                     config: .standard,
                     onUploadComplete: {
-                        loadDocuments()
-                        startDocumentRefreshTimer()
-                        // FIXED: Immediately update main view document counts after upload
-                        onUpdate()
+                    loadDocuments()
+                    startDocumentRefreshTimer()
+                    // FIXED: Immediately update main view document counts after upload
+                    onUpdate()
                     }
                 )
             }

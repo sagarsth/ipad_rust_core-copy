@@ -31,6 +31,11 @@ use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
 use crate::domains::core::delete_service::PendingDeletionManager;
 
+// ADDED: Import additional repositories for enrichment
+use crate::domains::user::repository::UserRepository;
+use crate::domains::activity::repository::ActivityRepository;
+use crate::domains::workshop::repository::WorkshopRepository;
+
 /// Trait defining project service operations
 #[async_trait]
 pub trait ProjectService: DeleteService<Project> + Send + Sync {
@@ -173,6 +178,56 @@ pub trait ProjectService: DeleteService<Project> + Send + Sync {
         include: Option<&[ProjectInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<ProjectResponse>>;
+
+    /// ADDED: Gets a list of project IDs based on complex filter criteria.
+    /// This is ideal for UI bulk operations (selection, export, etc.).
+    /// Follows the same pattern as StrategicGoalService::get_filtered_goal_ids.
+    async fn get_filtered_project_ids(
+        &self,
+        filter: crate::domains::project::types::ProjectFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>>;
+
+    // --- ADDED: Advanced Dashboard Aggregations ---
+    
+    /// Get team workload distribution - count of projects by responsible team
+    /// Perfect for dashboard widgets showing team capacity and workload
+    async fn get_team_workload_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+    
+    /// Get projects by strategic goal distribution - count of projects grouped by parent strategic goal
+    /// Ideal for showing strategic goal progress and project allocation
+    async fn get_projects_by_strategic_goal_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+    
+    /// Find stale projects that haven't been updated since a specific date
+    /// Useful for project management dashboards to identify projects needing attention
+    async fn find_stale_projects(
+        &self,
+        days_stale: u32,
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>>;
+    
+    /// Get document coverage analysis - projects with/without documents, document counts
+    /// Perfect for compliance and documentation tracking dashboards
+    async fn get_document_coverage_analysis(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<crate::domains::project::types::DocumentCoverageAnalysis>;
+    
+    /// Get project activity timeline - projects with recent activity vs inactive
+    /// Useful for project health monitoring dashboards
+    async fn get_project_activity_timeline(
+        &self,
+        days_active: u32,
+        auth: &AuthContext,
+    ) -> ServiceResult<crate::domains::project::types::ProjectActivityTimeline>;
 }
 
 /// Implementation of the project service
@@ -184,6 +239,10 @@ pub struct ProjectServiceImpl {
     strategic_goal_repo: Arc<dyn StrategicGoalRepository + Send + Sync>,
     delete_service: Arc<BaseDeleteService<Project>>,
     document_service: Arc<dyn DocumentService>,
+    // ADDED: Additional repositories for enrichment
+    user_repo: Arc<dyn UserRepository + Send + Sync>,
+    activity_repo: Arc<dyn ActivityRepository + Send + Sync>,
+    workshop_repo: Arc<dyn WorkshopRepository + Send + Sync>,
 }
 
 impl ProjectServiceImpl {
@@ -198,6 +257,10 @@ impl ProjectServiceImpl {
         media_doc_repo: Arc<dyn MediaDocumentRepository>, // Still needed for BaseDeleteService
         document_service: Arc<dyn DocumentService>,
         deletion_manager: Arc<PendingDeletionManager>,
+        // ADDED: Additional repositories for enrichment
+        user_repo: Arc<dyn UserRepository + Send + Sync>,
+        activity_repo: Arc<dyn ActivityRepository + Send + Sync>,
+        workshop_repo: Arc<dyn WorkshopRepository + Send + Sync>,
     ) -> Self {
         // --- Adapter setup remains the same ---
         struct RepoAdapter(Arc<dyn ProjectRepository + Send + Sync>);
@@ -262,6 +325,10 @@ impl ProjectServiceImpl {
             strategic_goal_repo,
             delete_service,
             document_service,
+            // ADDED: Additional repositories for enrichment
+            user_repo,
+            activity_repo,
+            workshop_repo,
         }
     }
 
@@ -294,11 +361,66 @@ impl ProjectServiceImpl {
             }
              // --- END PRESERVED Document Enrichment ---
 
-            // TODO: Add enrichment logic for other includes like StrategicGoal, Status, CreatedBy, Counts
-            let _include_strategic_goal = includes.contains(&ProjectInclude::All) || includes.contains(&ProjectInclude::StrategicGoal);
-            // if _include_strategic_goal && response.strategic_goal.is_none() { ... fetch strategic goal ... }
+            // ADDED: Username Enrichment - resolve user IDs to usernames
+            let include_usernames = includes.contains(&ProjectInclude::All) || includes.contains(&ProjectInclude::CreatedBy);
+            if include_usernames {
+                // Resolve created_by_user_id to username
+                if let Some(created_by_id) = response.created_by_user_id {
+                    if let Ok(user) = self.user_repo.find_by_id(created_by_id).await {
+                        response.created_by_username = Some(user.name.clone());
+                    }
+                }
+                // Resolve updated_by_user_id to username
+                if let Some(updated_by_id) = response.updated_by_user_id {
+                    if let Ok(user) = self.user_repo.find_by_id(updated_by_id).await {
+                        response.updated_by_username = Some(user.name.clone());
+                    }
+                }
+            }
+
+            // ADDED: Count-based Enrichment - pre-compute related entity counts
+            let include_counts = includes.contains(&ProjectInclude::All) || includes.contains(&ProjectInclude::Counts);
+            if include_counts {
+                // Count activities for this project
+                match self.activity_repo.find_by_project_id(response.id, PaginationParams::default()).await {
+                    Ok(activities_result) => {
+                        response.activity_count = Some(activities_result.total as i64);
+                    }
+                    Err(_) => {
+                        // If there's an error, set count to 0 rather than failing enrichment
+                        response.activity_count = Some(0);
+                    }
+                }
+
+                // Count workshops for this project
+                match self.workshop_repo.find_by_project_id(response.id, PaginationParams::default()).await {
+                    Ok(workshops_result) => {
+                        response.workshop_count = Some(workshops_result.total as i64);
+                    }
+                    Err(_) => {
+                        // If there's an error, set count to 0 rather than failing enrichment
+                        response.workshop_count = Some(0);
+                    }
+                }
+            }
+
+            // ADDED: Strategic Goal Enrichment
+            let include_strategic_goal = includes.contains(&ProjectInclude::All) || includes.contains(&ProjectInclude::StrategicGoal);
+            if include_strategic_goal && response.strategic_goal.is_none() {
+                                 if let Some(sg_id) = response.strategic_goal_id {
+                     if let Ok(strategic_goal) = self.strategic_goal_repo.find_by_id(sg_id).await {
+                         response.strategic_goal = Some(crate::domains::project::types::StrategicGoalSummary {
+                             id: strategic_goal.id,
+                             objective_code: strategic_goal.objective_code,
+                             outcome: strategic_goal.outcome,
+                         });
+                     }
+                 }
+            }
+
+            // TODO: Add status enrichment when status repository is available
+            // let include_status = includes.contains(&ProjectInclude::All) || includes.contains(&ProjectInclude::Status);
             // if include_status && response.status.is_none() { ... fetch status ... }
-            // ... etc ...
         }
         Ok(response)
     }
@@ -321,14 +443,15 @@ impl ProjectServiceImpl {
         }
     }
 
-    // ADDED: Helper method copied from StrategicGoalService
+    // ENHANCED: Helper method with auto-detection (copied from StrategicGoalService and enhanced)
     /// Helper method to upload documents for any entity and handle errors individually
+    /// UPDATED: Now uses smart auto-detection instead of provided document_type_id
     async fn upload_documents_for_entity(
         &self,
         entity_id: Uuid,
         entity_type: &str,
         documents: Vec<(Vec<u8>, String, Option<String>)>,
-        document_type_id: Uuid,
+        document_type_id: Uuid, // UPDATED: Still in signature for compatibility, but ignored
         sync_priority: SyncPriority,
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
@@ -336,13 +459,46 @@ impl ProjectServiceImpl {
         let mut results = Vec::new();
 
         for (file_data, filename, linked_field) in documents {
-            // Use the injected document_service
+            // ENHANCED: Auto-detect document type from file extension
+            let extension = filename.split('.').last().unwrap_or("").to_lowercase();
+            
+            let document_type_name = match crate::domains::document::initialization::get_document_type_for_extension(&extension) {
+                Some(type_name) => type_name,
+                None => {
+                    // Store error result and continue with other files
+                    results.push(Err(ServiceError::Domain(
+                        DomainError::Validation(ValidationError::custom(&format!(
+                            "Unsupported file type: .{}", extension
+                        )))
+                    )));
+                    continue;
+                }
+            };
+            
+            // Get document type ID by name
+            let auto_detected_document_type = match self.document_service.get_document_type_by_name(document_type_name).await {
+                Ok(Some(doc_type)) => doc_type,
+                Ok(None) => {
+                    results.push(Err(ServiceError::Domain(
+                        DomainError::Validation(ValidationError::custom(&format!(
+                            "Document type '{}' not found in database", document_type_name
+                        )))
+                    )));
+                    continue;
+                }
+                Err(e) => {
+                    results.push(Err(e));
+                    continue;
+                }
+            };
+
+            // Upload with auto-detected document type
             let upload_result = self.document_service.upload_document(
                 auth,
                 file_data,
                 filename,
                 None, // No title, will use filename as default
-                document_type_id,
+                auto_detected_document_type.id, // Use auto-detected type instead of provided one
                 entity_id,
                 entity_type.to_string(),
                 linked_field,
@@ -575,7 +731,7 @@ impl ProjectService for ProjectServiceImpl {
         file_data: Vec<u8>,
         original_filename: String,
         title: Option<String>,
-        document_type_id: Uuid,
+        document_type_id: Uuid, // UPDATED: Still in signature for FFI compatibility, but will be ignored in favor of auto-detection
         linked_field: Option<String>,
         sync_priority: SyncPriority,
         compression_priority: Option<CompressionPriority>,
@@ -606,13 +762,40 @@ impl ProjectService for ProjectServiceImpl {
             }
         }
 
-        // 4. Delegate to document service, passing linked_field
+        // 4. ENHANCED: Auto-detect document type from file extension (same as strategic_goal)
+        let extension = original_filename.split('.').last().unwrap_or("").to_lowercase();
+        
+        let document_type_name = match crate::domains::document::initialization::get_document_type_for_extension(&extension) {
+            Some(type_name) => type_name,
+            None => {
+                return Err(ServiceError::Domain(
+                    DomainError::Validation(ValidationError::custom(&format!(
+                        "Unsupported file type: .{}", extension
+                    )))
+                ));
+            }
+        };
+        
+        // Get document type ID by name
+        let auto_detected_document_type = match self.document_service.get_document_type_by_name(document_type_name).await {
+            Ok(Some(doc_type)) => doc_type,
+            Ok(None) => {
+                return Err(ServiceError::Domain(
+                    DomainError::Validation(ValidationError::custom(&format!(
+                        "Document type '{}' not found in database", document_type_name
+                    )))
+                ));
+            }
+            Err(e) => return Err(e),
+        };
+
+        // 5. Delegate to document service with auto-detected type
         let document = self.document_service.upload_document(
             auth,
             file_data,
             original_filename,
             title,
-            document_type_id,
+            auto_detected_document_type.id, // Use auto-detected type instead of provided one
             project_id,
             "projects".to_string(), // Correct entity type
             linked_field.clone(), // Pass the validated field name
@@ -620,23 +803,6 @@ impl ProjectService for ProjectServiceImpl {
             compression_priority,
             None, // No temp ID for direct uploads
         ).await?;
-
-        // 5. --- NEW: Update entity reference if it was a document-only field ---
-        // REMOVED INCORRECT BLOCK: The document service already handles the linked_field correctly
-        // by storing it in media_documents.field_identifier. No direct update to the
-        // project table is needed or possible according to the schema.
-        // if let Some(field_name) = linked_field {
-        //     if let Some(metadata) = Project::get_field_metadata(&field_name) {
-        //         if metadata.is_document_reference_only {
-        //             self.repo.set_document_reference(
-        //                 project_id,
-        //                 &field_name, // e.g., "proposal_document"
-        //                 document.id, // The ID of the newly created MediaDocument
-        //                 auth
-        //             ).await?;
-        //         }
-        //     }
-        // }
 
         Ok(document)
     }
@@ -646,32 +812,77 @@ impl ProjectService for ProjectServiceImpl {
         project_id: Uuid,
         files: Vec<(Vec<u8>, String)>,
         title: Option<String>,
-        document_type_id: Uuid,
+        document_type_id: Uuid, // UPDATED: Still in signature for FFI compatibility, but will be ignored in favor of auto-detection
         sync_priority: SyncPriority,
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
     ) -> ServiceResult<Vec<MediaDocumentResponse>> {
-        auth.authorize(Permission::UploadDocuments)?;
+        // 1. Verify project exists
+        let _project = self.repo.find_by_id(project_id).await
+            .map_err(ServiceError::Domain)?;
 
-        let _project = self.repo.find_by_id(project_id).await.map_err(ServiceError::Domain)?;
+        // 2. Check permissions
+        if !auth.has_permission(Permission::UploadDocuments) {
+            return Err(ServiceError::PermissionDenied(
+                "User does not have permission to upload documents".to_string(),
+            ));
+        }
 
+        // 3. ENHANCED: Process each file with auto-detected document type
         let mut results = Vec::new();
-        for (file_data, original_filename) in files {
-            let result = self.document_service.upload_document(
+        
+        for (file_data, filename) in files {
+            // Extract file extension
+            let extension = filename.split('.').last().unwrap_or("").to_lowercase();
+            
+            // Auto-detect document type using existing initialization logic
+            let document_type_name = match crate::domains::document::initialization::get_document_type_for_extension(&extension) {
+                Some(type_name) => type_name,
+                None => {
+                    // Handle unsupported extension - add as error result but continue with others
+                    log::warn!("Skipping file '{}' with unsupported extension: .{}", filename, extension);
+                    continue; // Skip this file, continue with others
+                }
+            };
+            
+            // Get document type ID by name
+            let document_type = match self.document_service.get_document_type_by_name(document_type_name).await {
+                Ok(Some(doc_type)) => doc_type,
+                Ok(None) => {
+                    log::warn!("Skipping file '{}': Document type '{}' not found in database", filename, document_type_name);
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("Skipping file '{}': Error fetching document type: {}", filename, e);
+                    continue;
+                }
+            };
+
+            // Upload individual document with auto-detected type
+            let upload_result = self.document_service.upload_document(
                 auth,
                 file_data,
-                original_filename,
+                filename.clone(),
                 title.clone(),
-                document_type_id,
+                document_type.id,
                 project_id,
                 "projects".to_string(),
-                None, // No specific linked field for bulk uploads
+                None, // No specific field linking for bulk uploads
                 sync_priority,
                 compression_priority,
-                None, // No transaction needed here, handled by document service
-            ).await?;
-            results.push(result);
+                None,
+            ).await;
+            
+            match upload_result {
+                Ok(document) => results.push(document),
+                Err(e) => {
+                    log::warn!("Failed to upload file '{}': {}", filename, e);
+                    // Continue with other files rather than failing the entire batch
+                }
+            }
         }
+
+        // Return successful uploads (allowing partial success)
         Ok(results)
     }
 
@@ -936,5 +1147,244 @@ impl ProjectService for ProjectServiceImpl {
             paginated_result.total,
             params,
         ))
+    }
+
+    /// ADDED: Gets a list of project IDs based on complex filter criteria.
+    /// Follows the same pattern as StrategicGoalService::get_filtered_goal_ids.
+    async fn get_filtered_project_ids(
+        &self,
+        filter: crate::domains::project::types::ProjectFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Use repository filter method to get matching IDs
+        let ids = self.repo
+            .find_ids_by_filter(filter)
+            .await
+            .map_err(ServiceError::Domain)?;
+
+        Ok(ids)
+    }
+
+    // --- ADDED: Advanced Dashboard Aggregations Implementation ---
+    
+    /// Get team workload distribution - count of projects by responsible team
+    /// Perfect for dashboard widgets showing team capacity and workload
+    async fn get_team_workload_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Get team counts from repository
+        let team_counts = self.repo.count_by_responsible_team().await
+            .map_err(ServiceError::Domain)?;
+        
+        // 3. Convert to HashMap with proper team names
+        let mut distribution = HashMap::new();
+        for (team_name, count) in team_counts {
+            let display_name = team_name.unwrap_or_else(|| "No Team Assigned".to_string());
+            distribution.insert(display_name, count);
+        }
+        
+        Ok(distribution)
+    }
+    
+    /// Get projects by strategic goal distribution - count of projects grouped by parent strategic goal
+    /// Ideal for showing strategic goal progress and project allocation
+    async fn get_projects_by_strategic_goal_distribution(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Get strategic goal counts from repository
+        let sg_counts = self.repo.count_by_strategic_goal().await
+            .map_err(ServiceError::Domain)?;
+        
+        // 3. Convert to HashMap with strategic goal names
+        let mut distribution = HashMap::new();
+        for (sg_id, count) in sg_counts {
+            let display_name = match sg_id {
+                Some(id) => {
+                    // Try to get the strategic goal name
+                    match self.strategic_goal_repo.find_by_id(id).await {
+                        Ok(goal) => goal.objective_code.clone(),
+                        Err(_) => format!("Strategic Goal {}", id),
+                    }
+                }
+                None => "No Strategic Goal".to_string(),
+            };
+            distribution.insert(display_name, count);
+        }
+        
+        Ok(distribution)
+    }
+    
+    /// Find stale projects that haven't been updated since a specific date
+    /// Useful for project management dashboards to identify projects needing attention
+    async fn find_stale_projects(
+        &self,
+        days_stale: u32,
+        params: PaginationParams,
+        include: Option<&[ProjectInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ProjectResponse>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Calculate cutoff date
+        let cutoff_date = Utc::now() - chrono::Duration::days(days_stale as i64);
+        
+        // 3. Find stale projects using date range method
+        let start_date = DateTime::from_timestamp(0, 0).unwrap_or_else(|| Utc::now());
+        let paginated_result = self.repo.find_by_date_range(start_date, cutoff_date, params).await
+            .map_err(ServiceError::Domain)?;
+            
+        // 4. Convert and enrich each project
+        let mut enriched_items = Vec::new();
+        for project in paginated_result.items {
+            let response = ProjectResponse::from_project(project);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+
+        // 5. Return paginated result
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+    
+    /// Get document coverage analysis - projects with/without documents, document counts
+    /// Perfect for compliance and documentation tracking dashboards
+    async fn get_document_coverage_analysis(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<crate::domains::project::types::DocumentCoverageAnalysis> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+        auth.authorize(Permission::ViewDocuments)?;
+
+        // 2. Get total project count
+        let total_projects = self.repo.find_all(PaginationParams { page: 1, per_page: 1 }).await
+            .map_err(ServiceError::Domain)?
+            .total as i64;
+
+        // 3. Get document counts by entity type
+        let mut projects_with_documents = 0i64;
+        let mut total_documents = 0i64;
+        let mut document_count_by_type = HashMap::new();
+        
+        // This is a simplified implementation - in a real system, you'd want to optimize this
+        // with a dedicated repository method that joins projects and documents
+        let all_projects = self.repo.find_all(PaginationParams { page: 1, per_page: 1000 }).await
+            .map_err(ServiceError::Domain)?;
+            
+        for project in all_projects.items {
+            // Check if project has documents
+            let docs_result = self.document_service.list_media_documents_by_related_entity(
+                auth,
+                "projects",
+                project.id,
+                PaginationParams { page: 1, per_page: 100 },
+                None,
+            ).await;
+            
+            if let Ok(docs) = docs_result {
+                if !docs.items.is_empty() {
+                    projects_with_documents += 1;
+                    total_documents += docs.items.len() as i64;
+                    
+                    // Count documents by type
+                    for doc in docs.items {
+                        if let Some(doc_type) = &doc.type_name {
+                            *document_count_by_type.entry(doc_type.clone()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Calculate metrics
+        let projects_without_documents = total_projects - projects_with_documents;
+        let coverage_percentage = if total_projects > 0 {
+            (projects_with_documents as f64 / total_projects as f64) * 100.0
+        } else {
+            0.0
+        };
+        let average_documents_per_project = if total_projects > 0 {
+            total_documents as f64 / total_projects as f64
+        } else {
+            0.0
+        };
+
+        // 5. Return analysis
+        Ok(crate::domains::project::types::DocumentCoverageAnalysis {
+            projects_with_documents,
+            projects_without_documents,
+            total_projects,
+            average_documents_per_project,
+            coverage_percentage,
+            document_count_by_type,
+        })
+    }
+    
+    /// Get project activity timeline - projects with recent activity vs inactive
+    /// Useful for project health monitoring dashboards
+    async fn get_project_activity_timeline(
+        &self,
+        days_active: u32,
+        auth: &AuthContext,
+    ) -> ServiceResult<crate::domains::project::types::ProjectActivityTimeline> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewProjects)?;
+
+        // 2. Calculate date thresholds
+        let active_cutoff = Utc::now() - chrono::Duration::days(days_active as i64);
+        let stale_cutoff = Utc::now() - chrono::Duration::days((days_active * 2) as i64);
+        
+        // 3. Get total project count
+        let total_projects = self.repo.find_all(PaginationParams { page: 1, per_page: 1 }).await
+            .map_err(ServiceError::Domain)?
+            .total as i64;
+
+        // 4. Get recently updated projects (active)
+        let recently_updated = self.repo.find_by_date_range(active_cutoff, Utc::now(), PaginationParams { page: 1, per_page: 1 }).await
+            .map_err(ServiceError::Domain)?
+            .total as i64;
+
+        // 5. Get stale projects (very old)
+        let stale_projects = self.repo.find_by_date_range(
+            DateTime::from_timestamp(0, 0).unwrap_or_else(|| Utc::now()), 
+            stale_cutoff, 
+            PaginationParams { page: 1, per_page: 1 }
+        ).await
+            .map_err(ServiceError::Domain)?
+            .total as i64;
+
+        // 6. Calculate metrics
+        let active_projects = recently_updated;
+        let inactive_projects = total_projects - active_projects;
+        let activity_percentage = if total_projects > 0 {
+            (active_projects as f64 / total_projects as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // 7. Return timeline analysis
+        Ok(crate::domains::project::types::ProjectActivityTimeline {
+            active_projects,
+            inactive_projects,
+            total_projects,
+            activity_percentage,
+            stale_projects,
+            recently_updated_projects: recently_updated,
+        })
     }
 }

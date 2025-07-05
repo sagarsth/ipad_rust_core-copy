@@ -10,6 +10,10 @@ use std::collections::{HashSet, HashMap};
 use std::str::FromStr;
 use crate::domains::sync::types::SyncPriority as SyncPriorityFromSyncDomain;
 
+// --- ADDED: Response Types for Dashboard Aggregations ---
+
+
+
 /// Project entity - represents a project in the system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
@@ -322,6 +326,7 @@ pub enum ProjectInclude {
     DocumentReferences,  // Include document reference fields
     ActivityTimeline,    // Include recent activities
     StatusDetails,       // Include detailed status information
+    Counts,              // ADDED: Include all count-based enrichment (activity_count, workshop_count, etc.)
     All,                 // Already existing
 }
 
@@ -337,16 +342,33 @@ pub struct ProjectResponse {
     pub status: Option<StatusInfo>,  // Populated when status details are fetched
     pub timeline: Option<String>,
     pub responsible_team: Option<String>,
+    // --- ADDED: Strategic goal ID for enrichment logic ---
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategic_goal_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub strategic_goal: Option<StrategicGoalSummary>, // Optional fetched relation
     pub created_at: String,
     pub updated_at: String,
+    // --- ADDED: User ID fields following strategic_goal pattern ---
+    pub created_by_user_id: Option<Uuid>,
+    pub updated_by_user_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>, // Username, fetched from users table
+    // --- ADDED: Updated by username for enrichment ---
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by_username: Option<String>,
+    // --- ADDED: Strategic goal name for enrichment ---
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategic_goal_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity_count: Option<i64>, // Count of related activities
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workshop_count: Option<i64>, // Count of related workshops
+    // --- ADDED: Document count for enrichment ---
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_count: Option<i64>,
     pub sync_priority: SyncPriorityFromSyncDomain,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Vec<MediaDocumentResponse>>,
@@ -364,12 +386,22 @@ impl ProjectResponse {
             status: None,
             timeline: project.timeline.clone(),
             responsible_team: project.responsible_team.clone(),
+            // --- ADDED: Include strategic goal ID from entity ---
+            strategic_goal_id: project.strategic_goal_id,
             strategic_goal: None,
             created_at: project.created_at.to_rfc3339(),
             updated_at: project.updated_at.to_rfc3339(),
+            // --- ADDED: Include user ID fields from entity ---
+            created_by_user_id: project.created_by_user_id,
+            updated_by_user_id: project.updated_by_user_id,
             created_by: None,
+            // --- ADDED: Initialize enrichment fields to None ---
+            created_by_username: None,
+            updated_by_username: None,
+            strategic_goal_name: None,
             activity_count: None,
             workshop_count: None,
+            document_count: None,
             sync_priority: project.sync_priority,
             documents: None,
         }
@@ -486,4 +518,53 @@ pub struct ProjectDocumentReference {
     pub filename: Option<String>,
     pub upload_date: Option<DateTime<Utc>>,
     pub file_size: Option<u64>,
+}
+
+/// ADDED: A comprehensive filter for searching projects with multiple criteria,
+/// allowing for intuitive, multi-faceted filtering from the UI.
+/// This follows the same pattern as StrategicGoalFilter for consistency.
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone, Default)]
+pub struct ProjectFilter {
+    /// Filter by one or more statuses (e.g., "At Risk", "Delayed").
+    /// Uses OR logic internally: status_id = 1 OR status_id = 2.
+    pub status_ids: Option<Vec<i64>>,
+    
+    /// Filter by one or more parent strategic goals.
+    /// Uses OR logic internally.
+    pub strategic_goal_ids: Option<Vec<Uuid>>,
+    
+    /// Filter by one or more responsible teams.
+    /// Uses OR logic internally.
+    pub responsible_teams: Option<Vec<String>>,
+    
+    /// A free-text search term to apply to name, objective, outcome, etc.
+    pub search_text: Option<String>,
+    
+    /// Filter for projects updated within a specific date range.
+    pub date_range: Option<(String, String)>, // (start_rfc3339, end_rfc3339)
+    
+    /// Whether to exclude soft-deleted records. Defaults to true.
+    pub exclude_deleted: Option<bool>,
+}
+ 
+/// ADDED: Document coverage analysis response for dashboard widgets
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentCoverageAnalysis {
+    pub projects_with_documents: i64,
+    pub projects_without_documents: i64,
+    pub total_projects: i64,
+    pub average_documents_per_project: f64,
+    pub coverage_percentage: f64,
+    pub document_count_by_type: HashMap<String, i64>,
+}
+
+/// ADDED: Project activity timeline response for dashboard widgets
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectActivityTimeline {
+    pub active_projects: i64,
+    pub inactive_projects: i64,
+    pub total_projects: i64,
+    pub activity_percentage: f64,
+    pub stale_projects: i64,
+    pub recently_updated_projects: i64,
 }

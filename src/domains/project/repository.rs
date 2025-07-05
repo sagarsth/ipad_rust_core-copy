@@ -126,6 +126,14 @@ pub trait ProjectRepository: DeleteServiceRepository<Project> + MergeableEntityR
         end_date: DateTime<Utc>,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Project>>;
+
+    /// ADDED: Find project IDs that match complex filter criteria.
+    /// This is the key to enabling efficient UI-driven bulk selections and exports.
+    /// Follows the same pattern as StrategicGoalRepository::find_ids_by_filter.
+    async fn find_ids_by_filter(
+        &self,
+        filter: crate::domains::project::types::ProjectFilter,
+    ) -> DomainResult<Vec<Uuid>>;
 }
 
 /// SQLite implementation for ProjectRepository
@@ -1255,6 +1263,89 @@ impl ProjectRepository for SqliteProjectRepository {
             total as u64,
             params,
         ))
+    }
+
+    /// ADDED: Find project IDs matching a complex set of filter criteria.
+    /// Follows the same pattern as StrategicGoalRepository::find_ids_by_filter.
+    async fn find_ids_by_filter(
+        &self,
+        filter: crate::domains::project::types::ProjectFilter,
+    ) -> DomainResult<Vec<Uuid>> {
+        use sqlx::QueryBuilder;
+        
+        let mut query_builder = QueryBuilder::new("SELECT p.id FROM projects p WHERE 1=1");
+        
+        if filter.exclude_deleted.unwrap_or(true) {
+            query_builder.push(" AND p.deleted_at IS NULL");
+        }
+        
+        if let Some(status_ids) = &filter.status_ids {
+            if !status_ids.is_empty() {
+                query_builder.push(" AND p.status_id IN (");
+                let mut separated = query_builder.separated(", ");
+                for status_id in status_ids {
+                    separated.push_bind(status_id);
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        if let Some(strategic_goal_ids) = &filter.strategic_goal_ids {
+            if !strategic_goal_ids.is_empty() {
+                query_builder.push(" AND p.strategic_goal_id IN (");
+                let mut separated = query_builder.separated(", ");
+                for sg_id in strategic_goal_ids {
+                    separated.push_bind(sg_id.to_string());
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        if let Some(teams) = &filter.responsible_teams {
+            if !teams.is_empty() {
+                query_builder.push(" AND p.responsible_team IN (");
+                let mut separated = query_builder.separated(", ");
+                for team in teams {
+                    separated.push_bind(team);
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        if let Some(search_text) = &filter.search_text {
+            if !search_text.trim().is_empty() {
+                let search_pattern = format!("%{}%", search_text.trim());
+                query_builder.push(" AND (p.name LIKE ")
+                    .push_bind(search_pattern.clone())
+                    .push(" OR p.objective LIKE ")
+                    .push_bind(search_pattern.clone())
+                    .push(" OR p.outcome LIKE ")
+                    .push_bind(search_pattern)
+                    .push(")");
+            }
+        }
+        
+        if let Some((start_date, end_date)) = &filter.date_range {
+            if let (Ok(start), Ok(end)) = (
+                DateTime::parse_from_rfc3339(start_date),
+                DateTime::parse_from_rfc3339(end_date)
+            ) {
+                let start_utc = start.with_timezone(&Utc);
+                let end_utc = end.with_timezone(&Utc);
+                
+                query_builder.push(" AND p.updated_at BETWEEN ")
+                    .push_bind(start_utc.to_rfc3339())
+                    .push(" AND ")
+                    .push_bind(end_utc.to_rfc3339());
+            }
+        }
+        
+        let query = query_builder.build_query_as::<(String,)>();
+        let rows = query.fetch_all(&self.pool).await.map_err(DbError::from)?;
+        
+        rows.into_iter()
+            .map(|(id_str,)| Uuid::parse_str(&id_str).map_err(|e| DomainError::InvalidUuid(e.to_string())))
+            .collect()
     }
 
     /// Find projects by specific IDs

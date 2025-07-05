@@ -821,7 +821,7 @@ pub unsafe extern "C" fn project_search(payload_json: *const c_char, result: *mu
         #[derive(Deserialize)]
         struct Payload {
             query: String,
-            search_fields: Option<Vec<String>>,
+            // search_fields: Option<Vec<String>>, // Currently unused - could be used for field-specific search
             pagination: Option<PaginationDto>,
             include: Option<Vec<ProjectIncludeDto>>,
             auth: AuthCtxDto,
@@ -909,6 +909,244 @@ pub unsafe extern "C" fn project_get_document_references(payload_json: *const c_
             .map_err(FFIError::from_service_error)?;
         
         let json_resp = serde_json::to_string(&doc_refs)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Filtering and Bulk Operations
+// ---------------------------------------------------------------------------
+
+/// Get filtered project IDs for bulk operations
+/// Expected JSON payload:
+/// {
+///   "filter": {
+///     "status_ids": [1, 2, 3],
+///     "strategic_goal_ids": ["uuid1", "uuid2"],
+///     "responsible_teams": ["Team A", "Team B"],
+///     "search_text": "optional search text",
+///     "date_range": ["2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z"],
+///     "exclude_deleted": true
+///   },
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn project_get_filtered_ids(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct FilterDto {
+            status_ids: Option<Vec<i64>>,
+            strategic_goal_ids: Option<Vec<String>>,
+            responsible_teams: Option<Vec<String>>,
+            search_text: Option<String>,
+            date_range: Option<(String, String)>,
+            exclude_deleted: Option<bool>,
+        }
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            filter: FilterDto,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        // Convert FilterDto to ProjectFilter
+        let filter = crate::domains::project::types::ProjectFilter {
+            status_ids: p.filter.status_ids,
+            strategic_goal_ids: p.filter.strategic_goal_ids.map(|ids| {
+                ids.into_iter()
+                    .filter_map(|id| Uuid::parse_str(&id).ok())
+                    .collect()
+            }),
+            responsible_teams: p.filter.responsible_teams,
+            search_text: p.filter.search_text,
+            date_range: p.filter.date_range,
+            exclude_deleted: p.filter.exclude_deleted,
+        };
+        
+        let svc = globals::get_project_service()?;
+        let ids = block_on_async(svc.get_filtered_project_ids(filter, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        // Convert UUIDs to strings for FFI
+        let id_strings: Vec<String> = ids.into_iter().map(|id| id.to_string()).collect();
+        
+        let json_resp = serde_json::to_string(&id_strings)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Advanced Dashboard Aggregations
+// ---------------------------------------------------------------------------
+
+/// Get team workload distribution for dashboard widgets
+/// Expected JSON payload: { "auth": { "user_id": "uuid", "role": "admin", "device_id": "device_uuid", "offline_mode": false } }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn project_get_team_workload_distribution(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_project_service()?;
+        
+        let distribution = block_on_async(svc.get_team_workload_distribution(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&distribution)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get projects by strategic goal distribution for dashboard widgets
+/// Expected JSON payload: { "auth": { "user_id": "uuid", "role": "admin", "device_id": "device_uuid", "offline_mode": false } }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn project_get_strategic_goal_distribution(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_project_service()?;
+        
+        let distribution = block_on_async(svc.get_projects_by_strategic_goal_distribution(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&distribution)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Find stale projects for dashboard widgets
+/// Expected JSON payload:
+/// {
+///   "days_stale": 30,
+///   "pagination": { "page": 1, "per_page": 20 },
+///   "include": ["Documents", "CreatedBy"],
+///   "auth": { "user_id": "uuid", "role": "admin", "device_id": "device_uuid", "offline_mode": false }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn project_find_stale(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            days_stale: u32,
+            pagination: Option<PaginationDto>,
+            include: Option<Vec<ProjectIncludeDto>>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let params = parse_pagination(p.pagination);
+        let include = parse_includes(p.include);
+        let include_slice = include.as_ref().map(|v| v.as_slice());
+        let svc = globals::get_project_service()?;
+        
+        let stale_projects = block_on_async(svc.find_stale_projects(p.days_stale, params, include_slice, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&stale_projects)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get document coverage analysis for dashboard widgets
+/// Expected JSON payload: { "auth": { "user_id": "uuid", "role": "admin", "device_id": "device_uuid", "offline_mode": false } }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn project_get_document_coverage_analysis(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_project_service()?;
+        
+        let analysis = block_on_async(svc.get_document_coverage_analysis(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&analysis)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get project activity timeline for dashboard widgets
+/// Expected JSON payload:
+/// {
+///   "days_active": 14,
+///   "auth": { "user_id": "uuid", "role": "admin", "device_id": "device_uuid", "offline_mode": false }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn project_get_activity_timeline(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            days_active: u32,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_project_service()?;
+        
+        let timeline = block_on_async(svc.get_project_activity_timeline(p.days_active, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&timeline)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();

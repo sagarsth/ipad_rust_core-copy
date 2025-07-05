@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Enums
 
-enum StrategicGoalInclude: String, Codable {
+enum StrategicGoalInclude: String, Codable, CaseIterable {
     case documents = "documents"
     case status = "status"
     case activities = "activities"

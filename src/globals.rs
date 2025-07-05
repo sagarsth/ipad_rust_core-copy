@@ -1048,6 +1048,10 @@ async fn initialize_internal(
         media_document_repo.clone(),
         document_service.clone(),
         deletion_manager.clone(),
+        // ADDED: Additional repositories for enrichment
+        user_repo.clone(),
+        activity_repo.clone(),
+        workshop_repo.clone(),
     ));
 
     // Activity Service
