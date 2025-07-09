@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import SwiftUI
 
 // MARK: - Enums
 
@@ -980,5 +981,40 @@ extension StrategicGoalResponse {
     /// Convert this StrategicGoalResponse to a DocumentUploadable entity
     func asDocumentUploadable() -> StrategicGoalDocumentAdapter {
         return StrategicGoalDocumentAdapter(goal: self)
+    }
+} 
+
+// MARK: - StrategicGoalResponse UI Extensions
+extension StrategicGoalResponse {
+    /// Safe progress calculation
+    var progress: Double {
+        let rawProgress = progressPercentage ?? 0.0
+        // Ensure progress is a valid number and within bounds
+        if rawProgress.isNaN || rawProgress.isInfinite {
+            return 0.0
+        }
+        return max(0.0, rawProgress)
+    }
+    
+    /// Status display text
+    var statusText: String {
+        switch statusId {
+        case 1: return "On Track"
+        case 2: return "At Risk"
+        case 3: return "Behind"
+        case 4: return "Completed"
+        default: return "Unknown"
+        }
+    }
+    
+    /// Status color for UI
+    var statusColor: Color {
+        switch statusId {
+        case 1: return .green
+        case 2: return .orange
+        case 3: return .red
+        case 4: return .blue
+        default: return .gray
+        }
     }
 } 

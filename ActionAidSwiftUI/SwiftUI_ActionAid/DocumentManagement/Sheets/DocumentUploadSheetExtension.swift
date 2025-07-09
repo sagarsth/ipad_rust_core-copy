@@ -104,7 +104,7 @@ extension DocumentUploadSheet {
     
     // Note: handleFileSelection and handlePhotoSelection are defined in the main DocumentUploadSheet
     
-    private func generatePhotoFilename(for photo: PhotosPickerItem, baseTimestamp: TimeInterval, sequenceIndex: Int) -> String {
+    func generatePhotoFilename(for photo: PhotosPickerItem, baseTimestamp: TimeInterval, sequenceIndex: Int) -> String {
         let timestamp = baseTimestamp + (Double(sequenceIndex) * 0.001) + (Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 1))
         
         let shortId: String

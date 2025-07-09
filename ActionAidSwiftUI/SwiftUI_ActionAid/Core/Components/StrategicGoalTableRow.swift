@@ -47,7 +47,7 @@ struct StrategicGoalTableRow: View {
                     .lineLimit(1)
                     .foregroundColor(.primary)
                 
-                if goal.hasDocumentsTracked(in: documentCounts) {
+                if (documentCounts[goal.id] ?? 0) > 0 {
                     Image(systemName: "paperclip")
                         .font(.caption2)
                         .foregroundColor(.blue)
@@ -167,63 +167,68 @@ struct StrategicGoalTableRow: View {
     }
 }
 
-// MARK: - Strategic Goal Table Columns Configuration
+// MARK: - Strategic Goal Table Configuration (Shared Architecture Pattern)
+struct StrategicGoalTableConfig {
+    static let columns: [TableColumn] = [
+        TableColumn(
+            key: "objective_code",
+            title: "Code",
+            width: 100,
+            alignment: .leading,
+            isRequired: true
+        ),
+        TableColumn(
+            key: "outcome",
+            title: "Outcome",
+            alignment: .leading,
+            isRequired: true
+        ),
+        TableColumn(
+            key: "status",
+            title: "Status",
+            width: 100,
+            alignment: .center
+        ),
+        TableColumn(
+            key: "progress",
+            title: "Progress",
+            width: 120,
+            alignment: .center
+        ),
+        TableColumn(
+            key: "responsible_team",
+            title: "Team",
+            width: 140,
+            alignment: .leading,
+            isVisible: { $0.userInterfaceIdiom == .pad }
+        ),
+        TableColumn(
+            key: "target_value",
+            title: "Target",
+            width: 100,
+            alignment: .trailing,
+            isVisible: { $0.userInterfaceIdiom == .pad }
+        ),
+        TableColumn(
+            key: "actual_value",
+            title: "Actual",
+            width: 100,
+            alignment: .trailing,
+            isVisible: { $0.userInterfaceIdiom == .pad }
+        ),
+        TableColumn(
+            key: "updated_at",
+            title: "Updated",
+            width: 120,
+            alignment: .center,
+            isVisible: { $0.userInterfaceIdiom == .pad }
+        )
+    ]
+}
+
+// MARK: - Strategic Goal Table Columns Configuration (Extension for compatibility)
 extension StrategicGoalsView {
     static var tableColumns: [TableColumn] {
-        [
-            TableColumn(
-                key: "objective_code",
-                title: "Code",
-                width: 100,
-                alignment: .leading,
-                isRequired: true
-            ),
-            TableColumn(
-                key: "outcome",
-                title: "Outcome",
-                alignment: .leading,
-                isRequired: true
-            ),
-            TableColumn(
-                key: "status",
-                title: "Status",
-                width: 100,
-                alignment: .center
-            ),
-            TableColumn(
-                key: "progress",
-                title: "Progress",
-                width: 120,
-                alignment: .center
-            ),
-            TableColumn(
-                key: "responsible_team",
-                title: "Team",
-                width: 140,
-                alignment: .leading,
-                isVisible: { $0.userInterfaceIdiom == .pad }
-            ),
-            TableColumn(
-                key: "target_value",
-                title: "Target",
-                width: 100,
-                alignment: .trailing,
-                isVisible: { $0.userInterfaceIdiom == .pad }
-            ),
-            TableColumn(
-                key: "actual_value",
-                title: "Actual",
-                width: 100,
-                alignment: .trailing,
-                isVisible: { $0.userInterfaceIdiom == .pad }
-            ),
-            TableColumn(
-                key: "updated_at",
-                title: "Updated",
-                width: 120,
-                alignment: .center,
-                isVisible: { $0.userInterfaceIdiom == .pad }
-            )
-        ]
+        return StrategicGoalTableConfig.columns
     }
-} 
+}

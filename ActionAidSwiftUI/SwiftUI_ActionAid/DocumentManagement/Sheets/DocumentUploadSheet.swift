@@ -25,11 +25,19 @@ struct DocumentUploadSheet<Entity: DocumentUploadable>: View {
     @State internal var priority: SyncPriority = .normal
     @StateObject internal var fileManager = DocumentFileManager()
     @State internal var showFilePicker = false
-    @State internal var showPhotoPicker = false
     @State internal var selectedPhotos: [PhotosPickerItem] = []
     @State internal var isUploading = false
     @State internal var uploadResults: [UploadResult] = []
     @State internal var errorMessage: String?
+    
+    // FIXED: Add photo processing state to prevent UI refreshes
+    @State private var isProcessingPhotos = false
+    @State private var processedPhotoCount = 0
+    @State private var totalPhotosToProcess = 0
+    
+    // FIXED: Add Face ID authentication state tracking
+    @State private var isPhotoPickerAuthenticating = false
+    @State private var photoPickerAuthStartTime: Date?
     
     // MARK: - Computed Properties
     
@@ -52,7 +60,7 @@ struct DocumentUploadSheet<Entity: DocumentUploadable>: View {
     }
     
     internal var isUploadDisabled: Bool {
-        return fileManager.isEmpty || isUploading || (isSingleUpload && config.allowFieldLinking && linkedField.isEmpty)
+        return fileManager.isEmpty || isUploading || isProcessingPhotos || (isSingleUpload && config.allowFieldLinking && linkedField.isEmpty)
     }
     
     var body: some View {
@@ -97,6 +105,16 @@ struct DocumentUploadSheet<Entity: DocumentUploadable>: View {
                     VStack {
                         ProgressView()
                         Text("Uploading documents...")
+                            .foregroundColor(.white)
+                    }
+                } else if isProcessingPhotos {
+                    // FIXED: Show photo processing progress
+                    Color.black.opacity(0.3)
+                        .ignoresSafeArea()
+                    VStack {
+                        ProgressView(value: Double(processedPhotoCount), total: Double(totalPhotosToProcess))
+                            .progressViewStyle(CircularProgressViewStyle())
+                        Text("Processing photos... (\(processedPhotoCount)/\(totalPhotosToProcess))")
                             .foregroundColor(.white)
                     }
                 }
@@ -181,25 +199,98 @@ struct DocumentUploadSheet<Entity: DocumentUploadable>: View {
                 }
                 .buttonStyle(PlainButtonStyle())
                 
+                // FIXED: Use configurable selection limit and improved handling
                 PhotosPicker(
                     selection: $selectedPhotos,
-                    maxSelectionCount: 10,
+                    maxSelectionCount: config.maxPhotoSelectionCount,
                     matching: .any(of: [.images, .videos])
                 ) {
                     VStack(spacing: 4) {
-                        Image(systemName: "photo.badge.plus")
+                        Image(systemName: isPhotoPickerAuthenticating ? "faceid" : "photo.badge.plus")
                             .font(.title2)
-                        Text("Photos/Videos")
+                            .foregroundColor(isPhotoPickerAuthenticating ? .orange : .primary)
+                        Text(isPhotoPickerAuthenticating ? "Authenticating..." : "Photos/Videos")
                             .font(.caption)
+                            .foregroundColor(isPhotoPickerAuthenticating ? .orange : .primary)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
                     .background(Color(.systemGray6))
                     .cornerRadius(8)
+                    .opacity(isPhotoPickerAuthenticating ? 0.8 : 1.0)
                 }
                 .buttonStyle(PlainButtonStyle())
-                .onChange(of: selectedPhotos) { _, newPhotos in
-                    handlePhotoSelection(newPhotos)
+                .disabled(isPhotoPickerAuthenticating || isProcessingPhotos)
+                .onTapGesture {
+                    // FIXED: Track Face ID authentication start
+                    if !isPhotoPickerAuthenticating && !isProcessingPhotos {
+                        isPhotoPickerAuthenticating = true
+                        photoPickerAuthStartTime = Date()
+                        
+                        // Auto-reset authentication state if it takes too long (Face ID timeout)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 10.0) {
+                            if self.isPhotoPickerAuthenticating {
+                                self.isPhotoPickerAuthenticating = false
+                                self.photoPickerAuthStartTime = nil
+                            }
+                        }
+                    }
+                }
+                .onChange(of: selectedPhotos) { oldPhotos, newPhotos in
+                    // FIXED: Clear authentication state when photos are actually selected
+                    if isPhotoPickerAuthenticating {
+                        isPhotoPickerAuthenticating = false
+                        photoPickerAuthStartTime = nil
+                    }
+                    
+                    // FIXED: Only process if we actually have new photos to avoid refresh loops
+                    if !newPhotos.isEmpty && newPhotos != oldPhotos {
+                        handlePhotoSelection(newPhotos)
+                    }
+                }
+                .onAppear {
+                    // FIXED: Reset any stuck photo selection state when view appears
+                    if selectedPhotos.count != fileManager.optimizedFiles.filter({ $0.name.contains("photo_") || $0.name.contains("video_") }).count {
+                        selectedPhotos = []
+                    }
+                    
+                    // FIXED: Reset authentication state on appear
+                    isPhotoPickerAuthenticating = false
+                    photoPickerAuthStartTime = nil
+                }
+            }
+            
+            // FIXED: Add helpful information about Face ID and selection limits
+            if config.maxPhotoSelectionCount < 50 || isPhotoPickerAuthenticating {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if isPhotoPickerAuthenticating {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                Text("Waiting for Face ID authentication...")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+                        }
+                        
+                        if config.maxPhotoSelectionCount < 50 {
+                            Text("📸 You can select up to \(config.maxPhotoSelectionCount) photos/videos at once")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        if isPhotoPickerAuthenticating || photoPickerAuthStartTime != nil {
+                            Text("💡 If Face ID is required on your device, photo selection may pause briefly for authentication")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                } header: {
+                    Text("Photo Selection")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
             
@@ -265,6 +356,7 @@ struct DocumentUploadSheet<Entity: DocumentUploadable>: View {
                             .fontWeight(.medium)
                         Text("• Maximum file size: \(formatFileSize(config.maxFileSize))")
                         Text("• Maximum total size: \(formatFileSize(Int(config.maxTotalSize)))")
+                        Text("• Photo/Video limit: \(config.maxPhotoSelectionCount) at a time")
                         Text("• Blocked file types: .dmg, .iso, .app, .pkg")
                     }
                     .font(.caption2)
@@ -388,55 +480,79 @@ struct DocumentUploadSheet<Entity: DocumentUploadable>: View {
         }
     }
     
+    // FIXED: Improved photo selection handling to prevent refresh issues
     private func handlePhotoSelection(_ photos: [PhotosPickerItem]) {
+        guard !photos.isEmpty else { return }
+        
         print("🏞️ [PHOTO_SELECTION] Starting photo selection with \(photos.count) items")
         
-        for photo in photos {
+        // Set processing state
+        isProcessingPhotos = true
+        totalPhotosToProcess = photos.count
+        processedPhotoCount = 0
+        
+        // FIXED: Use DispatchGroup to track completion of all photos
+        let photoProcessingGroup = DispatchGroup()
+        
+        for (index, photo) in photos.enumerated() {
+            photoProcessingGroup.enter()
+            
+            // FIXED: Use improved filename generation with better type detection
+            let baseTimestamp = Date().timeIntervalSince1970
+            let generatedFilename = generatePhotoFilename(for: photo, baseTimestamp: baseTimestamp, sequenceIndex: index)
+            
             photo.loadTransferable(type: Data.self) { result in
+                defer { 
+                    DispatchQueue.main.async {
+                        self.processedPhotoCount += 1
+                        photoProcessingGroup.leave()
+                    }
+                }
+                
                 switch result {
                 case .success(let data?):
                     // iOS Optimized Path-Based Approach for photos too!
                     DispatchQueue.main.async {
-                        // Create optimized photo file
-                        let filename = photo.itemIdentifier ?? "photo_\(UUID().uuidString).jpg"
                         let fileSize = data.count
-                        let detectedType = "image/jpeg" // Photos are typically JPEG
+                        
+                        // FIXED: Better type detection from PhotosPickerItem
+                        let detectedType = self.detectTypeFromPhoto(photo) ?? "image/jpeg"
                         
                         // Check file size limits
                         if fileSize > self.config.maxFileSize {
-                            print("⚠️ [PHOTO_SELECTION] Photo too large: \(filename) (\(fileSize) bytes)")
-                            self.errorMessage = "Photo '\(filename)' exceeds size limits"
+                            print("⚠️ [PHOTO_SELECTION] Photo too large: \(generatedFilename) (\(fileSize) bytes)")
+                            self.errorMessage = "Photo '\(generatedFilename)' exceeds size limits"
                             return
                         }
                         
                         // Store in temp file
                         let tempDir = FileManager.default.temporaryDirectory
-                        let tempPath = tempDir.appendingPathComponent(UUID().uuidString + "_" + filename)
+                        let tempPath = tempDir.appendingPathComponent(UUID().uuidString + "_" + generatedFilename)
                         
                         do {
                             try data.write(to: tempPath)
                             
                             let optimizedFile = OptimizedDocumentFile(
-                                name: filename,
+                                name: generatedFilename,
                                 tempPath: tempPath.path,
                                 size: fileSize,
                                 detectedType: detectedType
                             )
                             
-                            print("📱 [PHOTO_SELECTION] Created optimized photo: \(filename) at path: \(tempPath.path)")
+                            print("📱 [PHOTO_SELECTION] Created optimized photo: \(generatedFilename) at path: \(tempPath.path)")
                             
                             if self.fileManager.addOptimizedFile(optimizedFile) {
-                                print("✅ [PHOTO_SELECTION] Added optimized photo: \(filename)")
+                                print("✅ [PHOTO_SELECTION] Added optimized photo: \(generatedFilename)")
                             } else {
                                 // Clean up if couldn't add
                                 optimizedFile.cleanup()
-                                print("❌ [PHOTO_SELECTION] Failed to add optimized photo: \(filename) (size limits)")
-                                self.errorMessage = "Photo '\(filename)' exceeds total size limits"
+                                print("❌ [PHOTO_SELECTION] Failed to add optimized photo: \(generatedFilename) (size limits)")
+                                self.errorMessage = "Photo '\(generatedFilename)' exceeds total size limits"
                             }
                             
                         } catch {
                             print("❌ [PHOTO_SELECTION] Error creating temp file for photo: \(error)")
-                            self.errorMessage = "Failed to process photo: \(filename)"
+                            self.errorMessage = "Failed to process photo: \(generatedFilename)"
                         }
                     }
                     
@@ -448,9 +564,48 @@ struct DocumentUploadSheet<Entity: DocumentUploadable>: View {
             }
         }
         
-        // Clear selected photos after processing
-        selectedPhotos = []
+        // FIXED: Clear selection only AFTER all photos are processed to avoid refresh issues
+        photoProcessingGroup.notify(queue: .main) {
+            self.isProcessingPhotos = false
+            
+            // FIXED: Clear selection with a small delay to ensure UI stability
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.selectedPhotos = []
+                print("✅ [PHOTO_SELECTION] Completed processing \(photos.count) photos, selection cleared")
+            }
+        }
     }
     
-    // Note: Helper methods formatFileSize, fileIcon, and getFieldDisplayName are defined in DocumentUploadSheetExtension.swift
+    // FIXED: Add helper method for better photo type detection
+    private func detectTypeFromPhoto(_ photo: PhotosPickerItem) -> String? {
+        for supportedType in photo.supportedContentTypes {
+            let identifier = supportedType.identifier
+            
+            // Video types
+            if identifier.contains("mpeg-4") || identifier.contains("mp4") {
+                return "video/mp4"
+            }
+            if identifier.contains("quicktime") || identifier.contains("mov") {
+                return "video/quicktime"
+            }
+            if identifier.contains("video") {
+                return "video/mp4" // Default video type
+            }
+            
+            // Image types
+            if identifier.contains("heif") || identifier.contains("heic") {
+                return "image/heic"
+            }
+            if identifier.contains("jpeg") || identifier.contains("jpg") {
+                return "image/jpeg"
+            }
+            if identifier.contains("png") {
+                return "image/png"
+            }
+        }
+        
+        return "image/jpeg" // Default fallback
+    }
+    
+    // Note: Helper methods formatFileSize, fileIcon, getFieldDisplayName, and generatePhotoFilename are defined in DocumentUploadSheetExtension.swift
 } 

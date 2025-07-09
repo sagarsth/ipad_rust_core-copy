@@ -4,5 +4,20 @@
 <dict>
 	<key>UIFileSharingEnabled</key>
 	<true/>
+	
+	<!-- FIXED: Add required privacy permissions for PhotosPicker -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>ActionAid needs access to your photo library to upload photos and videos as document attachments to strategic goals, projects, and other entities.</string>
+	
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>ActionAid may save processed documents back to your photo library for easy access.</string>
+	
+	<!-- Optional: Camera access if you want to add camera capture later -->
+	<key>NSCameraUsageDescription</key>
+	<string>ActionAid can use the camera to capture photos and videos for document uploads.</string>
+	
+	<!-- File access permissions for document uploads -->
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>ActionAid needs access to your documents to upload files as attachments.</string>
 </dict>
 </plist>

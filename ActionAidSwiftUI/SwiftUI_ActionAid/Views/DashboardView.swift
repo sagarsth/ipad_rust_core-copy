@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Foundation
 
 // MARK: - Domain Model
 struct Domain: Identifiable {
@@ -57,15 +58,44 @@ enum DomainDestination {
     case funding
 }
 
+// MARK: - Navigation State Manager
+@MainActor
+class NavigationStateManager: ObservableObject {
+    @Published var isInEntityView = false
+    @Published var currentEntityName: String?
+    
+    func enterEntityView(_ entityName: String) {
+        isInEntityView = true
+        currentEntityName = entityName
+    }
+    
+    func exitEntityView() {
+        isInEntityView = false
+        currentEntityName = nil
+    }
+    
+    func forceExitEntityView() {
+        isInEntityView = false
+        currentEntityName = nil
+    }
+}
+
 // MARK: - Main Tab View
 struct MainTabView: View {
     @EnvironmentObject var authManager: AuthenticationManager
+    @StateObject private var navigationState = NavigationStateManager()
+    @StateObject private var sharedStatsContext = SharedStatsContext()
     @State private var selectedTab = 0
     
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack {
                 DashboardView()
+                    .onAppear {
+                        // Clear entity view state when returning to dashboard
+                        navigationState.forceExitEntityView()
+                        sharedStatsContext.clearStats()
+                    }
             }
             .tabItem {
                 Image(systemName: "square.grid.2x2")
@@ -74,14 +104,20 @@ struct MainTabView: View {
             .tag(0)
             
             NavigationStack {
-                ProfileView()
+                if navigationState.isInEntityView {
+                    StatsTabView(sharedContext: sharedStatsContext)
+                } else {
+                    ProfileView()
+                }
             }
             .tabItem {
-                Image(systemName: "person.circle")
-                Text("Profile")
+                Image(systemName: navigationState.isInEntityView ? "chart.bar.fill" : "person.circle")
+                Text(navigationState.isInEntityView ? "Stats" : "Profile")
             }
             .tag(1)
         }
+        .environmentObject(navigationState)
+        .environmentObject(sharedStatsContext)
     }
 }
 
@@ -331,6 +367,7 @@ struct DashboardView: View {
 struct DomainCard: View {
     let domain: Domain
     let showingStats: Bool
+    @EnvironmentObject var navigationState: NavigationStateManager
     
     var body: some View {
         NavigationLink(destination: destinationView) {
@@ -437,16 +474,46 @@ struct DomainCard: View {
     private var destinationView: some View {
         switch domain.destination {
         case .users:
-            UsersListView()
+            EntityViewWrapper(entityName: "Users") {
+                UsersListView()
+            }
         case .strategicGoals:
-            StrategicGoalsView()
+            EntityViewWrapper(entityName: "Strategic Goals") {
+                StrategicGoalsView()
+            }
         case .livelihoods:
-            LivelihoodsView()
+            EntityViewWrapper(entityName: "Livelihoods") {
+                LivelihoodsView()
+            }
         case .projects:
-            ProjectsView()
+            EntityViewWrapper(entityName: "Projects") {
+                ProjectsView()
+            }
         default:
             ComingSoonView(domainName: domain.name)
         }
+    }
+}
+
+// MARK: - Entity View Wrapper
+struct EntityViewWrapper<Content: View>: View {
+    let entityName: String
+    let content: () -> Content
+    
+    @EnvironmentObject var navigationState: NavigationStateManager
+    @EnvironmentObject var sharedStatsContext: SharedStatsContext
+    
+    init(entityName: String, @ViewBuilder content: @escaping () -> Content) {
+        self.entityName = entityName
+        self.content = content
+    }
+    
+    var body: some View {
+        content()
+            .onAppear {
+                navigationState.enterEntityView(entityName)
+            }
+            // Remove onDisappear entirely to prevent clearing state on tab switches
     }
 }
 

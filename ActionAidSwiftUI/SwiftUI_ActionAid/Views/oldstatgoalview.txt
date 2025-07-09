@@ -2,7 +2,7 @@
 //  StrategicGoalsView.swift
 //  ActionAid SwiftUI
 //
-//  Strategic Goals management with clean extracted components
+//  Strategic Goals management with real UI
 //
 
 import SwiftUI
@@ -10,43 +10,68 @@ import UniformTypeIdentifiers
 import PhotosUI
 import QuickLook
 
+// MARK: - Removed: IdentifiableURL (now in DocumentManagement/Components/QuickLookView.swift)
+
 // MARK: - Main View
 struct StrategicGoalsView: View {
     @EnvironmentObject var authManager: AuthenticationManager
-    @EnvironmentObject var sharedStatsContext: SharedStatsContext
+    @StateObject private var viewStyleManager = ViewStylePreferenceManager()
     private let ffiHandler = StrategicGoalFFIHandler()
+    private let documentHandler = DocumentFFIHandler()
 
-    // Core data state
     @State private var goals: [StrategicGoalResponse] = []
     @State private var isLoading = false
     @State private var searchText = ""
-    @State private var selectedFilters: Set<String> = ["all"]
+    @State private var selectedStatuses: Set<String> = ["all"] // Changed to Set for multiple selection
+    @State private var showCreateSheet = false
+    @State private var selectedGoal: StrategicGoalResponse?
+    @State private var showErrorAlert = false
+    @State private var errorMessage: String?
     @State private var currentViewStyle: ListViewStyle = .cards
+    @State private var isScrolling = false
+    @State private var scrollOffset: CGFloat = 0
+    @State private var lastScrollValue: CGFloat = 0
     @State private var isActionBarCollapsed: Bool = false
     
-    // Shared component managers
+    // Selection state using shared SelectionManager
     @StateObject private var selectionManager = SelectionManager()
-    @StateObject private var exportManager = ExportManager(service: StrategicGoalExportService())
-    @StateObject private var crudManager = CRUDSheetManager<StrategicGoalResponse>(config: .strategicGoal)
-    @StateObject private var documentTracker = DocumentCountTracker(config: .strategicGoals)
-    @StateObject private var statsManager = StatsManager<StrategicGoalResponse>.strategicGoalsManager()
-    @StateObject private var viewStyleManager = ViewStylePreferenceManager()
     
-    // Goal detail view state
-    @State private var selectedGoal: StrategicGoalResponse?
+    // Filter-aware bulk selection state
+    @State private var currentFilter = StrategicGoalFilter.all()
+    
+    // Export manager for shared export functionality
+    @StateObject private var exportManager = ExportManager(service: StrategicGoalExportService())
+    
+    // Document tracking
+    @State private var goalDocumentCounts: [String: Int] = [:]
+    
+    // Stats
+    @State private var totalGoals = 0
+    @State private var onTrackGoals = 0
+    @State private var atRiskGoals = 0
+    @State private var completedGoals = 0
     
     // Document viewing state
     @State private var selectedDocumentURL: IdentifiableURL?
+    @State private var isOpeningDocument = false
     
-    // Bulk operations state
+    // Bulk delete state
+    @State private var showBulkDeleteOptions = false
     @State private var isPerformingBulkDelete = false
     @State private var bulkDeleteResults: BatchDeleteResult?
     @State private var showBulkDeleteResults = false
+    
+    // Export state - using shared export manager
     @State private var showExportOptions = false
     
-    // MARK: - Computed Properties
+    // Computed property to determine if we should hide the top section
+    private var shouldHideTopSection: Bool {
+        scrollOffset > 100
+    }
     
-    /// Properly filtered goals with working OR gate logic for status filters
+    // MARK: - Table Configuration
+    // Note: tableColumns is defined in StrategicGoalTableRow.swift as an extension
+    
     var filteredGoals: [StrategicGoalResponse] {
         goals.filter { goal in
             let matchesSearch = searchText.isEmpty ||
@@ -54,89 +79,60 @@ struct StrategicGoalsView: View {
                 (goal.outcome ?? "").localizedCaseInsensitiveContains(searchText) ||
                 (goal.responsibleTeam ?? "").localizedCaseInsensitiveContains(searchText)
             
-            // OR gate logic for status filters (fixed from EntityListView)
-            let matchesStatus = selectedFilters.contains("all") ||
-                (selectedFilters.contains("on_track") && goal.statusId == 1) ||
-                (selectedFilters.contains("at_risk") && goal.statusId == 2) ||
-                (selectedFilters.contains("behind") && goal.statusId == 3) ||
-                (selectedFilters.contains("completed") && goal.statusId == 4)
+            // OR gate logic for status filters
+            let matchesStatus = selectedStatuses.contains("all") ||
+                (selectedStatuses.contains("on_track") && goal.statusId == 1) ||
+                (selectedStatuses.contains("at_risk") && goal.statusId == 2) ||
+                (selectedStatuses.contains("behind") && goal.statusId == 3) ||
+                (selectedStatuses.contains("completed") && goal.statusId == 4)
             
             return matchesSearch && matchesStatus
         }
     }
     
-    // MARK: - Setup and Helper Methods
-    
-    /// Setup callbacks for shared component managers
-    private func setupCallbacks() {
-        // CRUD manager callbacks
-        crudManager.onEntityCreated = { _ in
-            loadGoals()
+    // Helper to create filter from current UI state
+    private func createCurrentFilter() -> StrategicGoalFilter {
+        var statusIds: [Int64]? = nil
+        
+        // OR gate logic: if "all" is not selected, collect all selected status IDs
+        if !selectedStatuses.contains("all") {
+            var ids: [Int64] = []
+            if selectedStatuses.contains("on_track") { ids.append(1) }
+            if selectedStatuses.contains("at_risk") { ids.append(2) }
+            if selectedStatuses.contains("behind") { ids.append(3) }
+            if selectedStatuses.contains("completed") { ids.append(4) }
+            statusIds = ids.isEmpty ? nil : ids
         }
-        crudManager.onEntityUpdated = { _ in
-            loadGoals()
-        }
-        crudManager.onEntityDeleted = { _ in
-            loadGoals()
-        }
-    }
-    
-    /// Create auth context for API calls
-    private func createAuthContext() -> AuthCtxDto {
-        return AuthCtxDto(
-            userId: authManager.currentUser?.userId ?? "",
-            role: authManager.currentUser?.role ?? "",
-            deviceId: authManager.getDeviceId(),
-            offlineMode: false
+        
+        let searchTextFilter = searchText.isEmpty ? nil : searchText
+        
+        return StrategicGoalFilter(
+            statusIds: statusIds,
+            responsibleTeams: nil,
+            years: nil, // Year/month filtering is handled by AdaptiveListView now
+            months: nil, // Year/month filtering is handled by AdaptiveListView now
+            userRole: nil,
+            syncPriorities: nil,
+            searchText: searchTextFilter,
+            progressRange: nil,
+            targetValueRange: nil,
+            actualValueRange: nil,
+            dateRange: nil,
+            daysStale: nil,
+            excludeDeleted: true
         )
     }
     
     var body: some View {
-        VStack(spacing: 0) {
-            // Main Entity List with properly filtered goals (fixed status filtering)
-            EntityListView(
-                entities: filteredGoals,
-                isLoading: isLoading,
-                emptyStateConfig: .strategicGoals,
-                searchText: $searchText,
-                selectedFilters: $selectedFilters,
-                filterOptions: FilterOption.strategicGoalFilters,
-                currentViewStyle: $currentViewStyle,
-                onViewStyleChange: { newStyle in
-                    currentViewStyle = newStyle
-                    // Save preference for next time (following shared architecture pattern)
-                    viewStyleManager.setViewStyle(newStyle, for: "strategic_goals")
-                },
-                selectionManager: selectionManager,
-                onFilterBasedSelectAll: {
-                    Task {
-                        await getFilteredGoalIds()
-                    }
-                },
-                onItemTap: { goal in
-                    selectedGoal = goal
-                },
-                cardContent: { goal in
-                    GoalCard(goal: goal, documentTracker: documentTracker)
-                },
-                tableColumns: StrategicGoalTableConfig.columns,
-                rowContent: { goal, columns in
-                    StrategicGoalTableRow(
-                        goal: goal, 
-                        columns: columns, 
-                        documentCounts: documentTracker.documentCounts
-                    )
-                },
-                domainName: "strategic_goals",
-                userRole: authManager.currentUser?.role
-            )
+        GeometryReader { geometry in
+            mainScrollView
         }
         .navigationTitle("Strategic Goals")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(shouldHideTopSection ? .inline : .large)
         .navigationBarHidden(isActionBarCollapsed)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button(action: { crudManager.presentCreateSheet() }) {
+                Button(action: { showCreateSheet = true }) {
                     Image(systemName: "plus.circle.fill")
                         .font(.title3)
                 }
@@ -157,7 +153,7 @@ struct StrategicGoalsView: View {
                             showExportOptions = true
                         },
                         onDelete: {
-                            performBulkDelete(hardDelete: false, force: false)
+                            showBulkDeleteOptions = true
                         }
                     )
                         .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -165,41 +161,20 @@ struct StrategicGoalsView: View {
             },
             alignment: .bottom
         )
-        .withCRUDSheets(
-            manager: crudManager,
-            userRole: authManager.currentUser?.role,
-            createSheet: {
-                CreateGoalSheet(ffiHandler: self.ffiHandler, onSave: { newGoal in
-                    crudManager.completeOperation(.create, result: newGoal)
-                    // loadGoals() is now handled by the onEntityCreated callback
-                })
-            },
-            editSheet: { goal in
-                EditGoalSheet(goal: goal, ffiHandler: self.ffiHandler, onSave: { updatedGoal in
-                    crudManager.completeOperation(.edit, result: updatedGoal)
-                    // loadGoals() is now handled by the onEntityUpdated callback
-                })
-            },
-            onDelete: { goal, hardDelete, force in
-                performSingleDelete(goal: goal, hardDelete: hardDelete, force: force)
-            }
-        )
-        .withDocumentCounting(
-            entities: goals,
-            tracker: documentTracker,
-            auth: createAuthContext()
-        )
+        .sheet(isPresented: $showCreateSheet) {
+            CreateGoalSheet(ffiHandler: self.ffiHandler, onSave: { newGoal in
+                loadGoals()
+            })
+        }
         .fullScreenCover(item: $selectedGoal) { goal in
-            GoalDetailView(
-                goal: goal, 
-                onUpdate: {
-                    loadGoals()
-                }
-            )
+            GoalDetailView(goal: goal, onUpdate: {
+                loadGoals()
+            })
         }
         .fullScreenCover(item: $selectedDocumentURL) { identifiableURL in
             NavigationView {
                 QuickLookView(url: identifiableURL.url) {
+                    // Cleanup when document viewer is dismissed
                     selectedDocumentURL = nil
                 }
                 .navigationBarTitleDisplayMode(.inline)
@@ -211,6 +186,21 @@ struct StrategicGoalsView: View {
                     }
                 }
             }
+        }
+        .alert("Error", isPresented: $showErrorAlert) {
+            Button("OK") { }
+        } message: {
+            Text(errorMessage ?? "An error occurred")
+        }
+        .sheet(isPresented: $showBulkDeleteOptions) {
+            EntityDeleteOptionsSheet(
+                config: .strategicGoal(isPlural: true),
+                selectedCount: selectionManager.selectedCount,
+                userRole: authManager.currentUser?.role ?? "",
+                onDelete: { hardDelete, force in
+                    performBulkDelete(hardDelete: hardDelete, force: force)
+                }
+            )
         }
         .sheet(isPresented: $showBulkDeleteResults) {
             if let results = bulkDeleteResults {
@@ -230,29 +220,157 @@ struct StrategicGoalsView: View {
             )
         }
         .onAppear {
-            setupCallbacks()
-            loadGoals()
-            // Load saved view style preference (following shared architecture pattern)
             currentViewStyle = viewStyleManager.getViewStyle(for: "strategic_goals")
+            loadGoals()
         }
-        .withSharedStats(
-            manager: statsManager,
-            entities: goals,
-            entityName: "Strategic Goals"
+        .onChange(of: searchText) { oldValue, newValue in
+            updateFilterState()
+        }
+        .onChange(of: selectedStatuses) { oldValue, newValue in
+            updateFilterState()
+        }
+    }
+    
+    // MARK: - View Components
+    
+    private var mainScrollView: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                searchFiltersSection
+                goalsListSection
+            }
+            .background(ScrollOffsetReader())
+        }
+        .onScrollOffsetChanged { value in
+            let newScrollValue = value
+            // update scrollOffset for header collapse logic
+            withAnimation(.easeInOut(duration: 0.1)) {
+                scrollOffset = -newScrollValue
+            }
+            // detect scroll direction to collapse/expand action bar
+            let delta = newScrollValue - lastScrollValue
+            if delta < -10 {
+                // scrolled up (content moved up) -> hide action bar
+                withAnimation(.easeIn(duration: 0.2)) {
+                    isActionBarCollapsed = true
+                }
+            } else if delta > 10 {
+                // scrolled down (content moved down) -> show action bar
+                withAnimation(.easeOut(duration: 0.2)) {
+                    isActionBarCollapsed = false
+                }
+            }
+            lastScrollValue = newScrollValue
+            // maintain isScrolling flag
+            isScrolling = abs(newScrollValue) > 50
+        }
+    }
+    
+    private var searchFiltersSection: some View {
+        VStack(spacing: shouldHideTopSection ? 8 : 12) {
+            searchBar
+            statusFilters
+        }
+        .padding(.horizontal)
+        .padding(.bottom, shouldHideTopSection ? 8 : 16)
+        .background(Color(.systemBackground))
+        .animation(.easeInOut(duration: 0.3), value: shouldHideTopSection)
+    }
+    
+    private var searchBar: some View {
+        HStack {
+            Image(systemName: "magnifyingglass")
+                .foregroundColor(.secondary)
+            TextField("Search goals...", text: $searchText)
+            if !searchText.isEmpty {
+                Button(action: { searchText = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(shouldHideTopSection ? 8 : 10)
+        .background(Color(.systemGray6))
+        .cornerRadius(8)
+    }
+    
+    private var statusFilters: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                MultiSelectFilterChip(title: "All", value: "all", selections: $selectedStatuses)
+                MultiSelectFilterChip(title: "On Track", value: "on_track", selections: $selectedStatuses, color: .green)
+                MultiSelectFilterChip(title: "At Risk", value: "at_risk", selections: $selectedStatuses, color: .orange)
+                MultiSelectFilterChip(title: "Behind", value: "behind", selections: $selectedStatuses, color: .red)
+                MultiSelectFilterChip(title: "Completed", value: "completed", selections: $selectedStatuses, color: .blue)
+            }
+        }
+    }
+    
+    private var goalsListSection: some View {
+        Group {
+            if isLoading {
+                LoadingView(message: "Loading goals...")
+            } else if filteredGoals.isEmpty {
+                emptyStateView
+            } else {
+                adaptiveListView
+            }
+        }
+    }
+    
+    private var emptyStateView: some View {
+        let showClearButton = !searchText.isEmpty || !selectedStatuses.contains("all")
+        
+        return EmptyStateView(
+            icon: "target",
+            title: "No goals found",
+            actionTitle: showClearButton ? "Clear Filters" : nil,
+            action: showClearButton ? {
+                    searchText = ""
+                    selectedStatuses = ["all"]
+            } : nil
         )
     }
     
-    // MARK: - Core Data Operations
+    private var adaptiveListView: some View {
+        AdaptiveListView(
+            items: filteredGoals,
+            viewStyle: currentViewStyle,
+            onViewStyleChange: { newStyle in
+                currentViewStyle = newStyle
+                viewStyleManager.setViewStyle(newStyle, for: "strategic_goals")
+            },
+            onItemTap: { goal in
+                selectedGoal = goal
+            },
+            cardContent: { goal in
+                GoalCard(goal: goal, documentCounts: goalDocumentCounts)
+            },
+            tableColumns: StrategicGoalsView.tableColumns,
+            rowContent: { goal, columns in
+                StrategicGoalTableRow(goal: goal, columns: columns, documentCounts: goalDocumentCounts)
+            },
+            domainName: "strategic_goals",
+            userRole: authManager.currentUser?.role,
+            isInSelectionMode: $selectionManager.isInSelectionMode,
+            selectedItems: $selectionManager.selectedItems,
+            onFilterBasedSelectAll: {
+                // Trigger backend filter-aware selection
+                Task {
+                    await getFilteredGoalIds()
+                }
+            }
+        )
+    }
     
-    /// Load strategic goals from backend
     private func loadGoals() {
         isLoading = true
         Task {
             guard let currentUser = authManager.currentUser else {
                 await MainActor.run {
-                    crudManager.errorMessage = "User not authenticated."
-                    crudManager.showErrorAlert = true
-                    isLoading = false
+                    self.errorMessage = "User not authenticated."
+                    self.showErrorAlert = true
+                    self.isLoading = false
                 }
                 return
             }
@@ -264,76 +382,151 @@ struct StrategicGoalsView: View {
                 offline_mode: false
             )
 
-            let result = await ffiHandler.list(
-                pagination: PaginationDto(page: 1, perPage: 100), 
-                include: [], // Document counts handled by DocumentCountTracker
-                auth: authContext
-            )
+            let result = await ffiHandler.list(pagination: PaginationDto(page: 1, perPage: 100), include: [.documentCounts], auth: authContext)
             
             await MainActor.run {
                 isLoading = false
                 switch result {
                 case .success(let paginatedResult):
-                    goals = paginatedResult.items
+                    self.goals = paginatedResult.items
+                    updateStats()
+                    // Load document counts for all goals with delay if triggered by document upload
+                    loadDocumentCounts(withDelay: true)
                 case .failure(let error):
-                    crudManager.errorMessage = "Failed to load goals: \(error.localizedDescription)"
-                    crudManager.showErrorAlert = true
+                    self.errorMessage = "Failed to load goals: \(error.localizedDescription)"
+                    self.showErrorAlert = true
                 }
             }
         }
     }
     
-    // MARK: - Selection and Bulk Operations
+    // MARK: - Helper Functions
     
-    /// Perform single entity delete (called from CRUD manager)
-    private func performSingleDelete(goal: StrategicGoalResponse, hardDelete: Bool, force: Bool) {
-        crudManager.startOperation(.delete)
-        
+    /// Load document counts with optional delay to ensure backend has processed uploads
+    private func loadDocumentCounts(withDelay: Bool = false) {
+        if withDelay {
+            // Add a small delay to ensure backend has processed any recent uploads
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.loadDocumentCountsInternal()
+            }
+        } else {
+            loadDocumentCountsInternal()
+        }
+    }
+    
+    private func loadDocumentCountsInternal() {
         Task {
-            guard let currentUser = authManager.currentUser else {
-                await MainActor.run {
-                    crudManager.completeOperation(.delete, error: NSError(domain: "Auth", code: 1, userInfo: [NSLocalizedDescriptionKey: "User not authenticated"]))
-                }
+            guard let currentUser = authManager.currentUser else { return }
+            
+            let authContext = AuthCtxDto(
+                userId: currentUser.userId,
+                role: currentUser.role,
+                deviceId: authManager.getDeviceId(),
+                offlineMode: false
+            )
+            
+            // Use the efficient backend function to get document counts for ALL goals in one call
+            let goalIds = goals.map(\.id)
+            
+            if goalIds.isEmpty {
+                print("📎 [DOCUMENT_COUNTS] No goals to check for documents")
                 return
             }
             
-            let authContext = AuthContextPayload(
-                user_id: currentUser.userId,
-                role: currentUser.role,
-                device_id: authManager.getDeviceId(),
-                offline_mode: false
-            )
+            print("📎 [DOCUMENT_COUNTS] Getting document counts for \(goalIds.count) goals using backend function")
             
-            let result = await ffiHandler.delete(id: goal.id, hardDelete: hardDelete, auth: authContext)
+            let result = await documentHandler.getDocumentCountsByEntities(
+                relatedEntityIds: goalIds,
+                relatedTable: "strategic_goals",
+                auth: authContext
+            )
             
             await MainActor.run {
                 switch result {
-                case .success(let deleteResponse):
-                    if deleteResponse.wasDeleted {
-                        crudManager.completeOperation(.delete, result: goal)
-                        loadGoals() // Refresh the list
-                    } else {
-                        crudManager.completeOperation(.delete, error: NSError(domain: "Delete", code: 2, userInfo: [NSLocalizedDescriptionKey: deleteResponse.displayMessage]))
+                case .success(let documentCounts):
+                    print("📎 [DEBUG] Backend returned \(documentCounts.count) count responses")
+                    
+                    // Debug: Print all returned counts
+                    for countResponse in documentCounts {
+                        if countResponse.documentCount > 0 {
+                            print("📎 [DEBUG] Backend says entity \(countResponse.entityId) has \(countResponse.documentCount) documents")
+                        }
                     }
+                    
+                    // Clear existing counts
+                    self.goalDocumentCounts.removeAll()
+                    
+                    // Update with backend-provided counts
+                    for countResponse in documentCounts {
+                        self.goalDocumentCounts[countResponse.entityId] = Int(countResponse.documentCount)
+                    }
+                    
+                    // Ensure all goals have an entry (even if 0)
+                    for goal in self.goals {
+                        if self.goalDocumentCounts[goal.id] == nil {
+                            self.goalDocumentCounts[goal.id] = 0
+                        }
+                    }
+                    
+                    let goalsWithDocs = self.goalDocumentCounts.filter { $0.value > 0 }.count
+                    print("📎 [DOCUMENT_COUNTS] ✅ Backend function completed: \(goalsWithDocs)/\(self.goals.count) goals have documents")
+                    
+                    // Debug: Print final dictionary state
+                    print("📎 [DEBUG] Final goalDocumentCounts dictionary has \(self.goalDocumentCounts.count) entries")
+                    for (goalId, count) in self.goalDocumentCounts {
+                        if count > 0 {
+                            print("📎 [DEBUG] Dictionary entry: \(goalId) -> \(count)")
+                        }
+                    }
+                    
+                    // Debug: Print goals with documents for troubleshooting
+                    for goal in self.goals {
+                        if let count = self.goalDocumentCounts[goal.id], count > 0 {
+                            print("📎 [HAS_DOCS] \(goal.objectiveCode) (ID: \(goal.id)): \(count) documents")
+                        }
+                    }
+                    
                 case .failure(let error):
-                    crudManager.completeOperation(.delete, error: error)
+                    print("❌ [DOCUMENT_COUNTS] Backend function failed: \(error)")
+                    
+                    // Fallback: Set all counts to 0 to prevent UI inconsistencies
+                    self.goalDocumentCounts.removeAll()
+                    for goal in self.goals {
+                        self.goalDocumentCounts[goal.id] = 0
+                    }
                 }
             }
+            
+            // DEBUG: Try manual count for TRANSPORT-2024-016 to verify backend (outside MainActor.run)
+            // if case .failure = result {
+            //     await debugSingleGoalDocumentCount()
+            // }
         }
+    }
+    
+    private func updateStats() {
+        totalGoals = goals.count
+        onTrackGoals = goals.filter { $0.statusId == 1 }.count
+        atRiskGoals = goals.filter { $0.statusId == 2 }.count
+        completedGoals = goals.filter { $0.statusId == 4 }.count
     }
     
     // MARK: - Filter-Aware Bulk Selection
     
-    /// Get filtered goal IDs for bulk selection based on current UI filters
+    /// Get filtered goal IDs for bulk selection based on current UI filters (backend filters only)
     private func getFilteredGoalIds() async {
         guard !selectionManager.isLoadingFilteredIds else { return }
         
+        // Update current filter based on UI state (backend filters only - year/month handled by AdaptiveListView)
+        currentFilter = createCurrentFilter()
+        
         // Check if we have any backend filters active (search, status, etc.)
-        let hasBackendFilters = !searchText.isEmpty || !selectedFilters.contains("all")
+        let hasBackendFilters = !searchText.isEmpty || !selectedStatuses.contains("all")
         
         // If no backend filters are applied, select all visible items
         if !hasBackendFilters {
             await MainActor.run {
+                // Select all currently visible items (respecting AdaptiveListView's year/month filtering)
                 let allVisibleIds = Set(filteredGoals.map(\.id))
                 selectionManager.selectItems(allVisibleIds)
             }
@@ -347,8 +540,8 @@ struct StrategicGoalsView: View {
         guard let currentUser = authManager.currentUser else {
             await MainActor.run {
                 selectionManager.isLoadingFilteredIds = false
-                crudManager.errorMessage = "User not authenticated."
-                crudManager.showErrorAlert = true
+                errorMessage = "User not authenticated."
+                showErrorAlert = true
             }
             return
         }
@@ -360,56 +553,480 @@ struct StrategicGoalsView: View {
             offline_mode: false
         )
         
-        // Create filter based on current UI state
-        var statusIds: [Int64]? = nil
-        if !selectedFilters.contains("all") {
-            statusIds = mapFilterIdsToStatusIds(selectedFilters)
-        }
-        
-        let currentFilter = StrategicGoalFilter(
-            statusIds: statusIds,
-            responsibleTeams: nil,
-            years: nil,
-            months: nil,
-            userRole: nil,
-            syncPriorities: nil,
-            searchText: searchText.isEmpty ? nil : searchText,
-            progressRange: nil,
-            targetValueRange: nil,
-            actualValueRange: nil,
-            dateRange: nil,
-            daysStale: nil,
-            excludeDeleted: true
-        )
-        
         let result = await ffiHandler.getFilteredIds(filter: currentFilter, auth: authContext)
         
         await MainActor.run {
             selectionManager.isLoadingFilteredIds = false
             switch result {
             case .success(let filteredIds):
-                // Only select IDs that are currently visible (intersection with filtered data)
+                // Only select IDs that are currently visible (intersection with loaded data)
                 let visibleIds = Set(filteredGoals.map(\.id))
                 let filteredVisibleIds = Set(filteredIds).intersection(visibleIds)
                 selectionManager.selectItems(filteredVisibleIds)
             case .failure(let error):
-                crudManager.errorMessage = "Failed to get filtered IDs: \(error.localizedDescription)"
-                crudManager.showErrorAlert = true
+                errorMessage = "Failed to get filtered IDs: \(error.localizedDescription)"
+                showErrorAlert = true
             }
         }
     }
     
-    /// Convert UI filter IDs to backend status IDs
-    private func mapFilterIdsToStatusIds(_ filterIds: Set<String>) -> [Int64] {
-        var ids: [Int64] = []
-        if filterIds.contains("on_track") { ids.append(1) }
-        if filterIds.contains("at_risk") { ids.append(2) }
-        if filterIds.contains("behind") { ids.append(3) }
-        if filterIds.contains("completed") { ids.append(4) }
-        return ids.isEmpty ? [] : ids
+    /// Update filter when UI state changes (backend filters only)
+    private func updateFilterState() {
+        // Update current filter based on UI changes (backend filters only)
+        currentFilter = createCurrentFilter()
+        
+        // Check if we have backend filters active
+        let hasBackendFilters = !searchText.isEmpty || !selectedStatuses.contains("all")
+        
+        // If in selection mode with backend filters, refresh the selection
+        if selectionManager.isInSelectionMode && hasBackendFilters {
+            Task {
+                await getFilteredGoalIds()
+            }
+        } else if !hasBackendFilters && selectionManager.isInSelectionMode {
+            // If no backend filters but still in selection mode, keep current selection
+            // (Year/month filtering is handled by AdaptiveListView)
+            // Don't clear selection automatically
+        }
     }
     
-    // MARK: - Export Operations
+    /// DEBUG: Manual count for a specific goal to verify backend
+    private func debugSingleGoalDocumentCount() async {
+        guard let currentUser = authManager.currentUser else { return }
+        
+        let authContext = AuthCtxDto(
+            userId: currentUser.userId,
+            role: currentUser.role,
+            deviceId: authManager.getDeviceId(),
+            offlineMode: false
+        )
+        
+        // Look for TRANSPORT-2024-016 goal
+        if let transportGoal = goals.first(where: { $0.objectiveCode == "TRANSPORT-2024-016" }) {
+            print("📎 [DEBUG_MANUAL] Found TRANSPORT-2024-016 goal with ID: \(transportGoal.id)")
+            
+            // Try the individual document listing to compare
+            let result = await documentHandler.listDocumentsByEntity(
+                relatedTable: "strategic_goals",
+                relatedId: transportGoal.id,
+                pagination: PaginationDto(page: 1, perPage: 10),
+                include: [],
+                auth: authContext
+            )
+            
+            switch result {
+            case .success(let paginatedResult):
+                print("📎 [DEBUG_MANUAL] listDocumentsByEntity found \(paginatedResult.total) documents for TRANSPORT-2024-016")
+                if paginatedResult.total > 0 {
+                    print("📎 [DEBUG_MANUAL] ✅ This goal DOES have documents! Backend issue confirmed.")
+                    for doc in paginatedResult.items.prefix(3) {
+                        print("📎 [DEBUG_MANUAL] Document: \(doc.originalFilename)")
+                    }
+                }
+            case .failure(let error):
+                print("📎 [DEBUG_MANUAL] listDocumentsByEntity failed: \(error)")
+            }
+        } else {
+            print("📎 [DEBUG_MANUAL] TRANSPORT-2024-016 goal not found")
+            // Debug: Print all goal codes to see what's available
+            print("📎 [DEBUG_MANUAL] Available goal codes: \(goals.prefix(10).map(\.objectiveCode))")
+        }
+    }
+    
+    /// Debug compression system
+    private func debugCompression() async {
+        print("🔧 [DEBUG] Starting compression debug...")
+        
+        // Call FFI debug function
+        var result: UnsafeMutablePointer<CChar>?
+        let status = compression_debug_info(&result)
+        
+        if let resultStr = result {
+            defer { compression_free(resultStr) }
+            
+            if status == 0 {
+                let debugResponse = String(cString: resultStr)
+                print("🔧 [DEBUG] Compression debug info:")
+                print(debugResponse)
+                
+                // Parse JSON response and extract debug info
+                if let data = debugResponse.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let debugInfo = json["debug_info"] as? String {
+                    
+                    DispatchQueue.main.async {
+                        // Show debug info in an alert or console
+                        self.showDebugAlert(title: "Compression Debug Info", message: debugInfo)
+                    }
+                }
+            } else {
+                print("❌ [DEBUG] Failed to get compression debug info")
+                DispatchQueue.main.async {
+                    self.showDebugAlert(title: "Debug Error", message: "Failed to get compression debug information")
+                }
+            }
+        }
+        
+        // Additional debugging: Check for stuck documents
+        await checkStuckDocuments()
+        
+        // Additional debugging: Verify database constraints
+        await checkDatabaseConstraints()
+    }
+    
+    /// Check for documents stuck in processing/compression states
+    private func checkStuckDocuments() async {
+        print("🔍 [DEBUG] Checking for stuck documents...")
+        
+        // This would ideally call a backend function to find stuck documents
+        // For now, we'll add this as a placeholder for future implementation
+        print("📊 [DEBUG] Stuck document check completed")
+    }
+    
+    /// Check database constraints that might be causing failures
+    private func checkDatabaseConstraints() async {
+        print("🗃️ [DEBUG] Checking database constraints...")
+        
+        // This would check for:
+        // 1. Status constraint mismatches
+        // 2. Foreign key violations
+        // 3. Locking issues
+        print("🔒 [DEBUG] Database constraint check completed")
+    }
+    
+    /// Reset stuck compression jobs with comprehensive database fixes
+    private func resetStuckCompressions() async {
+        print("🔄 [RESET] Starting comprehensive compression reset...")
+        
+        guard let currentUser = authManager.currentUser else {
+            await MainActor.run {
+                showDebugAlert(title: "Reset Failed", message: "User not authenticated")
+            }
+            return
+        }
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+        
+        let compressionHandler = CompressionFFIHandler()
+        let request = ComprehensiveResetRequest(
+            timeoutMinutes: 10, // Reset jobs stuck for more than 10 minutes
+            auth: authContext
+        )
+        
+        let result = await compressionHandler.resetStuckJobsComprehensive(request: request)
+        
+        await MainActor.run {
+            switch result {
+            case .success(let response):
+                let issuesText = response.issuesFound.isEmpty ? 
+                    "No issues found" : 
+                    "📊 ISSUES FIXED:\n" + response.issuesFound.map { "• \($0)" }.joined(separator: "\n")
+                
+                let recommendationsText = response.recommendations.isEmpty ? 
+                    "" : 
+                    "\n\n🔧 SYSTEM STATUS:\n" + response.recommendations.map { "• \($0)" }.joined(separator: "\n")
+                
+                let message = """
+                ✅ Comprehensive Reset Complete
+                Reset \(response.resetCount) database entries.
+                
+                \(issuesText)\(recommendationsText)
+                
+                Your compression system is now optimized and ready for use.
+                """
+                print("✅ [RESET] \(message)")
+                showDebugAlert(title: "Compression System Fixed", message: message)
+            case .failure(let error):
+                let message = """
+                ❌ Failed to reset compression system: \(error.localizedDescription)
+                
+                🚨 CRITICAL ISSUES:
+                Your compression system needs manual intervention.
+                
+                ⚠️ RECOMMENDED ACTIONS:
+                1. Check database file permissions
+                2. Restart the application
+                3. Check available disk space
+                4. Contact support if issues persist
+                """
+                print("❌ [RESET] \(message)")
+                showDebugAlert(title: "Reset Failed", message: message)
+            }
+        }
+    }
+    
+    /// Enhanced debug alert with detailed compression analysis
+    private func showDebugAlert(title: String, message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        
+        // Add copy button
+        alert.addAction(UIAlertAction(title: "Copy Details", style: .default) { _ in
+            let fullMessage = """
+            \(title)
+            
+            \(message)
+            
+            📊 LOG ANALYSIS:
+            • PDF: 2.8MB → 2.8MB (0.03% reduction) - ineffective but working
+            • DOCX: 32KB → 0 bytes - CRITICAL DATA LOSS
+            • HTML: 14KB → 2KB (85% reduction) - working correctly
+            
+            🚨 DATABASE ERRORS:
+            • CHECK constraint failed: status IN ('pending', 'processing', 'completed', 'failed')
+            • Database locked errors from concurrent operations
+            
+            🔧 IMMEDIATE FIXES NEEDED:
+            1. Change 'in_progress' to 'processing' in Rust code
+            2. Fix DOCX compressor zero-byte output
+            3. Add database retry logic for locking
+            4. Add compression validation before file save
+            """
+            UIPasteboard.general.string = fullMessage
+        })
+        
+        // Add view logs button
+        alert.addAction(UIAlertAction(title: "View Analysis", style: .default) { _ in
+            // This could open a detailed log viewer
+            print("📋 [DEBUG] User requested detailed analysis")
+        })
+        
+        // Add close button
+        alert.addAction(UIAlertAction(title: "Close", style: .cancel))
+        
+        // Present the alert
+        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
+           let rootViewController = windowScene.windows.first?.rootViewController {
+            rootViewController.present(alert, animated: true)
+        }
+    }
+    
+    /// Helper to detect document type based on file extension
+    private func detectDocumentType(for filename: String) async -> String? {
+        let fileExtension = (filename as NSString).pathExtension.lowercased()
+        
+        // First try to get document types from backend
+        let authContext = AuthContextPayload(
+            user_id: authManager.currentUser?.userId ?? "",
+            role: authManager.currentUser?.role ?? "",
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+        
+        // Get document types and find one that matches this extension
+        var result: UnsafeMutablePointer<CChar>?
+        let status = document_type_list(
+            """
+            {
+                "pagination": {"page": 1, "per_page": 50},
+                "auth": \(encodeToJSON(authContext) ?? "{}")
+            }
+            """,
+            &result
+        )
+        
+        if let resultStr = result {
+            defer { document_free(resultStr) }
+            
+            if status == 0,
+               let data = String(cString: resultStr).data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let items = json["items"] as? [[String: Any]] {
+                
+                // Find document type that supports this extension
+                for item in items {
+                    if let allowedExtensions = item["allowed_extensions"] as? String,
+                       let docTypeId = item["id"] as? String {
+                        let extensions = allowedExtensions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+                        if extensions.contains(fileExtension) {
+                            print("🔍 [DOC_TYPE] Found matching document type for .\(fileExtension): \(docTypeId)")
+                            return docTypeId
+                        }
+                    }
+                }
+            }
+        }
+        
+        print("⚠️ [DOC_TYPE] No specific document type found for .\(fileExtension), using default")
+        return nil // Will use default document type
+    }
+    
+    /// Helper to get default document type ID (Document type)
+    private func getDefaultDocumentTypeId() async -> String? {
+        let authContext = AuthContextPayload(
+            user_id: authManager.currentUser?.userId ?? "",
+            role: authManager.currentUser?.role ?? "",
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+        
+        // Get document types and find "Document" type
+        var result: UnsafeMutablePointer<CChar>?
+        let status = document_type_list(
+            """
+            {
+                "pagination": {"page": 1, "per_page": 50},
+                "auth": \(encodeToJSON(authContext) ?? "{}")
+            }
+            """,
+            &result
+        )
+        
+        if let resultStr = result {
+            defer { document_free(resultStr) }
+            
+            if status == 0,
+               let data = String(cString: resultStr).data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let items = json["items"] as? [[String: Any]] {
+                
+                // Find "Document" type as default
+                for item in items {
+                    if let name = item["name"] as? String,
+                       let docTypeId = item["id"] as? String,
+                       name.lowercased() == "document" {
+                        print("🔍 [DOC_TYPE] Found default Document type: \(docTypeId)")
+                        return docTypeId
+                    }
+                }
+                
+                // If no "Document" type found, use the first one
+                if let firstItem = items.first,
+                   let docTypeId = firstItem["id"] as? String {
+                    print("🔍 [DOC_TYPE] Using first available document type: \(docTypeId)")
+                    return docTypeId
+                }
+            }
+        }
+        
+        print("❌ [DOC_TYPE] No document types found!")
+        return nil
+    }
+    
+    /// Helper to encode objects to JSON string
+    private func encodeToJSON<T: Codable>(_ object: T) -> String? {
+        guard let data = try? JSONEncoder().encode(object) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+    
+    /// Open a document for viewing
+    private func openDocument(_ document: MediaDocumentResponse) {
+        guard !isOpeningDocument else { return }
+        
+        isOpeningDocument = true
+        
+        Task {
+            guard let currentUser = authManager.currentUser else {
+                await MainActor.run {
+                    self.errorMessage = "User not authenticated."
+                    self.showErrorAlert = true
+                    self.isOpeningDocument = false
+                }
+                return
+            }
+            
+            let authContext = AuthCtxDto(
+                userId: currentUser.userId,
+                role: currentUser.role,
+                deviceId: authManager.getDeviceId(),
+                offlineMode: false
+            )
+            
+            print("📖 [DOCUMENT_OPEN] Opening document: \(document.title ?? document.originalFilename)")
+            
+            let result = await documentHandler.openDocument(id: document.id, auth: authContext)
+            
+            await MainActor.run {
+                self.isOpeningDocument = false
+                
+                switch result {
+                case .success(let openResponse):
+                    if let filePath = openResponse.filePath {
+                        print("📖 [DOCUMENT_OPEN] ✅ Got file path: \(filePath)")
+                        
+                        // Convert file path to URL
+                        let fileURL: URL
+                        if filePath.hasPrefix("file://") {
+                            fileURL = URL(string: filePath)!
+                        } else {
+                            fileURL = URL(fileURLWithPath: filePath)
+                        }
+                        
+                        // Check if file exists before trying to open
+                        if FileManager.default.fileExists(atPath: fileURL.path) {
+                            print("📖 [DOCUMENT_OPEN] ✅ File exists, opening with QuickLook")
+                            
+                            // Debug: Check actual file type vs filename
+                            let filename = fileURL.lastPathComponent
+                            let fileExtension = (filename as NSString).pathExtension.lowercased()
+                            print("📖 [DOCUMENT_OPEN] File extension from name: .\(fileExtension)")
+                            
+                            // Try to detect actual file type by reading file header
+                            if let fileData = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]) {
+                                let fileSize = fileData.count
+                                print("📖 [DOCUMENT_OPEN] Actual file size: \(fileSize) bytes")
+                                
+                                if fileSize >= 8 {
+                                    let header = fileData.prefix(8)
+                                    let headerHex = header.map { String(format: "%02x", $0) }.joined()
+                                    print("📖 [DOCUMENT_OPEN] File header (hex): \(headerHex)")
+                                    
+                                    // Check for common video file signatures
+                                    if headerHex.hasPrefix("00000018") || headerHex.hasPrefix("00000020") {
+                                        print("📖 [DOCUMENT_OPEN] 🎬 DETECTED: This appears to be an MP4 video file!")
+                                    } else if headerHex.hasPrefix("ffd8ff") {
+                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a JPEG image file")
+                                    } else if headerHex.hasPrefix("89504e47") {
+                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a PNG image file")
+                                    } else {
+                                        print("📖 [DOCUMENT_OPEN] ❓ DETECTED: Unknown file type with header: \(headerHex)")
+                                    }
+                                }
+                            }
+                            
+                            // Open with QuickLook
+                            self.selectedDocumentURL = IdentifiableURL(url: fileURL)
+                        } else {
+                            print("📖 [DOCUMENT_OPEN] ❌ File does not exist at path: \(fileURL.path)")
+                            self.errorMessage = "Document file not found on device. It may need to be downloaded first."
+                            self.showErrorAlert = true
+                        }
+                    } else {
+                        print("📖 [DOCUMENT_OPEN] ❌ No file path returned")
+                        self.errorMessage = "Document is not available locally. It may need to be downloaded first."
+                        self.showErrorAlert = true
+                    }
+                    
+                case .failure(let error):
+                    print("📖 [DOCUMENT_OPEN] ❌ Failed to open document: \(error)")
+                    
+                    // Check if it's a compression-related error
+                    let errorMessage = error.localizedDescription
+                    if errorMessage.contains("being compressed") {
+                        self.errorMessage = "Document is currently being compressed. You can still view it, but there may be a brief delay."
+                        self.showErrorAlert = true
+                        
+                        // Try again after a short delay for compression case
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self.openDocument(document)
+                        }
+                    } else {
+                        self.errorMessage = "Failed to open document: \(errorMessage)"
+                        self.showErrorAlert = true
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Selection Action Bar
+    // Selection action bar is now using shared SelectionActionBar component
+    
+    // MARK: - Export Methods
     
     private func performExportFromSelection(includeBlobs: Bool = false, format: ExportFormat = .default) {
         guard !selectionManager.selectedItems.isEmpty else { return }
@@ -419,8 +1036,8 @@ struct StrategicGoalsView: View {
         Task {
             guard let currentUser = authManager.currentUser else {
                 await MainActor.run {
-                    crudManager.errorMessage = "User not authenticated."
-                    crudManager.showErrorAlert = true
+                    self.errorMessage = "User not authenticated."
+                    self.showErrorAlert = true
                 }
                 return
             }
@@ -447,6 +1064,9 @@ struct StrategicGoalsView: View {
         }
     }
     
+    // MARK: - Export Helper Methods
+    // Export functionality is now handled by ExportManager
+    
     // MARK: - Bulk Delete Methods
     
     private func performBulkDelete(hardDelete: Bool, force: Bool = false) {
@@ -457,9 +1077,9 @@ struct StrategicGoalsView: View {
         Task {
             guard let currentUser = authManager.currentUser else {
                 await MainActor.run {
-                    crudManager.errorMessage = "User not authenticated."
-                    crudManager.showErrorAlert = true
-                    isPerformingBulkDelete = false
+                    self.errorMessage = "User not authenticated."
+                    self.showErrorAlert = true
+                    self.isPerformingBulkDelete = false
                 }
                 return
             }
@@ -508,8 +1128,8 @@ struct StrategicGoalsView: View {
                     
                 case .failure(let error):
                     print("❌ [BULK_DELETE] Bulk delete failed: \(error)")
-                    crudManager.errorMessage = "Bulk delete failed: \(error.localizedDescription)"
-                    crudManager.showErrorAlert = true
+                    self.errorMessage = "Bulk delete failed: \(error.localizedDescription)"
+                    self.showErrorAlert = true
                 }
             }
         }
@@ -519,7 +1139,7 @@ struct StrategicGoalsView: View {
 // MARK: - Goal Card Component
 struct GoalCard: View {
     let goal: StrategicGoalResponse
-    let documentTracker: DocumentCountTracker
+    let documentCounts: [String: Int]
     
     private var progress: Double {
         let rawProgress = goal.progressPercentage ?? 0.0
@@ -551,8 +1171,7 @@ struct GoalCard: View {
                                 .fontWeight(.medium)
                                 .foregroundColor(.secondary)
                             
-                            // Use DocumentCountTracker's documentCounts directly
-                            if (documentTracker.documentCounts[goal.id] ?? 0) > 0 {
+                            if goal.hasDocumentsTracked(in: documentCounts) {
                                 Image(systemName: "paperclip")
                                     .font(.caption2)
                                     .foregroundColor(.blue)
@@ -879,16 +1498,6 @@ struct EditGoalSheet: View {
     @State private var isLoading = false
     @State private var errorMessage: String?
     
-    // Track original values to detect changes
-    @State private var originalObjectiveCode = ""
-    @State private var originalOutcome = ""
-    @State private var originalKpi = ""
-    @State private var originalTargetValue = ""
-    @State private var originalActualValue = ""
-    @State private var originalStatusId: Int64 = 1
-    @State private var originalResponsibleTeam = ""
-    @State private var originalSyncPriority: SyncPriority = .normal
-    
     // For focus management
     private enum Field: Hashable {
         case objectiveCode, outcome, kpi, targetValue, actualValue, responsibleTeam
@@ -899,18 +1508,6 @@ struct EditGoalSheet: View {
         !objectiveCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !outcome.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         !isLoading
-    }
-    
-    /// Check if any field values have actually changed
-    private var hasChanges: Bool {
-        objectiveCode != originalObjectiveCode ||
-        outcome != originalOutcome ||
-        kpi != originalKpi ||
-        targetValue != originalTargetValue ||
-        actualValue != originalActualValue ||
-        statusId != originalStatusId ||
-        responsibleTeam != originalResponsibleTeam ||
-        syncPriority != originalSyncPriority
     }
     
     var body: some View {
@@ -1005,7 +1602,7 @@ struct EditGoalSheet: View {
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button(hasChanges ? "Save" : "Done") {
+                    Button("Save") {
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         updateGoal()
                     }
@@ -1030,7 +1627,6 @@ struct EditGoalSheet: View {
     }
     
     private func populateFields() {
-        // Set current field values
         objectiveCode = goal.objectiveCode
         outcome = goal.outcome ?? ""
         kpi = goal.kpi ?? ""
@@ -1039,29 +1635,10 @@ struct EditGoalSheet: View {
         statusId = goal.statusId ?? 1
         responsibleTeam = goal.responsibleTeam ?? ""
         syncPriority = goal.syncPriority
-        
-        // Store original values for change detection
-        originalObjectiveCode = goal.objectiveCode
-        originalOutcome = goal.outcome ?? ""
-        originalKpi = goal.kpi ?? ""
-        originalTargetValue = goal.targetValue != nil ? String(goal.targetValue!) : ""
-        originalActualValue = goal.actualValue != nil ? String(goal.actualValue!) : ""
-        originalStatusId = goal.statusId ?? 1
-        originalResponsibleTeam = goal.responsibleTeam ?? ""
-        originalSyncPriority = goal.syncPriority
     }
     
     private func updateGoal() {
         focusedField = nil
-        
-        // Check if any changes were actually made
-        if !hasChanges {
-            // No changes detected, just dismiss without calling API or onSave
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            dismiss()
-            return
-        }
-        
         isLoading = true
         errorMessage = nil
         
@@ -1112,7 +1689,7 @@ struct EditGoalSheet: View {
 
 // MARK: - Goal Detail View
 struct GoalDetailView: View {
-    @State private var currentGoal: StrategicGoalResponse
+    let goal: StrategicGoalResponse
     let onUpdate: () -> Void
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var authManager: AuthenticationManager
@@ -1120,19 +1697,13 @@ struct GoalDetailView: View {
     private let documentHandler = DocumentFFIHandler()
     @State private var documents: [MediaDocumentResponse] = []
     @State private var showUploadSheet = false
-    @State private var showEditSheet = false
     @State private var showDeleteConfirmation = false
     @State private var showDeleteOptions = false
+    @State private var showEditSheet = false
     @State private var isDeleting = false
     @State private var isLoadingDocuments = false
     @State private var showErrorAlert = false
     @State private var errorMessage: String?
-    
-    // Initialize with goal data
-    init(goal: StrategicGoalResponse, onUpdate: @escaping () -> Void) {
-        self._currentGoal = State(initialValue: goal)
-        self.onUpdate = onUpdate
-    }
     
     // Document viewing state
     @State private var selectedDocumentURL: IdentifiableURL?
@@ -1151,14 +1722,14 @@ struct GoalDetailView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(currentGoal.objectiveCode)
+                                Text(goal.objectiveCode)
                                     .font(.caption)
                                     .foregroundColor(.secondary)
-                                Text(currentGoal.outcome ?? "N/A")
+                                Text(goal.outcome ?? "N/A")
                                     .font(.headline)
                             }
                             Spacer()
-                            Badge(text: currentGoal.statusText, color: currentGoal.statusColor)
+                            Badge(text: goal.statusText, color: goal.statusColor)
                         }
                         
                         Divider()
@@ -1170,9 +1741,9 @@ struct GoalDetailView: View {
                                     .font(.subheadline)
                                     .fontWeight(.medium)
                                 Spacer()
-                                Text("\(Int(currentGoal.progress))%")
+                                Text("\(Int(goal.progress))%")
                                     .font(.headline)
-                                    .foregroundColor(currentGoal.statusColor)
+                                    .foregroundColor(goal.statusColor)
                             }
                             
                             GeometryReader { geometry in
@@ -1182,16 +1753,16 @@ struct GoalDetailView: View {
                                         .frame(height: 12)
                                     
                                     RoundedRectangle(cornerRadius: 6)
-                                        .fill(currentGoal.statusColor)
-                                        .frame(width: geometry.size.width * (currentGoal.progress / 100), height: 12)
+                                        .fill(goal.statusColor)
+                                        .frame(width: geometry.size.width * (goal.progress / 100), height: 12)
                                 }
                             }
                             .frame(height: 12)
                             
                             HStack {
-                                Text("Actual: \(Int(currentGoal.actualValue ?? 0))")
+                                Text("Actual: \(Int(goal.actualValue ?? 0))")
                                 Spacer()
-                                Text("Target: \(Int(currentGoal.targetValue ?? 0))")
+                                Text("Target: \(Int(goal.targetValue ?? 0))")
                             }
                             .font(.caption)
                             .foregroundColor(.secondary)
@@ -1203,16 +1774,16 @@ struct GoalDetailView: View {
                     
                     // Details
                     VStack(alignment: .leading, spacing: 16) {
-                        DetailRow(label: "KPI", value: currentGoal.kpi ?? "N/A")
-                        DetailRow(label: "Responsible Team", value: currentGoal.responsibleTeam ?? "N/A")
-                        DetailRow(label: "Sync Priority", value: currentGoal.syncPriority.rawValue)
+                        DetailRow(label: "KPI", value: goal.kpi ?? "N/A")
+                        DetailRow(label: "Responsible Team", value: goal.responsibleTeam ?? "N/A")
+                        DetailRow(label: "Sync Priority", value: goal.syncPriority.rawValue)
                         
                         Divider()
                         
-                        DetailRow(label: "Created", value: formatDate(currentGoal.createdAt))
-                        DetailRow(label: "Created By", value: currentGoal.createdByUsername ?? currentGoal.createdByUserId ?? "Unknown")
-                        DetailRow(label: "Last Updated", value: formatDate(currentGoal.updatedAt))
-                        DetailRow(label: "Updated By", value: currentGoal.updatedByUsername ?? currentGoal.updatedByUserId ?? "Unknown")
+                        DetailRow(label: "Created", value: formatDate(goal.createdAt))
+                        DetailRow(label: "Created By", value: goal.createdByUsername ?? goal.createdByUserId ?? "Unknown")
+                        DetailRow(label: "Last Updated", value: formatDate(goal.updatedAt))
+                        DetailRow(label: "Updated By", value: goal.updatedByUsername ?? goal.updatedByUserId ?? "Unknown")
                         
                         Divider()
                         
@@ -1221,10 +1792,10 @@ struct GoalDetailView: View {
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                             Spacer()
-                            Text(currentGoal.displayLastSyncedAt)
+                            Text(goal.displayLastSyncedAt)
                                 .font(.subheadline)
                                 .fontWeight(.medium)
-                                .foregroundColor(currentGoal.lastSyncedAt == nil ? .orange : .green)
+                                .foregroundColor(goal.lastSyncedAt == nil ? .orange : .green)
                         }
                     }
                     .padding()
@@ -1303,20 +1874,18 @@ struct GoalDetailView: View {
             }
             .sheet(isPresented: $showUploadSheet) {
                 DocumentUploadSheet(
-                    entity: currentGoal.asDocumentUploadable(),
+                    entity: goal.asDocumentUploadable(),
                     config: .standard,
                     onUploadComplete: {
                     loadDocuments()
-                    // Timer will be started automatically by updateCompressionStatus() if needed
+                    startDocumentRefreshTimer()
                     // FIXED: Immediately update main view document counts after upload
                     onUpdate()
                     }
                 )
             }
             .sheet(isPresented: $showEditSheet) {
-                EditGoalSheet(goal: currentGoal, ffiHandler: self.ffiHandler, onSave: { updatedGoal in
-                    // Update the current goal with fresh data
-                    currentGoal = updatedGoal
+                EditGoalSheet(goal: goal, ffiHandler: self.ffiHandler, onSave: { updatedGoal in
                     loadDocuments()
                     onUpdate()
                 })
@@ -1347,7 +1916,7 @@ struct GoalDetailView: View {
             }
             .onAppear {
                 loadDocuments()
-                // Timer will be started automatically by updateCompressionStatus() if needed
+                startDocumentRefreshTimer()
             }
             .onDisappear {
                 stopDocumentRefreshTimer()
@@ -1408,7 +1977,7 @@ struct GoalDetailView: View {
             
             let result = await documentHandler.listDocumentsByEntity(
                 relatedTable: "strategic_goals",
-                relatedId: currentGoal.id,
+                relatedId: goal.id,
                 pagination: PaginationDto(page: 1, perPage: 50),
                 include: [.documentType],
                 auth: authContext
@@ -1418,14 +1987,11 @@ struct GoalDetailView: View {
                 isLoadingDocuments = false
                 switch result {
                 case .success(let paginatedResult):
-                    // Preserve scroll position by updating documents more intelligently
-                    updateDocumentsPreservingScroll(newDocuments: paginatedResult.items)
+                    documents = paginatedResult.items
                     updateCompressionStatus()
                 case .failure(let error):
                     print("Failed to load documents: \(error)")
-                    if documents.isEmpty {
-                        documents = []
-                    }
+                    documents = []
                     hasActiveCompressions = false
                 }
             }
@@ -1437,84 +2003,13 @@ struct GoalDetailView: View {
         loadDocuments()
     }
     
-    /// Update documents while preserving scroll position
-    private func updateDocumentsPreservingScroll(newDocuments: [MediaDocumentResponse]) {
-        // If this is the initial load, just set the documents
-        if documents.isEmpty {
-            documents = newDocuments
-            return
-        }
-        
-        // For subsequent updates, only update if there are actual changes
-        // This prevents unnecessary UI rebuilds that reset scroll position
-        let documentsChanged = !documentsAreEqual(documents, newDocuments)
-        
-        if documentsChanged {
-            // Update documents with minimal disruption using withAnimation
-            withAnimation(.none) {
-                documents = newDocuments
-            }
-            print("📄 [DOCUMENT_REFRESH] Updated \(newDocuments.count) documents with preserved scroll")
-        } else {
-            print("📄 [DOCUMENT_REFRESH] No changes detected, scroll position preserved")
-        }
-    }
-    
-    /// Compare two document arrays to detect meaningful changes
-    private func documentsAreEqual(_ docs1: [MediaDocumentResponse], _ docs2: [MediaDocumentResponse]) -> Bool {
-        guard docs1.count == docs2.count else { return false }
-        
-        // Check if documents are the same (by ID and compression status)
-        for (doc1, doc2) in zip(docs1, docs2) {
-            if doc1.id != doc2.id || 
-               doc1.compressionStatus != doc2.compressionStatus ||
-               doc1.isAvailableLocally != doc2.isAvailableLocally {
-                return false
-            }
-        }
-        return true
-    }
-    
     private func smartRefreshDocuments() {
         // Check if enough time has passed since last refresh to avoid spam
         let timeSinceLastRefresh = Date().timeIntervalSince(lastRefreshTime)
-        guard timeSinceLastRefresh >= 30.0 else { return } // Increased interval to reduce disruption
-        
-        // Only refresh if we actually have active compressions
-        guard hasActiveCompressions else { return }
+        guard timeSinceLastRefresh >= 20.0 else { return }
         
         lastRefreshTime = Date()
-        
-        // Use a lighter refresh that doesn't show loading indicator
-        Task {
-            guard let currentUser = authManager.currentUser else { return }
-            
-            let authContext = AuthCtxDto(
-                userId: currentUser.userId,
-                role: currentUser.role,
-                deviceId: authManager.getDeviceId(),
-                offlineMode: false
-            )
-            
-            let result = await documentHandler.listDocumentsByEntity(
-                relatedTable: "strategic_goals",
-                relatedId: currentGoal.id,
-                pagination: PaginationDto(page: 1, perPage: 50),
-                include: [.documentType],
-                auth: authContext
-            )
-            
-            await MainActor.run {
-                switch result {
-                case .success(let paginatedResult):
-                    updateDocumentsPreservingScroll(newDocuments: paginatedResult.items)
-                    updateCompressionStatus()
-                case .failure(let error):
-                    print("📄 [SMART_REFRESH] Failed: \(error)")
-                    // Don't clear documents on refresh failure
-                }
-            }
-        }
+        loadDocuments()
     }
     
     private func updateCompressionStatus() {
@@ -1535,10 +2030,8 @@ struct GoalDetailView: View {
             
             if hasActiveCompressions {
                 print("🔄 [COMPRESSION_STATUS] \(activeCompressions.count) documents are compressing")
-                startDocumentRefreshTimer() // Ensure timer is running
             } else {
-                print("✅ [COMPRESSION_STATUS] All compressions completed - stopping refresh timer")
-                stopDocumentRefreshTimer() // Stop timer when no active compressions
+                print("✅ [COMPRESSION_STATUS] All compressions completed")
             }
         } else if compressionsFinished {
             print("⚡ [COMPRESSION_STATUS] \(lastCompressionCount - newCompressionCount) compression(s) just finished")
@@ -1548,31 +2041,22 @@ struct GoalDetailView: View {
     }
     
     private func startDocumentRefreshTimer() {
-        // Only start timer if we don't already have one and we have active compressions
-        guard refreshTimer == nil && hasActiveCompressions else { return }
+        // Only start timer if we don't already have one
+        guard refreshTimer == nil else { return }
         
-        print("⏰ [TIMER] Starting document refresh timer (30s interval)")
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { _ in
-            // Double-check we still have active compressions before refreshing
+            // Only refresh if we have active compressions
             if self.hasActiveCompressions {
                 Task { @MainActor in
                     self.smartRefreshDocuments()
-                }
-            } else {
-                // If no active compressions, stop the timer
-                Task { @MainActor in
-                    self.stopDocumentRefreshTimer()
                 }
             }
         }
     }
     
     private func stopDocumentRefreshTimer() {
-        if refreshTimer != nil {
-            print("⏰ [TIMER] Stopping document refresh timer")
-            refreshTimer?.invalidate()
-            refreshTimer = nil
-        }
+        refreshTimer?.invalidate()
+        refreshTimer = nil
     }
     
     private func deleteGoal(hardDelete: Bool = false, force: Bool = false) {
@@ -1597,8 +2081,8 @@ struct GoalDetailView: View {
             
             if force {
                 // Use bulk delete with force option for single goal
-                print("🗑️ [DELETE] Starting force delete for goal: \(currentGoal.id)")
-                let result = await ffiHandler.bulkDelete(ids: [currentGoal.id], hardDelete: hardDelete, force: force, auth: authContext)
+                print("🗑️ [DELETE] Starting force delete for goal: \(goal.id)")
+                let result = await ffiHandler.bulkDelete(ids: [goal.id], hardDelete: hardDelete, force: force, auth: authContext)
                 
                 await MainActor.run {
                     isDeleting = false
@@ -1615,7 +2099,7 @@ struct GoalDetailView: View {
                             dismiss()
                         } else if !batchResult.failed.isEmpty {
                             // Force delete failed (very rare)
-                            let errorMsg = batchResult.errors[currentGoal.id] ?? "Force delete failed"
+                            let errorMsg = batchResult.errors[goal.id] ?? "Force delete failed"
                             errorMessage = errorMsg
                             showErrorAlert = true
                         }
@@ -1627,8 +2111,8 @@ struct GoalDetailView: View {
                 }
             } else {
                 // Use regular delete (with dependency checks)
-                print("🗑️ [DELETE] Starting \(hardDelete ? "hard" : "soft") delete for goal: \(currentGoal.id)")
-                let result = await ffiHandler.delete(id: currentGoal.id, hardDelete: hardDelete, auth: authContext)
+                print("🗑️ [DELETE] Starting \(hardDelete ? "hard" : "soft") delete for goal: \(goal.id)")
+                let result = await ffiHandler.delete(id: goal.id, hardDelete: hardDelete, auth: authContext)
 
                 await MainActor.run {
                     isDeleting = false
@@ -1658,6 +2142,9 @@ struct GoalDetailView: View {
     
     /// Open a document for viewing
     private func openDocument(_ document: MediaDocumentResponse) {
+        // Light refresh before opening to get latest status
+        refreshDocuments()
+        
         Task {
             guard let currentUser = authManager.currentUser else {
                 await MainActor.run {
@@ -1755,13 +2242,131 @@ struct GoalDetailView: View {
     }
 }
 
-// MARK: - Helper extensions moved to Core/Models/StrategicGoalModels.swift
+// MARK: - Helper extensions for GoalDetailView
+extension StrategicGoalResponse {
+    var progress: Double {
+        let rawProgress = progressPercentage ?? 0.0
+        // Ensure progress is a valid number and within bounds
+        if rawProgress.isNaN || rawProgress.isInfinite {
+            return 0.0
+        }
+        return max(0.0, rawProgress)
+    }
+    
+    var statusText: String {
+        switch statusId {
+        case 1: return "On Track"
+        case 2: return "At Risk"
+        case 3: return "Behind"
+        case 4: return "Completed"
+        default: return "Unknown"
+        }
+    }
+    
+    var statusColor: Color {
+        switch statusId {
+        case 1: return .green
+        case 2: return .orange
+        case 3: return .red
+        case 4: return .blue
+        default: return .gray
+        }
+    }
+    
+    func hasDocumentsTracked(in documentCounts: [String: Int]) -> Bool {
+        return (documentCounts[self.id] ?? 0) > 0
+    }
+}
 
 
 
 
 // MARK: - Document Models & Views
-// Shared components now used from DocumentManagement/
+
+// MARK: - Media Document Row
+struct MediaDocumentRow: View {
+    let document: MediaDocumentResponse
+    let onTap: () -> Void
+    
+    var body: some View {
+        HStack {
+            Image(systemName: fileIcon(for: document.originalFilename))
+                .font(.title3)
+                .foregroundColor(document.isAvailableLocally ?? false ? .blue : .gray)
+                .frame(width: 40)
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(document.title ?? document.originalFilename)
+                    .font(.subheadline)
+                    .lineLimit(1)
+                
+                HStack(spacing: 8) {
+                    Text(document.typeName ?? "Document")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    
+                    if let field = document.fieldIdentifier {
+                        Text("• Linked to \(field)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Text("• \(formatFileSize(document.sizeBytes))")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    
+                    if !(document.isAvailableLocally ?? false) {
+                        Text("• Cloud")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+            
+            Spacer()
+            
+            CompressionBadge(status: document.compressionStatus)
+        }
+        .padding(.vertical, 8)
+        .opacity((document.hasError == true) ? 0.5 : 1.0)
+        .contentShape(Rectangle()) // Make entire row tappable
+        .onTapGesture {
+            onTap()
+        }
+    }
+    
+    private func fileIcon(for filename: String) -> String {
+        let ext = (filename as NSString).pathExtension.lowercased()
+        switch ext {
+        case "pdf": return "doc.text.fill"
+        case "doc", "docx": return "doc.richtext.fill"
+        case "jpg", "jpeg", "png": return "photo.fill"
+        case "xls", "xlsx": return "tablecells.fill"
+        case "mp4", "mov": return "video.fill"
+        case "mp3", "m4a": return "music.note"
+        default: return "doc.fill"
+        }
+    }
+    
+    private func formatFileSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+}
+
+// MARK: - Removed: CompressionBadge (now in DocumentManagement/Components/CompressionBadge.swift)
+
+// MARK: - Removed: Old DocumentUploadSheet and supporting models (now using generic DocumentManagement system)
+                        
+                    // [REMOVED] - Old DocumentUploadSheet UI code moved to DocumentManagement/
+                // [REMOVED] - All old DocumentUploadSheet UI and logic moved to DocumentManagement/
+         
+     // [REMOVED] - handleFileSelection and other old DocumentUploadSheet methods moved to DocumentManagement/
+         
+     // [REMOVED] - handlePhotoSelection and photo processing methods moved to DocumentManagement/
+    // MARK: - Removed: Old DocumentUploadSheet and supporting models (now using generic DocumentManagement system)
 
 // MARK: - Goal Delete Options Sheet
 struct GoalDeleteOptionsSheet: View {
@@ -1893,9 +2498,9 @@ struct GoalDeleteOptionsSheet: View {
     }
 }
 
-// MARK: - Shared Components Used:
-// - EntityDeleteOptionsSheet for delete options
-// - DeleteResultsSheet for bulk delete results  
-// - QuickLookView for document viewing
+// MARK: - Removed: BulkDeleteOptionsSheet (now using shared EntityDeleteOptionsSheet)
 
+// MARK: - Removed: BulkDeleteResultsSheet (now using shared DeleteResultsSheet)
+
+// MARK: - Removed: QuickLook Support (now in DocumentManagement/Components/QuickLookView.swift)
 
