@@ -403,6 +403,22 @@ impl From<StrategicGoal> for StrategicGoalResponse {
     }
 }
 
+/// Lightweight response for strategic goal summaries (for pickers)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategicGoalSummaryResponse {
+    pub id: String,
+    pub objective_code: String,
+}
+
+impl From<StrategicGoal> for StrategicGoalSummaryResponse {
+    fn from(goal: StrategicGoal) -> Self {
+        Self {
+            id: goal.id.to_string(),
+            objective_code: goal.objective_code,
+        }
+    }
+}
+
 // Optional: Add a new response type for the create_with_documents operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategicGoalWithDocumentsResponse {

@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import Combine
 
 // MARK: - List View Style
 enum ListViewStyle: String, CaseIterable {
@@ -56,6 +57,58 @@ struct TableColumn {
     }
 }
 
+// MARK: - Device Orientation Detection
+@MainActor
+class OrientationDetector: ObservableObject {
+    @Published var isLandscape: Bool = false
+    private var updateTimer: Timer?
+    
+    init() {
+        updateOrientation()
+        NotificationCenter.default.addObserver(
+            forName: UIDevice.orientationDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            // Debounce orientation changes to prevent glitching
+            self.scheduleOrientationUpdate()
+        }
+    }
+    
+    private func scheduleOrientationUpdate() {
+        updateTimer?.invalidate()
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
+            self.updateOrientation()
+        }
+    }
+    
+    private func updateOrientation() {
+        let newIsLandscape: Bool
+        
+        // Use screen bounds as primary indicator, device orientation as secondary
+        let screenBounds = UIScreen.main.bounds
+        let screenIsLandscape = screenBounds.width > screenBounds.height
+        
+        let deviceOrientation = UIDevice.current.orientation
+        if deviceOrientation.isValidInterfaceOrientation {
+            newIsLandscape = deviceOrientation.isLandscape
+        } else {
+            newIsLandscape = screenIsLandscape
+        }
+        
+        // Only update if there's actually a change to prevent unnecessary UI updates
+        if newIsLandscape != isLandscape {
+            isLandscape = newIsLandscape
+            print("📱 [ORIENTATION] Changed to \(isLandscape ? "landscape" : "portrait")")
+        }
+    }
+    
+    deinit {
+        updateTimer?.invalidate()
+        NotificationCenter.default.removeObserver(self)
+    }
+}
+
 // MARK: - Column Preference Manager
 class ColumnPreferenceManager: ObservableObject {
     private let userDefaults = UserDefaults.standard
@@ -92,13 +145,14 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
     let domainName: String
     let userRole: String? // Add user role for button visibility
     let onFilterBasedSelectAll: (() -> Void)? // Callback for backend filter selection
+    @Binding var showColumnCustomizer: Bool // Binding to control column customizer sheet
     
     // Authentication manager for export functionality
     @EnvironmentObject var authManager: AuthenticationManager
     
     @State private var groupedItems: [(monthYear: String, items: [Item])] = []
-    @State private var showColumnCustomizer = false
     @StateObject private var columnPreferenceManager = ColumnPreferenceManager()
+    @StateObject private var orientationDetector = OrientationDetector()
     @State private var hiddenColumns: Set<String> = []
     
     // Selection state from parent
@@ -107,6 +161,9 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
     
     // Multi-selection state (only for table view)
     @State private var isSelectAllExplicitlyPressed = false // Track explicit Select All
+    
+    // Track previous filter state to detect changes
+    @State private var previousFilterState: String = ""
     
     // Advanced year/month selection
     @State private var selectedYears: Set<Int> = []
@@ -156,7 +213,8 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
         userRole: String?,
         isInSelectionMode: Binding<Bool>,
         selectedItems: Binding<Set<String>>,
-        onFilterBasedSelectAll: (() -> Void)? = nil
+        onFilterBasedSelectAll: (() -> Void)? = nil,
+        showColumnCustomizer: Binding<Bool>
     ) {
         self.items = items
         self.viewStyle = viewStyle
@@ -170,56 +228,12 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
         self._isInSelectionMode = isInSelectionMode
         self._selectedItems = selectedItems
         self.onFilterBasedSelectAll = onFilterBasedSelectAll
+        self._showColumnCustomizer = showColumnCustomizer
     }
+
     
     var body: some View {
         VStack(spacing: 0) {
-            // View Style Toggle with Column Customization
-            HStack {
-                Spacer()
-                
-                // Custom segmented control with column customization
-                HStack(spacing: 0) {
-                    ForEach(ListViewStyle.allCases, id: \.self) { style in
-                        Button(action: {
-                            if style == viewStyle && style == .table {
-                                // If already in table view, show column customizer
-                                showColumnCustomizer = true
-                            } else {
-                                // Switch view style
-                                onViewStyleChange(style)
-                                // Clear selection when switching views
-                                selectedItems.removeAll()
-                                isInSelectionMode = false
-                            }
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: style.icon)
-                                    .font(.caption)
-                                Text(style.displayName)
-                                    .font(.caption)
-                                
-                                // Show settings icon for table when selected
-                                if style == .table && viewStyle == .table {
-                                    Image(systemName: "gearshape.fill")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(viewStyle == style ? Color.blue : Color.clear)
-                            .foregroundColor(viewStyle == style ? .white : .blue)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                        }
-                    }
-                }
-                .background(Color(.systemGray6))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-            .padding(.horizontal)
-            .padding(.bottom, 8)
-            
             // Selection Controls (only show in table view when in selection mode)
             if viewStyle == .table && isInSelectionMode {
                 advancedSelectionControlsView
@@ -247,19 +261,22 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
             // Group the new items immediately
             groupItemsByMonth()
             
-            // Keep selection mode active but filter out invalid selections
             let newItemIds = Set(newItems.map { String(describing: $0.id) })
-            selectedItems = selectedItems.intersection(newItemIds)
             
-            // If we had date filters active, reapply them to the new filtered items
-            if !selectedYears.isEmpty || !selectedMonths.isEmpty {
+            // Apply selection logic based on current mode
+            if isSelectAllExplicitlyPressed {
+                // "Select All" mode: select all new items (backend filters already applied)
+                selectedItems = newItemIds
+            } else if !selectedYears.isEmpty || !selectedMonths.isEmpty {
+                // Date filter mode: reapply date filters to new items
                 updateSelectionBasedOnDateFilters()
-            }
-            
-            // Don't automatically exit selection mode - let user explicitly exit with clear button
-            // Reset explicit select all if no items are selected
-            if selectedItems.isEmpty {
-                isSelectAllExplicitlyPressed = false
+            } else {
+                // Individual selection mode: filter out invalid selections
+                selectedItems = selectedItems.intersection(newItemIds)
+                // Exit selection mode if no items selected
+                if selectedItems.isEmpty {
+                    isInSelectionMode = false
+                }
             }
         }
         .sheet(isPresented: $showColumnCustomizer) {
@@ -289,17 +306,16 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
                         selectedMonths.removeAll()
                         isSelectAllExplicitlyPressed = false
                     } else {
-                        // Select All should always clear filters and select everything
-                        // Clear year and month filters first
+                        // OVERRIDE: Select All clears date filters and selects everything
                         selectedYears.removeAll()
                         selectedMonths.removeAll()
                         
                         // Check if we have backend filters (search, status, etc.) - if so, delegate to parent
                         if hasBackendFilters() {
-                            // Trigger backend filter selection via callback
+                            // Trigger backend filter selection via callback which will use selectAllItems()
                             onFilterBasedSelectAll?()
                         } else {
-                            // When selecting all without any filters, select everything visible
+                            // When selecting all without any filters, select everything visible using selectAllItems()
                             let allItemIds = groupedItems.flatMap { $0.items.map { String(describing: $0.id) } }
                             selectedItems = Set(allItemIds)
                         }
@@ -314,6 +330,9 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
                         Text("Select All")
                             .font(.caption2)
                             .fontWeight(.medium)
+                        // Invisible text to maintain consistent height with Years/Months
+                        Text(" ")
+                            .font(.caption2)
                     }
                     .frame(height: 50) // Fixed height
                     .frame(maxWidth: .infinity)
@@ -395,7 +414,8 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
                 availableYears: availableYears,
                 selectedYears: $selectedYears,
                 onSelectionChange: {
-                    isSelectAllExplicitlyPressed = false // Reset explicit select all
+                    // OVERRIDE: Date filter selection clears "Select All" state
+                    isSelectAllExplicitlyPressed = false
                     updateSelectionBasedOnDateFilters()
                     // Enter selection mode if not already active and we have selections
                     if !isInSelectionMode && (!selectedYears.isEmpty || !selectedMonths.isEmpty) {
@@ -408,7 +428,8 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
             MonthPickerSheet(
                 selectedMonths: $selectedMonths,
                 onSelectionChange: {
-                    isSelectAllExplicitlyPressed = false // Reset explicit select all
+                    // OVERRIDE: Date filter selection clears "Select All" state
+                    isSelectAllExplicitlyPressed = false
                     updateSelectionBasedOnDateFilters()
                     // Enter selection mode if not already active and we have selections
                     if !isInSelectionMode && (!selectedYears.isEmpty || !selectedMonths.isEmpty) {
@@ -510,22 +531,17 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
     }
     
     private func updateSelectionBasedOnDateFilters() {
-        let filteredIds = getFilteredItemIds()
-        
-        // If we have year or month filters active, automatically select matching items
+        // Simple logic: if date filters are active, select matching items; otherwise clear selection
         if !selectedYears.isEmpty || !selectedMonths.isEmpty {
+            let filteredIds = getFilteredItemIds()
             selectedItems = Set(filteredIds)
-            // Reset explicit select all since we're now filtering
-            isSelectAllExplicitlyPressed = false
         } else {
-            // If no filters, clear all selections but keep selection mode active
+            // No date filters active - clear selection (user removed all date filters)
             selectedItems.removeAll()
-            // Don't exit selection mode - let user continue selecting
-        }
-        
-        // Reset explicit select all if no items are selected
-        if selectedItems.isEmpty {
-            isSelectAllExplicitlyPressed = false
+            // Exit selection mode if no items selected and no "Select All" active
+            if !isSelectAllExplicitlyPressed {
+                isInSelectionMode = false
+            }
         }
     }
     
@@ -596,15 +612,22 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
                                 let itemId = String(describing: item.id)
                                 let isSelected = selectedItems.contains(itemId)
                                 
-                                // Fixed row with grey internal highlighting
+                                // Modern row highlighting
                                 VStack(spacing: 0) {
                                     HStack {
                                         rowContent(item, visibleColumns)
                                     }
-                                    .padding(.vertical, 8)
-                                    .padding(.horizontal, 8)
-                                    .background(isSelected ? Color.gray.opacity(0.15) : Color.clear)
-                                    .animation(.easeInOut(duration: 0.15), value: isSelected)
+                                    .background(
+                                        isSelected ? 
+                                        Color.blue.opacity(0.08) : Color.clear
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 10)
+                                            .stroke(isSelected ? Color.blue.opacity(0.2) : Color.clear, lineWidth: 1.5)
+                                    )
+                                    .cornerRadius(10)
+                                    .scaleEffect(isSelected ? 0.995 : 1.0)
+                                    .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isSelected)
                                     .contentShape(Rectangle())
                                     .onTapGesture {
                                         if isInSelectionMode {
@@ -655,12 +678,12 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
                     .fontWeight(.semibold)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: column.width ?? .infinity, alignment: Alignment(horizontal: column.alignment, vertical: .center))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, 12) // Increased from 8 to 12 to match row padding
+                    .padding(.vertical, 16)   // Increased from 12 to 16 to match row padding
                 
                 if column.key != visibleColumns.last?.key {
                     Divider()
-                        .frame(height: 20)
+                        .frame(height: 30)
                 }
             }
         }
@@ -682,19 +705,60 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
     
     // MARK: - Helper Properties
     private var visibleColumns: [TableColumn] {
-        tableColumns.filter { column in
-            // Always show required columns
-            if column.isRequired {
-                return column.isVisible(UIDevice.current)
-            }
-            
-            // Hide columns that user has hidden
+        // Use dynamic column configuration for strategic goals if available
+        let columnsToUse: [TableColumn]
+        if domainName == "strategic_goals" {
+            // Use dynamic configuration for strategic goals
+            columnsToUse = StrategicGoalTableConfig.columns(hiddenColumns: hiddenColumns)
+        } else {
+            // Use static configuration for other domains
+            columnsToUse = tableColumns
+        }
+        
+        // Filter columns based on user preferences and device visibility
+        let filteredColumns = columnsToUse.filter { column in
+            // Hide columns that user has explicitly hidden
             if hiddenColumns.contains(column.key) {
                 return false
             }
             
-            // Apply device-specific visibility
+            // Apply device-specific visibility (this is now consistent for all devices)
             return column.isVisible(UIDevice.current)
+        }
+        
+        // Apply column count limits based on orientation and device
+        let maxColumns = getMaxColumnsForCurrentContext()
+        
+        print("🔄 [COLUMNS] Domain: \(domainName), Filtered: \(filteredColumns.count), Max: \(maxColumns), Landscape: \(orientationDetector.isLandscape)")
+        print("🔄 [COLUMNS] Available columns: \(filteredColumns.map { "\($0.title)(\($0.isRequired ? "req" : "opt"))" }.joined(separator: ", "))")
+        
+        // If we have more columns than the limit, prioritize them
+        if filteredColumns.count > maxColumns {
+            // Always include required columns first
+            let requiredColumns = filteredColumns.filter { $0.isRequired }
+            let optionalColumns = filteredColumns.filter { !$0.isRequired }
+            
+            // Take as many optional columns as we can fit
+            let remainingSlots = maxColumns - requiredColumns.count
+            let selectedOptionalColumns = Array(optionalColumns.prefix(max(0, remainingSlots)))
+            
+            let finalColumns = requiredColumns + selectedOptionalColumns
+            print("🔄 [COLUMNS] Limited to: \(finalColumns.map { $0.title }.joined(separator: ", "))")
+            return finalColumns
+        }
+        
+        print("🔄 [COLUMNS] No limit applied, showing all \(filteredColumns.count) columns")
+        return filteredColumns
+    }
+    
+    /// Get maximum number of columns based on current device and orientation
+    private func getMaxColumnsForCurrentContext() -> Int {
+        let currentDevice = UIDevice.current
+        
+        if currentDevice.userInterfaceIdiom == .phone {
+            return orientationDetector.isLandscape ? 6 : 4  // iPhone: 6 landscape, 4 portrait
+        } else {
+            return orientationDetector.isLandscape ? 10 : 8  // iPad: 7 landscape, 4 portrait  
         }
     }
     
@@ -910,9 +974,21 @@ struct ColumnCustomizerSheet: View {
         NavigationView {
             List {
                 Section {
-                    Text("Customize which columns to display in table view. Required columns cannot be hidden.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Customize which columns to display in table view. Required columns cannot be hidden.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        
+                        if UIDevice.current.userInterfaceIdiom == .phone {
+                            Text("📱 iPhone: Portrait shows 4 columns max, Landscape shows 6 columns max")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                        } else {
+                            Text("📱 iPad: Portrait shows 8 columns max, Landscape shows 10 columns max")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                        }
+                    }
                 }
                 
                 Section("Available Columns") {
@@ -923,7 +999,7 @@ struct ColumnCustomizerSheet: View {
                                     .font(.subheadline)
                                 
                                 if !column.isVisible(UIDevice.current) {
-                                    Text("Hidden on \(UIDevice.current.userInterfaceIdiom == .pad ? "iPhone" : "iPad")")
+                                    Text("Not available on \(UIDevice.current.userInterfaceIdiom == .phone ? "iPhone" : "iPad")")
                                         .font(.caption2)
                                         .foregroundColor(.secondary)
                                 }
@@ -1283,5 +1359,35 @@ struct FormatCard: View {
             .cornerRadius(8)
         }
         .buttonStyle(PlainButtonStyle())
+    }
+}
+
+// MARK: - View Style Switcher Component
+struct ViewStyleSwitcher: View {
+    let currentViewStyle: ListViewStyle
+    let onViewStyleChange: (ListViewStyle) -> Void
+    let onShowColumnCustomizer: () -> Void
+    
+    var body: some View {
+        Image(systemName: currentViewStyle.icon)
+            .font(.caption)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.blue)
+            .foregroundColor(.white)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            .background(Color(.systemGray6))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .onTapGesture {
+                // Toggle between view styles
+                let nextStyle: ListViewStyle = currentViewStyle == .cards ? .table : .cards
+                onViewStyleChange(nextStyle)
+            }
+            .onLongPressGesture {
+                // Show column customizer on long press (only meaningful for table view)
+                if currentViewStyle == .table {
+                    onShowColumnCustomizer()
+                }
+            }
     }
 } 

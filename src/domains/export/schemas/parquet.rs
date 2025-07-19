@@ -12,6 +12,14 @@ static SCHEMA_CACHE: Lazy<HashMap<&'static str, Arc<Schema>>> = Lazy::new(|| {
     cache.insert("workshops", Arc::new(workshops_schema()));
     cache.insert("media_documents", Arc::new(media_documents_schema()));
     
+    // Add missing domain schemas
+    cache.insert("activities", Arc::new(activities_schema()));
+    cache.insert("donors", Arc::new(donors_schema()));
+    cache.insert("funding", Arc::new(funding_schema()));
+    cache.insert("livelihoods", Arc::new(livelihoods_schema()));
+    cache.insert("workshop_participants", Arc::new(workshop_participants_schema()));
+    cache.insert("participants", Arc::new(participants_schema()));
+
     cache
 });
 
@@ -114,6 +122,166 @@ pub fn media_documents_schema() -> Schema {
         Field::new("related_entity_id", DataType::Utf8, true),
         Field::new("blob_path", DataType::Utf8, true), // External reference
         Field::new("checksum", DataType::Utf8, true),
+    ])
+}
+
+// Activities Schema
+pub fn activities_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("project_id", DataType::Utf8, true),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("description", DataType::Utf8, true),
+        Field::new("activity_type", DataType::Utf8, true),
+        Field::new("status", DataType::Utf8, false),
+        Field::new("start_date", DataType::Date32, true),
+        Field::new("end_date", DataType::Date32, true),
+        Field::new("budget_allocated", DataType::Float64, true),
+        Field::new("budget_spent", DataType::Float64, true),
+        Field::new("responsible_team", DataType::Utf8, true),
+        Field::new("location", DataType::Utf8, true),
+        Field::new("participants_count", DataType::Int32, true),
+        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("updated_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("created_by_user_id", DataType::Utf8, true),
+        Field::new("updated_by_user_id", DataType::Utf8, true),
+        Field::new("deleted_at", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+    ])
+}
+
+// Donors Schema
+pub fn donors_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("type", DataType::Utf8, false), // Individual, Organization, Government, etc.
+        Field::new("contact_email", DataType::Utf8, true),
+        Field::new("contact_phone", DataType::Utf8, true),
+        Field::new("address", DataType::Utf8, true),
+        Field::new("country", DataType::Utf8, true),
+        Field::new("total_donated", DataType::Float64, true),
+        Field::new("first_donation_date", DataType::Date32, true),
+        Field::new("last_donation_date", DataType::Date32, true),
+        Field::new("donation_frequency", DataType::Utf8, true),
+        Field::new("preferred_communication", DataType::Utf8, true),
+        Field::new("tax_exempt_status", DataType::Boolean, true),
+        Field::new("notes", DataType::Utf8, true),
+        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("updated_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("created_by_user_id", DataType::Utf8, true),
+        Field::new("updated_by_user_id", DataType::Utf8, true),
+        Field::new("deleted_at", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+    ])
+}
+
+// Funding Schema  
+pub fn funding_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("donor_id", DataType::Utf8, false),
+        Field::new("project_id", DataType::Utf8, true),
+        Field::new("strategic_goal_id", DataType::Utf8, true),
+        Field::new("amount", DataType::Float64, false),
+        Field::new("currency", DataType::Utf8, false),
+        Field::new("funding_type", DataType::Utf8, false), // Grant, Donation, Government, etc.
+        Field::new("funding_status", DataType::Utf8, false), // Pending, Approved, Disbursed, etc.
+        Field::new("application_date", DataType::Date32, true),
+        Field::new("approval_date", DataType::Date32, true),
+        Field::new("disbursement_date", DataType::Date32, true),
+        Field::new("funding_period_start", DataType::Date32, true),
+        Field::new("funding_period_end", DataType::Date32, true),
+        Field::new("purpose", DataType::Utf8, true),
+        Field::new("restrictions", DataType::Utf8, true),
+        Field::new("reporting_requirements", DataType::Utf8, true),
+        Field::new("contract_reference", DataType::Utf8, true),
+        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("updated_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("created_by_user_id", DataType::Utf8, true),
+        Field::new("updated_by_user_id", DataType::Utf8, true),
+        Field::new("deleted_at", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+    ])
+}
+
+// Livelihoods Schema
+pub fn livelihoods_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("participant_id", DataType::Utf8, false),
+        Field::new("project_id", DataType::Utf8, true),
+        Field::new("livelihood_type", DataType::Utf8, false), // Agriculture, Trade, Services, etc.
+        Field::new("skill_area", DataType::Utf8, true),
+        Field::new("training_received", DataType::Boolean, true),
+        Field::new("training_completion_date", DataType::Date32, true),
+        Field::new("assets_provided", DataType::Utf8, true),
+        Field::new("asset_value", DataType::Float64, true),
+        Field::new("monthly_income_before", DataType::Float64, true),
+        Field::new("monthly_income_after", DataType::Float64, true),
+        Field::new("employment_status", DataType::Utf8, true),
+        Field::new("business_established", DataType::Boolean, true),
+        Field::new("business_registration_date", DataType::Date32, true),
+        Field::new("employees_hired", DataType::Int32, true),
+        Field::new("sustainability_score", DataType::Float64, true),
+        Field::new("follow_up_date", DataType::Date32, true),
+        Field::new("success_indicators", DataType::Utf8, true),
+        Field::new("challenges", DataType::Utf8, true),
+        Field::new("notes", DataType::Utf8, true),
+        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("updated_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("created_by_user_id", DataType::Utf8, true),
+        Field::new("updated_by_user_id", DataType::Utf8, true),
+        Field::new("deleted_at", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+    ])
+}
+
+// Workshop Participants Schema (separate from workshops)
+pub fn workshop_participants_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("workshop_id", DataType::Utf8, false),
+        Field::new("participant_id", DataType::Utf8, false),
+        Field::new("user_id", DataType::Utf8, true),
+        Field::new("registration_date", DataType::Date32, false),
+        Field::new("attendance_status", DataType::Utf8, false), // Registered, Attended, NoShow, Cancelled
+        Field::new("attended", DataType::Boolean, false),
+        Field::new("attendance_percentage", DataType::Float64, true),
+        Field::new("completion_status", DataType::Utf8, true), // Completed, Partial, Dropped
+        Field::new("certificate_issued", DataType::Boolean, false),
+        Field::new("certificate_date", DataType::Date32, true),
+        Field::new("pre_assessment_score", DataType::Float64, true),
+        Field::new("post_assessment_score", DataType::Float64, true),
+        Field::new("feedback_rating", DataType::Int32, true), // 1-5 scale
+        Field::new("feedback_comments", DataType::Utf8, true),
+        Field::new("special_requirements", DataType::Utf8, true),
+        Field::new("payment_status", DataType::Utf8, true),
+        Field::new("payment_amount", DataType::Float64, true),
+        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("updated_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("created_by_user_id", DataType::Utf8, true),
+        Field::new("updated_by_user_id", DataType::Utf8, true),
+        Field::new("deleted_at", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+    ])
+}
+
+// Participants Schema (standalone demographic participant entities)
+pub fn participants_schema() -> Schema {
+    Schema::new(vec![
+        Field::new("id", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new("gender", DataType::Utf8, true),
+        Field::new("disability", DataType::Boolean, false),
+        Field::new("disability_type", DataType::Utf8, true),
+        Field::new("age_group", DataType::Utf8, true), // child, youth, adult, elderly
+        Field::new("location", DataType::Utf8, true),
+        Field::new("sync_priority", DataType::Utf8, true),
+        Field::new("created_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("updated_at", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new("created_by_user_id", DataType::Utf8, true),
+        Field::new("created_by_device_id", DataType::Utf8, true),
+        Field::new("updated_by_user_id", DataType::Utf8, true),
+        Field::new("updated_by_device_id", DataType::Utf8, true),
+        Field::new("deleted_at", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        Field::new("deleted_by_user_id", DataType::Utf8, true),
+        Field::new("deleted_by_device_id", DataType::Utf8, true),
     ])
 }
 

@@ -239,7 +239,7 @@ struct StrategicGoalExportService: DomainExportService {
     }
 }
 
-/// Example implementations for other domains (to be implemented)
+/// Project export service implementation
 struct ProjectExportService: DomainExportService {
     var domainName: String = "Projects"
     var filePrefix: String = "projects"
@@ -251,13 +251,17 @@ struct ProjectExportService: DomainExportService {
         targetPath: String,
         token: String
     ) async throws -> ExportJobResponse {
-        // TODO: Implement when ProjectService is created
-        throw NSError(domain: "NotImplemented", code: 0, userInfo: [NSLocalizedDescriptionKey: "Project export not yet implemented"])
+        return try await ProjectService.shared.exportProjectsByIds(
+            ids: ids,
+            includeBlobs: includeBlobs,
+            format: format,
+            targetPath: targetPath,
+            token: token
+        )
     }
     
     func getExportStatus(jobId: String) async throws -> ExportJobResponse {
-        // TODO: Implement when ProjectService is created
-        throw NSError(domain: "NotImplemented", code: 0, userInfo: [NSLocalizedDescriptionKey: "Project export status not yet implemented"])
+        return try await ProjectService.shared.getExportStatus(jobId: jobId)
     }
 }
 

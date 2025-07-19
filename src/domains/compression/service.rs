@@ -394,6 +394,12 @@ impl CompressionService for CompressionServiceImpl {
                                 quality_level: 0,
                                 min_size_bytes: 0,
                             },
+                            // 🔧 FIX: Don't compress text files - they become unreadable gibberish when gzipped
+                            mime_type if mime_type.starts_with("text/") => CompressionConfig {
+                                method: CompressionMethod::None,
+                                quality_level: 0,
+                                min_size_bytes: 0,
+                            },
                             _ => CompressionConfig::default()
                         }
                     }

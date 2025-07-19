@@ -330,8 +330,8 @@ extension StatsManager where Entity == StrategicGoalResponse {
 }
 
 // MARK: - Projects Stats Configuration
-extension StatsManager {
-    static func projectsManager<ProjectEntity>() -> StatsManager<ProjectEntity> {
+extension StatsManager where Entity == ProjectResponse {
+    static func projectsManager() -> StatsManager<ProjectResponse> {
         let configs = [
             StatConfig(
                 key: "total",
@@ -340,17 +340,44 @@ extension StatsManager {
                 color: .blue,
                 calculator: CountCalculator()
             ),
-            // Add project-specific stat configs here
-            // StatConfig(
-            //     key: "active",
-            //     title: "Active",
-            //     icon: "play.circle",
-            //     color: .green,
-            //     calculator: ConditionalCountCalculator<ProjectEntity> { $0.status == "active" }
-            // )
+            StatConfig(
+                key: "on_track",
+                title: "On Track",
+                icon: "checkmark.circle",
+                color: .green,
+                calculator: ConditionalCountCalculator<ProjectResponse> { $0.statusId == 1 }
+            ),
+            StatConfig(
+                key: "at_risk", 
+                title: "At Risk",
+                icon: "exclamationmark.triangle",
+                color: .orange,
+                calculator: ConditionalCountCalculator<ProjectResponse> { $0.statusId == 2 }
+            ),
+            StatConfig(
+                key: "delayed",
+                title: "Delayed",
+                icon: "xmark.circle",
+                color: .red,
+                calculator: ConditionalCountCalculator<ProjectResponse> { $0.statusId == 3 }
+            ),
+            StatConfig(
+                key: "completed",
+                title: "Completed", 
+                icon: "checkmark.circle.fill",
+                color: .blue,
+                calculator: ConditionalCountCalculator<ProjectResponse> { $0.statusId == 4 }
+            ),
+            StatConfig(
+                key: "completion_rate",
+                title: "Completion Rate",
+                icon: "percent",
+                color: .purple,
+                calculator: PercentageCalculator<ProjectResponse> { $0.statusId == 4 }
+            )
         ]
         
-        return StatsManager<ProjectEntity>(statConfigs: configs)
+        return StatsManager(statConfigs: configs)
     }
 }
 

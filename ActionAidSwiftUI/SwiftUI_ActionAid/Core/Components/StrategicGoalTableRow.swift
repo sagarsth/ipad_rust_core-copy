@@ -24,8 +24,8 @@ struct StrategicGoalTableRow: View {
             ForEach(columns, id: \.key) { column in
                 cellContent(for: column)
                     .frame(maxWidth: column.width ?? .infinity, alignment: Alignment(horizontal: column.alignment, vertical: .center))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 12)
+                    .padding(.horizontal, 12) // Increased from 8 to 12 for better margins
+                    .padding(.vertical, 16)   // Increased from 12 to 16 for better vertical spacing
                 
                 if column.key != columns.last?.key {
                     Divider()
@@ -173,7 +173,7 @@ struct StrategicGoalTableConfig {
         TableColumn(
             key: "objective_code",
             title: "Code",
-            width: 100,
+            width: nil, // Remove fixed width to allow expansion
             alignment: .leading,
             isRequired: true
         ),
@@ -200,30 +200,91 @@ struct StrategicGoalTableConfig {
             title: "Team",
             width: 140,
             alignment: .leading,
-            isVisible: { $0.userInterfaceIdiom == .pad }
+            isVisible: { _ in true } // Available on all devices - orientation logic controls visibility
         ),
         TableColumn(
             key: "target_value",
             title: "Target",
             width: 100,
             alignment: .trailing,
-            isVisible: { $0.userInterfaceIdiom == .pad }
+            isVisible: { _ in true } // Available on all devices - orientation logic controls visibility
         ),
         TableColumn(
             key: "actual_value",
             title: "Actual",
             width: 100,
             alignment: .trailing,
-            isVisible: { $0.userInterfaceIdiom == .pad }
+            isVisible: { _ in true } // Available on all devices - orientation logic controls visibility
         ),
         TableColumn(
             key: "updated_at",
             title: "Updated",
             width: 120,
             alignment: .center,
-            isVisible: { $0.userInterfaceIdiom == .pad }
+            isVisible: { _ in true } // Available on all devices - orientation logic controls visibility
         )
     ]
+    
+    /// Returns columns with dynamic widths based on which columns are hidden
+    /// Applies 3:7 ratio for code:outcome when only those two columns are visible
+    static func columns(hiddenColumns: Set<String>) -> [TableColumn] {
+        // Filter to get visible columns
+        let visibleColumns = columns.filter { column in
+            // Always show required columns
+            if column.isRequired {
+                return column.isVisible(UIDevice.current)
+            }
+            
+            // Hide columns that user has hidden
+            if hiddenColumns.contains(column.key) {
+                return false
+            }
+            
+            // Apply device-specific visibility
+            return column.isVisible(UIDevice.current)
+        }
+        
+        // Check if only code and outcome columns are visible
+        let visibleKeys = Set(visibleColumns.map(\.key))
+        let isOnlyCodeAndOutcome = visibleKeys == Set(["objective_code", "outcome"])
+        
+        if isOnlyCodeAndOutcome {
+            // Apply 3:7 ratio for code:outcome
+            let screenWidth = UIScreen.main.bounds.width - 32 // Account for padding
+            let codeWidth = screenWidth * 0.3  // 30% for code
+            let outcomeWidth = screenWidth * 0.7  // 70% for outcome
+            
+            return columns.map { column in
+                switch column.key {
+                case "objective_code":
+                    return TableColumn(
+                        key: column.key,
+                        title: column.title,
+                        width: codeWidth,
+                        alignment: column.alignment,
+                        isVisible: column.isVisible,
+                        isCustomizable: column.isCustomizable,
+                        isRequired: column.isRequired
+                    )
+                case "outcome":
+                    return TableColumn(
+                        key: column.key,
+                        title: column.title,
+                        width: outcomeWidth,
+                        alignment: column.alignment,
+                        isVisible: column.isVisible,
+                        isCustomizable: column.isCustomizable,
+                        isRequired: column.isRequired
+                    )
+                default:
+                    return column
+                }
+            }
+        }
+        
+        // Return default columns for all other cases
+        return columns
+    }
 }
 
 // MARK: - Strategic Goal Table Columns Configuration (Extension for compatibility)

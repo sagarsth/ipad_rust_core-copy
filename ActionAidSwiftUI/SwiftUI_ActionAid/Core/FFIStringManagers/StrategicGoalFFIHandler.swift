@@ -111,6 +111,13 @@ class StrategicGoalFFIHandler {
         return await executeOperation(payload: payload, ffiCall: strategic_goal_list)
     }
     
+    /// List strategic goal summaries (lightweight for pickers)
+    /// Returns only id and objective_code for optimal performance
+    func listSummaries(pagination: PaginationDto?, auth: AuthContextPayload) async -> Result<PaginatedResult<StrategicGoalSummaryResponse>, Error> {
+        let payload = StrategicGoalListSummariesRequest(pagination: pagination, auth: auth)
+        return await executeOperation(payload: payload, ffiCall: strategic_goal_list_summaries)
+    }
+    
     func update(id: String, update: UpdateStrategicGoal, auth: AuthContextPayload) async -> Result<StrategicGoalResponse, Error> {
         let payload = StrategicGoalUpdateRequest(id: id, update: update, auth: auth)
         return await executeOperation(payload: payload, ffiCall: strategic_goal_update)
@@ -133,7 +140,7 @@ class StrategicGoalFFIHandler {
         documents: [DocumentData],
         documentTypeId: String,
         auth: AuthContextPayload
-    ) async -> Result<CreateWithDocumentsResponse, Error> {
+    ) async -> Result<StrategicGoalCreateWithDocumentsResponse, Error> {
         let payload = StrategicGoalCreateWithDocumentsRequest(
             goal: newGoal,
             documents: documents,
@@ -143,52 +150,11 @@ class StrategicGoalFFIHandler {
         return await executeOperation(payload: payload, ffiCall: strategic_goal_create_with_documents)
     }
 
-    func uploadDocument(
-        goalId: String,
-        fileData: Data,
-        originalFilename: String,
-        title: String?,
-        documentTypeId: String,
-        linkedField: String?,
-        syncPriority: SyncPriority,
-        compressionPriority: CompressionPriority?,
-        auth: AuthContextPayload
-    ) async -> Result<MediaDocumentResponse, Error> {
-        let payload = UploadDocumentRequest(
-            goalId: goalId,
-            fileData: fileData.base64EncodedString(),
-            originalFilename: originalFilename,
-            title: title,
-            documentTypeId: documentTypeId,
-            linkedField: linkedField,
-            syncPriority: syncPriority,
-            compressionPriority: compressionPriority,
-            auth: auth
-        )
-        return await executeOperation(payload: payload, ffiCall: strategic_goal_upload_document)
-    }
-
-    func bulkUploadDocuments(
-        goalId: String,
-        files: [(Data, String)],
-        title: String?,
-        documentTypeId: String,
-        syncPriority: SyncPriority,
-        compressionPriority: CompressionPriority?,
-        auth: AuthContextPayload
-    ) async -> Result<[MediaDocumentResponse], Error> {
-        let filePayloads = files.map { BulkUploadDocumentsRequest.File(fileData: $0.base64EncodedString(), filename: $1) }
-        let payload = BulkUploadDocumentsRequest(
-            goalId: goalId,
-            files: filePayloads,
-            title: title,
-            documentTypeId: documentTypeId,
-            syncPriority: syncPriority,
-            compressionPriority: compressionPriority,
-            auth: auth
-        )
-        return await executeOperation(payload: payload, ffiCall: strategic_goal_bulk_upload_documents)
-    }
+    // ❌ REMOVED: Legacy slow base64 upload methods
+    // - uploadDocument(fileData: Data, ...)
+    // - bulkUploadDocuments(files: [(Data, String)], ...)
+    //
+    // ✅ USE INSTEAD: Optimized path-based methods below
 
     // MARK: - iOS Optimized Upload Methods (NO BASE64 ENCODING!)
     

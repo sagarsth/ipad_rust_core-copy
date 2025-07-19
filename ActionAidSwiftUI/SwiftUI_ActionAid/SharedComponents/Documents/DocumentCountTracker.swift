@@ -398,6 +398,10 @@ extension StrategicGoalResponse: DocumentCountable {
     // DocumentCountable protocol methods are automatically inherited
 }
 
+// extension ProjectResponse: DocumentCountable {
+//     // DocumentCountable protocol methods are automatically inherited
+//     // TODO: Will be implemented when document uploading is added
+// }
+
 // Add similar extensions for other entity types as needed
-// extension ProjectResponse: DocumentCountable { ... }
 // extension UserResponse: DocumentCountable { ... } 

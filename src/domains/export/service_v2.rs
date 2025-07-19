@@ -145,6 +145,14 @@ impl ExportServiceV2 {
                     ids.len() <= 1000 // Without attachments: 1000 max
                 }
             }
+            EntityFilter::ProjectsByIds { ids } => {
+                // Limit: 1000 items max for projects
+                if request.include_blobs {
+                    ids.len() <= 1000 // With attachments: 1000 max
+                } else {
+                    ids.len() <= 1000 // Without attachments: 1000 max
+                }
+            }
             EntityFilter::StrategicGoals { .. } => {
                 // All strategic goals exports: limit to 1000 via streaming
                 true
@@ -155,6 +163,10 @@ impl ExportServiceV2 {
             EntityFilter::FundingAll | 
             EntityFilter::LivelihoodsAll => {
                 // Other domain exports: limit to 1000 without blobs
+                !request.include_blobs
+            }
+            EntityFilter::ParticipantsAll => {
+                // Participants: limit to 1000 without blobs
                 !request.include_blobs
             }
             EntityFilter::WorkshopsAll { .. } => {
@@ -282,8 +294,18 @@ impl ExportServiceV2 {
         let temp_dir = TempDir::new().map_err(|e| ServiceError::InternalError(format!("Failed to create temp dir: {}", e)))?;
         let temp_path = temp_dir.path();
 
-        let csv_filename = "strategic_goals.csv";
-        let csv_path = temp_path.join(csv_filename);
+        // 🔧 FIX: Generic entity type and filename determination
+        let (entity_ids, entity_type) = match request.filters.first() {
+            Some(EntityFilter::StrategicGoalsByIds { ids }) => (ids.clone(), "strategic_goals"),
+            Some(EntityFilter::ProjectsByIds { ids }) => (ids.clone(), "projects"),
+            _ => {
+                log::warn!("CSV with ZIP structure only supports entity ID-based filters currently");
+                return Err(ServiceError::ValidationError("CSV ZIP export only supports entity ID-based filters currently".to_string()));
+            }
+        };
+        let csv_filename = format!("{}.csv", entity_type);
+
+        let csv_path = temp_path.join(&csv_filename);
         
         log::debug!("Creating enhanced CSV export with document associations at: {}", csv_path.display());
 
@@ -303,70 +325,63 @@ impl ExportServiceV2 {
 
         // Use enhanced streaming CSV writer that includes document columns
         let mut writer = EnhancedCsvWriterWithDocuments::new(csv_file, config);
-        
-        // Get all strategic goal IDs first for document lookup
-        let goal_ids = if let Some(EntityFilter::StrategicGoalsByIds { ids }) = request.filters.first() {
-            ids.clone()
-        } else {
-            log::warn!("CSV with ZIP structure only supports StrategicGoalsByIds filter currently");
-            return Err(ServiceError::ValidationError("ZIP structure export only supports StrategicGoalsByIds filter currently".to_string()));
-        };
 
-        log::debug!("Fetching documents for {} strategic goals", goal_ids.len());
+        log::debug!("Fetching documents for {} {} entities", entity_ids.len(), entity_type);
 
         // Pre-fetch all documents for efficient lookup
         let media_doc_repo = globals::get_media_document_repo()
             .map_err(|e| ServiceError::InternalError(e.to_string()))?;
         
         let all_documents = media_doc_repo
-            .find_by_related_entities("strategic_goals", &goal_ids)
+            .find_by_related_entities(entity_type, &entity_ids)
             .await
             .map_err(|e| ServiceError::InternalError(e.to_string()))?;
 
-        // Group documents by goal ID for efficient lookup
-        let mut documents_by_goal: std::collections::HashMap<uuid::Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+        // Group documents by entity ID for efficient lookup
+        let mut documents_by_entity: std::collections::HashMap<uuid::Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
         for document in all_documents {
             if let Some(related_id) = document.related_id {
-                documents_by_goal.entry(related_id).or_insert_with(Vec::new).push(document);
+                documents_by_entity.entry(related_id).or_insert_with(Vec::new).push(document);
             }
         }
 
-        log::debug!("Found {} goals with documents", documents_by_goal.len());
+        log::debug!("Found {} entities with documents", documents_by_entity.len());
 
         // Create the entity stream but enhance each entity with document metadata
         let stream = self.create_entity_stream(&request.filters, progress_tx.clone()).await?;
         
         // Process stream and add document metadata to each record
-        let docs_by_goal = documents_by_goal.clone(); // Clone for move into closure
+        let docs_by_entity = documents_by_entity.clone(); // Clone for move into closure
+        let entity_type_copy = entity_type.to_string(); // Clone for move into closure
         let enhanced_stream = stream.map(move |result| {
             match result {
                 Ok(mut entity) => {
-                    // Extract goal ID from the entity
-                    if let Some(goal_id_value) = entity.get("id") {
-                        if let Some(goal_id_str) = goal_id_value.as_str() {
-                            if let Ok(goal_id) = uuid::Uuid::parse_str(goal_id_str) {
-                                // Get documents for this goal
-                                let goal_documents = docs_by_goal.get(&goal_id).cloned().unwrap_or_default();
+                    // Extract entity ID from the entity
+                    if let Some(entity_id_value) = entity.get("id") {
+                        if let Some(entity_id_str) = entity_id_value.as_str() {
+                            if let Ok(entity_id) = uuid::Uuid::parse_str(entity_id_str) {
+                                // Get documents for this entity
+                                let entity_documents = docs_by_entity.get(&entity_id).cloned().unwrap_or_default();
                                 
                                 // Add document metadata to the entity
-                                entity["document_count"] = serde_json::Value::Number(serde_json::Number::from(goal_documents.len()));
-                                entity["has_documents"] = serde_json::Value::Bool(!goal_documents.is_empty());
+                                entity["document_count"] = serde_json::Value::Number(serde_json::Number::from(entity_documents.len()));
+                                entity["has_documents"] = serde_json::Value::Bool(!entity_documents.is_empty());
                                 
                                 // Add document filenames as a semicolon-separated list
-                                let document_filenames: Vec<String> = goal_documents.iter()
+                                let document_filenames: Vec<String> = entity_documents.iter()
                                     .map(|doc| doc.original_filename.clone())
                                     .collect();
                                 entity["document_filenames"] = serde_json::Value::String(document_filenames.join("; "));
                                 
                                 // Add document types (using type_id since document_type_name doesn't exist)
-                                let document_type_ids: Vec<String> = goal_documents.iter()
+                                let document_type_ids: Vec<String> = entity_documents.iter()
                                     .map(|doc| doc.type_id.to_string())
                                     .collect();
                                 entity["document_type_ids"] = serde_json::Value::String(document_type_ids.join("; "));
                                 
                                 // Add file paths relative to the organized ZIP structure
-                                let document_paths: Vec<String> = goal_documents.iter()
-                                    .map(|doc| format!("files/strategic_goals/{}/{}", goal_id, doc.original_filename))
+                                let document_paths: Vec<String> = entity_documents.iter()
+                                    .map(|doc| format!("files/{}/{}/{}", entity_type_copy, entity_id, doc.original_filename))
                                     .collect();
                                 entity["document_paths"] = serde_json::Value::String(document_paths.join("; "));
                             }
@@ -386,36 +401,57 @@ impl ExportServiceV2 {
         // Copy documents to files directory
         if request.include_blobs {
             log::debug!("Copying documents to ZIP structure");
-            let documents_size = self.copy_documents_for_strategic_goals(temp_path, &goal_ids).await?;
+            let documents_size = match entity_type {
+                "strategic_goals" => self.copy_documents_for_strategic_goals(temp_path, &entity_ids).await?,
+                "projects" => self.copy_documents_for_projects(temp_path, &entity_ids).await?,
+                _ => 0
+            };
             total_file_size += documents_size;
             log::debug!("Copied {} bytes of documents", documents_size);
         }
         
         // Create README.txt to explain the export structure
         let readme_path = temp_path.join("README.txt");
+        let entity_display_name = match entity_type {
+            "strategic_goals" => "Strategic Goals",
+            "projects" => "Projects",
+            _ => "Entities"
+        };
+        let entity_singular = match entity_type {
+            "strategic_goals" => "goal",
+            "projects" => "project",
+            _ => "entity"
+        };
         let readme_content = format!(
-            "ActionAid Strategic Goals Export\n\
+            "ActionAid {} Export\n\
             =====================================\n\n\
             This export contains:\n\
-            - strategic_goals.csv: Main data file with document associations\n\
-            - files/strategic_goals/[goal_id]/: Organized folders containing documents for each goal\n\n\
+            - {}: Main data file with document associations\n\
+            - files/{}/[entity_id]/: Organized folders containing documents for each {}\n\n\
             Folder Structure:\n\
-            - files/strategic_goals/[uuid]/: Documents for each strategic goal (organized by goal ID)\n\
-            - Each goal has its own folder containing only its documents\n\
+            - files/{}/[uuid]/: Documents for each {} (organized by {} ID)\n\
+            - Each {} has its own folder containing only its documents\n\
             - Document filenames are preserved as uploaded\n\n\
             CSV Columns for Document Association:\n\
-            - document_count: Number of documents attached to this goal\n\
+            - document_count: Number of documents attached to this {}\n\
             - has_documents: Boolean indicating if documents are attached\n\
             - document_filenames: List of document filenames (separated by '; ')\n\
             - document_type_ids: List of document type UUIDs (separated by '; ')\n\
             - document_paths: File paths relative to this ZIP (separated by '; ')\n\n\
-            Example document path: files/strategic_goals/123e4567-e89b-12d3-a456-426614174000/report.pdf\n\n\
+            Example document path: files/{}/123e4567-e89b-12d3-a456-426614174000/report.pdf\n\n\
             Export created: {}\n\
             Records exported: {}\n\
             Documents included: {}\n",
+            entity_display_name,
+            csv_filename,
+            entity_type, entity_singular,
+            entity_type, entity_singular, entity_singular,
+            entity_singular,
+            entity_singular,
+            entity_type,
             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
             stats.entities_written,
-            documents_by_goal.values().map(|docs| docs.len()).sum::<usize>()
+            documents_by_entity.values().map(|docs| docs.len()).sum::<usize>()
         );
         
         tokio::fs::write(&readme_path, readme_content).await
@@ -510,40 +546,43 @@ impl ExportServiceV2 {
         let temp_dir = TempDir::new().map_err(|e| ServiceError::InternalError(format!("Failed to create temp dir: {}", e)))?;
         let temp_path = temp_dir.path();
 
-        let parquet_filename = "strategic_goals.parquet";
-        let parquet_path = temp_path.join(parquet_filename);
+        // 🔧 FIX: Generic entity type and filename determination
+        let (entity_ids, entity_type) = match request.filters.first() {
+            Some(EntityFilter::StrategicGoalsByIds { ids }) => (ids.clone(), "strategic_goals"),
+            Some(EntityFilter::ProjectsByIds { ids }) => (ids.clone(), "projects"),
+            _ => {
+                return Err(ServiceError::ValidationError("Parquet ZIP export only supports entity ID-based filters".to_string()));
+            }
+        };
+        let parquet_filename = format!("{}.parquet", entity_type);
+
+        let parquet_path = temp_path.join(&parquet_filename);
         
         log::debug!("Creating Parquet export with organized document structure at: {}", parquet_path.display());
 
-        // Extract goal IDs for document association (similar to CSV/JSONL implementation)
-        let goal_ids: Vec<Uuid> = match request.filters.first() {
-            Some(EntityFilter::StrategicGoalsByIds { ids }) => ids.clone(),
-            _ => {
-                return Err(ServiceError::ValidationError("Parquet ZIP export currently only supports StrategicGoalsByIds filter".to_string()));
-            }
-        };
-
-        // Get documents by goal for association
-        let documents_by_goal = if request.include_blobs {
+        // Get documents by entity for association
+        let documents_by_entity = if request.include_blobs {
             let media_doc_repo = globals::get_media_document_repo()
             .map_err(|e| ServiceError::InternalError(e.to_string()))?;
 
             let all_documents = media_doc_repo
-                .find_by_related_entities("strategic_goals", &goal_ids)
+                .find_by_related_entities(entity_type, &entity_ids)
                 .await
                 .map_err(|e| ServiceError::InternalError(e.to_string()))?;
 
-            let mut docs_by_goal: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+            let mut docs_by_entity: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
             for doc in all_documents {
-                if let Some(goal_id) = doc.related_id {
-                    docs_by_goal.entry(goal_id).or_insert_with(Vec::new).push(doc);
+                if let Some(entity_id) = doc.related_id {
+                    docs_by_entity.entry(entity_id).or_insert_with(Vec::new).push(doc);
                 }
             }
-            docs_by_goal
+            docs_by_entity
         } else {
             std::collections::HashMap::new()
         };
 
+        let parquet_path = temp_path.join(&parquet_filename);
+        
         // Create Parquet file with enhanced schema including document metadata
         let schema = self.get_schema_for_filters(&request.filters)?;
         
@@ -552,7 +591,7 @@ impl ExportServiceV2 {
             .map_err(|e| ServiceError::InternalError(format!("Failed to create Parquet writer: {}", e)))?;
         
         // Create enhanced Arrow stream with document metadata
-        let arrow_stream = self.create_enhanced_arrow_stream_with_documents(&request.filters, &documents_by_goal, progress_tx.clone()).await?;
+        let arrow_stream = self.create_enhanced_arrow_stream_with_documents(&request.filters, &documents_by_entity, progress_tx.clone()).await?;
         
         // Use the streaming interface to write Arrow batches
         let stats = writer.write_batch_stream(Box::new(arrow_stream)).await
@@ -570,38 +609,59 @@ impl ExportServiceV2 {
         // Copy documents using the same organized structure as CSV/JSONL
         if request.include_blobs {
             log::debug!("Copying documents to organized ZIP structure");
-            let documents_size = self.copy_documents_for_strategic_goals(temp_path, &goal_ids).await?;
+            let documents_size = match entity_type {
+                "strategic_goals" => self.copy_documents_for_strategic_goals(temp_path, &entity_ids).await?,
+                "projects" => self.copy_documents_for_projects(temp_path, &entity_ids).await?,
+                _ => 0
+            };
             total_file_size += documents_size;
             log::debug!("Copied {} bytes of documents", documents_size);
         }
         
         // Create README.txt to explain the export structure (same as CSV/JSONL)
         let readme_path = temp_path.join("README.txt");
+        let entity_display_name = match entity_type {
+            "strategic_goals" => "Strategic Goals",
+            "projects" => "Projects",
+            _ => "Entities"
+        };
+        let entity_singular = match entity_type {
+            "strategic_goals" => "goal",
+            "projects" => "project",
+            _ => "entity"
+        };
         let readme_content = format!(
-            "ActionAid Strategic Goals Export (Parquet Format)\n\
+            "ActionAid {} Export (Parquet Format)\n\
             ================================================\n\n\
             This export contains:\n\
-            - strategic_goals.parquet: Main data file with document associations (columnar format)\n\
-            - files/strategic_goals/[goal_id]/: Organized folders containing documents for each goal\n\n\
+            - {}: Main data file with document associations (columnar format)\n\
+            - files/{}/[entity_id]/: Organized folders containing documents for each {}\n\n\
             Folder Structure:\n\
-            - files/strategic_goals/[uuid]/: Documents for each strategic goal (organized by goal ID)\n\
-            - Each goal has its own folder containing only its documents\n\
+            - files/{}/[uuid]/: Documents for each {} (organized by {} ID)\n\
+            - Each {} has its own folder containing only its documents\n\
             - Document filenames are preserved as uploaded\n\n\
             Parquet Columns for Document Association:\n\
-            - document_count: Number of documents attached to this goal\n\
+            - document_count: Number of documents attached to this {}\n\
             - has_documents: Boolean indicating if documents are attached\n\
             - document_filenames: List of document filenames (separated by '; ')\n\
             - document_type_ids: List of document type UUIDs (separated by '; ')\n\
             - document_paths: File paths relative to this ZIP (separated by '; ')\n\n\
-            Example document path: files/strategic_goals/123e4567-e89b-12d3-a456-426614174000/report.pdf\n\n\
+            Example document path: files/{}/123e4567-e89b-12d3-a456-426614174000/report.pdf\n\n\
             Export created: {}\n\
             Records exported: {}\n\
             Documents included: {}\n\
             Note: Parquet format provides efficient columnar storage and compression.\n\
             Note: Document metadata is not embedded in Parquet file, but documents are organized in folders.\n",
+            entity_display_name,
+            parquet_filename,
+            entity_type, entity_singular,
+            entity_type, entity_singular, entity_singular,
+            entity_singular,
+            entity_singular,
+            entity_type,
             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
             stats.entities_written,
-            documents_by_goal.values().map(|docs| docs.len()).sum::<usize>()
+            documents_by_entity.values().map(|docs| docs.len()).sum::<usize>()
         );
         
         tokio::fs::write(&readme_path, readme_content).await
@@ -649,7 +709,7 @@ impl ExportServiceV2 {
         // Use the existing comprehensive export logic from service.rs
         let file_storage = self.file_storage.clone();
         
-        // Delegate to the original export service that creates proper ZIP structure
+                // Delegate to the original export service that creates proper ZIP structure
         match &request.filters.first() {
             Some(EntityFilter::StrategicGoalsByIds { ids }) => {
                 let count = crate::domains::export::service::export_strategic_goals_by_ids(
@@ -691,10 +751,50 @@ impl ExportServiceV2 {
                 
                 Ok(ExportSummary { job })
             }
-                         _ => {
-                 // For other filters, fall back to simple JSONL export
-                 Err(ServiceError::ValidationError("ZIP structure export only supports StrategicGoalsByIds filter currently".to_string()))
-             }
+            Some(EntityFilter::ProjectsByIds { ids }) => {
+                let count = crate::domains::export::service::export_projects_by_ids_with_options(
+                    temp_dir.path(), 
+                    ids, 
+                    request.include_blobs, 
+                    &file_storage
+                ).await.map_err(|e| ServiceError::InternalError(e))?;
+                
+                // Create ZIP from the structured directory
+                let original_path = self.generate_export_path(request);
+                let zip_name = if let Some(stem) = original_path.file_stem() {
+                    format!("{}.zip", stem.to_string_lossy())
+                } else {
+                    format!("projects_export_{}.zip", uuid::Uuid::new_v4())
+                };
+                let output_path = original_path.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(&zip_name);
+                
+                crate::domains::export::service::create_zip_from_dir(temp_dir.path(), &output_path)
+                    .map_err(|e| ServiceError::InternalError(format!("Failed to create ZIP: {}", e)))?;
+                
+                // Create summary
+                let metadata = std::fs::metadata(&output_path)
+                    .map_err(|e| ServiceError::InternalError(format!("Failed to stat ZIP: {}", e)))?;
+                
+                let job = ExportJob {
+                    id: uuid::Uuid::new_v4(),
+                    requested_by_user_id: Some(auth.user_id),
+                    requested_at: chrono::Utc::now(),
+                    include_blobs: request.include_blobs,
+                    status: ExportStatus::Completed,
+                    local_path: Some(output_path.to_string_lossy().to_string()),
+                    total_entities: Some(count),
+                    total_bytes: Some(metadata.len() as i64),
+                    error_message: None,
+                };
+                
+                Ok(ExportSummary { job })
+            }
+            _ => {
+                // For other filters, fall back to simple JSONL export
+                Err(ServiceError::ValidationError("ZIP structure export only supports StrategicGoalsByIds and ProjectsByIds filters currently".to_string()))
+            }
         }
     }
 
@@ -771,40 +871,43 @@ impl ExportServiceV2 {
         let temp_dir = TempDir::new().map_err(|e| ServiceError::InternalError(format!("Failed to create temp dir: {}", e)))?;
         let temp_path = temp_dir.path();
 
-        let jsonl_filename = "strategic_goals.jsonl";
-        let jsonl_path = temp_path.join(jsonl_filename);
+        // 🔧 FIX: Generic entity type and filename determination  
+        let (entity_ids, entity_type) = match request.filters.first() {
+            Some(EntityFilter::StrategicGoalsByIds { ids }) => (ids.clone(), "strategic_goals"),
+            Some(EntityFilter::ProjectsByIds { ids }) => (ids.clone(), "projects"),
+            _ => {
+                return Err(ServiceError::ValidationError("JSONL ZIP export only supports entity ID-based filters".to_string()));
+            }
+        };
+        let jsonl_filename = format!("{}.jsonl", entity_type);
+
+        let jsonl_path = temp_path.join(&jsonl_filename);
         
         log::debug!("Creating JSONL export with organized document structure at: {}", jsonl_path.display());
 
-        // Extract goal IDs for document association (similar to CSV implementation)
-        let goal_ids: Vec<Uuid> = match request.filters.first() {
-            Some(EntityFilter::StrategicGoalsByIds { ids }) => ids.clone(),
-            _ => {
-                return Err(ServiceError::ValidationError("JSONL ZIP export currently only supports StrategicGoalsByIds filter".to_string()));
-            }
-        };
-
-        // Get documents by goal for association
-        let documents_by_goal = if request.include_blobs {
+        // Get documents by entity for association
+        let documents_by_entity = if request.include_blobs {
             let media_doc_repo = globals::get_media_document_repo()
                 .map_err(|e| ServiceError::InternalError(e.to_string()))?;
             
             let all_documents = media_doc_repo
-                .find_by_related_entities("strategic_goals", &goal_ids)
+                .find_by_related_entities(entity_type, &entity_ids)
                 .await
                 .map_err(|e| ServiceError::InternalError(e.to_string()))?;
 
-            let mut docs_by_goal: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+            let mut docs_by_entity: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
             for doc in all_documents {
-                if let Some(goal_id) = doc.related_id {
-                    docs_by_goal.entry(goal_id).or_insert_with(Vec::new).push(doc);
+                if let Some(entity_id) = doc.related_id {
+                    docs_by_entity.entry(entity_id).or_insert_with(Vec::new).push(doc);
                 }
             }
-            docs_by_goal
+            docs_by_entity
         } else {
             std::collections::HashMap::new()
         };
 
+        let jsonl_path = temp_path.join(&jsonl_filename);
+        
         // Create JSONL file with document metadata
         let file = File::create(&jsonl_path).await
             .map_err(|e| ServiceError::InternalError(format!("Failed to create JSONL file: {}", e)))?;
@@ -817,36 +920,37 @@ impl ExportServiceV2 {
         let mut total_file_size = 0u64;
 
         // Process stream and add document metadata to each record (same logic as CSV)
-        let docs_by_goal = documents_by_goal.clone();
+        let docs_by_entity = documents_by_entity.clone();
+        let entity_type_copy = entity_type.to_string();
         while let Some(result) = stream.next().await {
             match result {
                 Ok(mut entity) => {
-                    // Extract goal ID from the entity
-                    if let Some(goal_id_value) = entity.get("id") {
-                        if let Some(goal_id_str) = goal_id_value.as_str() {
-                            if let Ok(goal_id) = uuid::Uuid::parse_str(goal_id_str) {
-                                // Get documents for this goal
-                                let goal_documents = docs_by_goal.get(&goal_id).cloned().unwrap_or_default();
+                    // Extract entity ID from the entity
+                    if let Some(entity_id_value) = entity.get("id") {
+                        if let Some(entity_id_str) = entity_id_value.as_str() {
+                            if let Ok(entity_id) = uuid::Uuid::parse_str(entity_id_str) {
+                                // Get documents for this entity
+                                let entity_documents = docs_by_entity.get(&entity_id).cloned().unwrap_or_default();
                                 
                                 // Add document metadata to the entity (same as CSV)
-                                entity["document_count"] = serde_json::Value::Number(serde_json::Number::from(goal_documents.len()));
-                                entity["has_documents"] = serde_json::Value::Bool(!goal_documents.is_empty());
+                                entity["document_count"] = serde_json::Value::Number(serde_json::Number::from(entity_documents.len()));
+                                entity["has_documents"] = serde_json::Value::Bool(!entity_documents.is_empty());
                                 
                                 // Add document filenames as a semicolon-separated list
-                                let document_filenames: Vec<String> = goal_documents.iter()
+                                let document_filenames: Vec<String> = entity_documents.iter()
                                     .map(|doc| doc.original_filename.clone())
                                     .collect();
                                 entity["document_filenames"] = serde_json::Value::String(document_filenames.join("; "));
                                 
                                 // Add document type IDs
-                                let document_type_ids: Vec<String> = goal_documents.iter()
+                                let document_type_ids: Vec<String> = entity_documents.iter()
                                     .map(|doc| doc.type_id.to_string())
                                     .collect();
                                 entity["document_type_ids"] = serde_json::Value::String(document_type_ids.join("; "));
                                 
                                 // Add file paths relative to the organized ZIP structure
-                                let document_paths: Vec<String> = goal_documents.iter()
-                                    .map(|doc| format!("files/strategic_goals/{}/{}", goal_id, doc.original_filename))
+                                let document_paths: Vec<String> = entity_documents.iter()
+                                    .map(|doc| format!("files/{}/{}/{}", entity_type_copy, entity_id, doc.original_filename))
                                     .collect();
                                 entity["document_paths"] = serde_json::Value::String(document_paths.join("; "));
                             }
@@ -875,36 +979,57 @@ impl ExportServiceV2 {
         // Copy documents using the same organized structure as CSV
         if request.include_blobs {
             log::debug!("Copying documents to organized ZIP structure");
-            let documents_size = self.copy_documents_for_strategic_goals(temp_path, &goal_ids).await?;
+            let documents_size = match entity_type {
+                "strategic_goals" => self.copy_documents_for_strategic_goals(temp_path, &entity_ids).await?,
+                "projects" => self.copy_documents_for_projects(temp_path, &entity_ids).await?,
+                _ => 0
+            };
             total_file_size += documents_size;
             log::debug!("Copied {} bytes of documents", documents_size);
         }
         
         // Create README.txt to explain the export structure (same as CSV)
         let readme_path = temp_path.join("README.txt");
+        let entity_display_name = match entity_type {
+            "strategic_goals" => "Strategic Goals",
+            "projects" => "Projects",
+            _ => "Entities"
+        };
+        let entity_singular = match entity_type {
+            "strategic_goals" => "goal",
+            "projects" => "project",
+            _ => "entity"
+        };
         let readme_content = format!(
-            "ActionAid Strategic Goals Export (JSONL Format)\n\
+            "ActionAid {} Export (JSONL Format)\n\
             ===============================================\n\n\
             This export contains:\n\
-            - strategic_goals.jsonl: Main data file with document associations (one JSON object per line)\n\
-            - files/strategic_goals/[goal_id]/: Organized folders containing documents for each goal\n\n\
+            - {}: Main data file with document associations (one JSON object per line)\n\
+            - files/{}/[entity_id]/: Organized folders containing documents for each {}\n\n\
             Folder Structure:\n\
-            - files/strategic_goals/[uuid]/: Documents for each strategic goal (organized by goal ID)\n\
-            - Each goal has its own folder containing only its documents\n\
+            - files/{}/[uuid]/: Documents for each {} (organized by {} ID)\n\
+            - Each {} has its own folder containing only its documents\n\
             - Document filenames are preserved as uploaded\n\n\
             JSONL Fields for Document Association:\n\
-            - document_count: Number of documents attached to this goal\n\
+            - document_count: Number of documents attached to this {}\n\
             - has_documents: Boolean indicating if documents are attached\n\
             - document_filenames: List of document filenames (separated by '; ')\n\
             - document_type_ids: List of document type UUIDs (separated by '; ')\n\
             - document_paths: File paths relative to this ZIP (separated by '; ')\n\n\
-            Example document path: files/strategic_goals/123e4567-e89b-12d3-a456-426614174000/report.pdf\n\n\
+            Example document path: files/{}/123e4567-e89b-12d3-a456-426614174000/report.pdf\n\n\
             Export created: {}\n\
             Records exported: {}\n\
             Documents included: {}\n",
+            entity_display_name,
+            jsonl_filename,
+            entity_type, entity_singular,
+            entity_type, entity_singular, entity_singular,
+            entity_singular,
+            entity_singular,
+            entity_type,
             chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC"),
             entities_written,
-            documents_by_goal.values().map(|docs| docs.len()).sum::<usize>()
+            documents_by_entity.values().map(|docs| docs.len()).sum::<usize>()
         );
         
         tokio::fs::write(&readme_path, readme_content).await
@@ -964,9 +1089,20 @@ impl ExportServiceV2 {
                 let limited_filter = EntityFilter::StrategicGoalsByIds { ids: limited_ids.clone() };
                 (50, limited_ids.len()) // Batch size 50, max 1000 total
             }
+            EntityFilter::ProjectsByIds { ids } => {
+                let limited_ids = if ids.len() > 1000 {
+                    log::warn!("Projects export limited to first 1000 items (requested: {})", ids.len());
+                    ids[..1000].to_vec()
+                } else {
+                    ids.clone()
+                };
+                
+                (50, limited_ids.len()) // Batch size 50, max 1000 total
+            }
             EntityFilter::StrategicGoals { .. } => (50, 1000), // Limit to 1000 strategic goals
             EntityFilter::ProjectsAll => (50, 1000), // Limit to 1000 projects
             EntityFilter::ActivitiesAll => (50, 1000), // Limit to 1000 activities
+            EntityFilter::ParticipantsAll => (50, 1000), // Limit to 1000 participants
             EntityFilter::WorkshopsAll { .. } => (25, 1000), // Limit to 1000 workshops
             _ => (50, 1000), // Default: 1000 limit
         };
@@ -1239,7 +1375,7 @@ impl ExportServiceV2 {
     async fn create_enhanced_arrow_stream_with_documents(
         &self,
         filters: &[EntityFilter],
-        documents_by_goal: &std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>>,
+        documents_by_entity: &std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>>,
         progress_tx: mpsc::Sender<ExportProgress>,
     ) -> ServiceResult<impl Stream<Item = Result<arrow::record_batch::RecordBatch, ExportError>>> {
         use arrow::array::*;
@@ -1253,39 +1389,47 @@ impl ExportServiceV2 {
         // Create JSON entity stream
         let json_stream = self.create_entity_stream(filters, progress_tx).await?;
         
-        // Clone documents_by_goal for move into closure
-        let docs_by_goal = documents_by_goal.clone();
+        // Clone documents_by_entity for move into closure
+        let docs_by_entity = documents_by_entity.clone();
+        
+        // Determine entity type for path generation
+        let entity_type = match filters.first() {
+            Some(EntityFilter::StrategicGoalsByIds { .. }) => "strategic_goals",
+            Some(EntityFilter::ProjectsByIds { .. }) => "projects",
+            _ => "entities"
+        };
+        let entity_type_copy = entity_type.to_string();
         
         // Enhance JSON stream with document metadata (same logic as CSV/JSONL)
         let enhanced_stream = json_stream.map(move |result| {
             match result {
                 Ok(mut entity) => {
-                    // Extract goal ID from the entity and add document metadata
-                    if let Some(goal_id_value) = entity.get("id") {
-                        if let Some(goal_id_str) = goal_id_value.as_str() {
-                            if let Ok(goal_id) = uuid::Uuid::parse_str(goal_id_str) {
-                                // Get documents for this goal
-                                let goal_documents = docs_by_goal.get(&goal_id).cloned().unwrap_or_default();
+                    // Extract entity ID from the entity and add document metadata
+                    if let Some(entity_id_value) = entity.get("id") {
+                        if let Some(entity_id_str) = entity_id_value.as_str() {
+                            if let Ok(entity_id) = uuid::Uuid::parse_str(entity_id_str) {
+                                // Get documents for this entity
+                                let entity_documents = docs_by_entity.get(&entity_id).cloned().unwrap_or_default();
                                 
                                 // Add document metadata to the entity (same as CSV/JSONL)
-                                entity["document_count"] = serde_json::Value::Number(serde_json::Number::from(goal_documents.len()));
-                                entity["has_documents"] = serde_json::Value::Bool(!goal_documents.is_empty());
+                                entity["document_count"] = serde_json::Value::Number(serde_json::Number::from(entity_documents.len()));
+                                entity["has_documents"] = serde_json::Value::Bool(!entity_documents.is_empty());
                                 
                                 // Add document filenames as a semicolon-separated list
-                                let document_filenames: Vec<String> = goal_documents.iter()
+                                let document_filenames: Vec<String> = entity_documents.iter()
                                     .map(|doc| doc.original_filename.clone())
                                     .collect();
                                 entity["document_filenames"] = serde_json::Value::String(document_filenames.join("; "));
                                 
                                 // Add document type IDs
-                                let document_type_ids: Vec<String> = goal_documents.iter()
+                                let document_type_ids: Vec<String> = entity_documents.iter()
                                     .map(|doc| doc.type_id.to_string())
                                     .collect();
                                 entity["document_type_ids"] = serde_json::Value::String(document_type_ids.join("; "));
                                 
                                 // Add file paths relative to the organized ZIP structure
-                                let document_paths: Vec<String> = goal_documents.iter()
-                                    .map(|doc| format!("files/strategic_goals/{}/{}", goal_id, doc.original_filename))
+                                let document_paths: Vec<String> = entity_documents.iter()
+                                    .map(|doc| format!("files/{}/{}/{}", entity_type_copy, entity_id, doc.original_filename))
                                     .collect();
                                 entity["document_paths"] = serde_json::Value::String(document_paths.join("; "));
                             }
@@ -1345,8 +1489,11 @@ impl ExportServiceV2 {
                 EntityFilter::StrategicGoals { .. } | EntityFilter::StrategicGoalsByIds { .. } => {
                     return self.create_dynamic_strategic_goals_schema();
                 }
-                EntityFilter::ProjectsAll => {
+                EntityFilter::ProjectsAll | EntityFilter::ProjectsByIds { .. } => {
                     return self.create_dynamic_projects_schema();
+                }
+                EntityFilter::ParticipantsAll | EntityFilter::ParticipantsByIds { .. } => {
+                    return self.create_dynamic_participants_schema();
                 }
                 EntityFilter::WorkshopsAll { .. } => {
                     return self.create_dynamic_workshops_schema();
@@ -1441,6 +1588,33 @@ impl ExportServiceV2 {
         Ok(Arc::new(Schema::new(fields)))
     }
     
+    /// Create dynamic schema for participants
+    fn create_dynamic_participants_schema(&self) -> ServiceResult<Arc<arrow::datatypes::Schema>> {
+        use arrow::datatypes::{DataType, Field, Schema};
+        
+        let fields = vec![
+            Arc::new(Field::new("id", DataType::Utf8, true)),
+            Arc::new(Field::new("name", DataType::Utf8, true)),
+            Arc::new(Field::new("gender", DataType::Utf8, true)),
+            Arc::new(Field::new("disability", DataType::Boolean, true)),
+            Arc::new(Field::new("disability_type", DataType::Utf8, true)),
+            Arc::new(Field::new("age_group", DataType::Utf8, true)),
+            Arc::new(Field::new("location", DataType::Utf8, true)),
+            Arc::new(Field::new("sync_priority", DataType::Utf8, true)),
+            Arc::new(Field::new("created_at", DataType::Utf8, true)),
+            Arc::new(Field::new("updated_at", DataType::Utf8, true)),
+            Arc::new(Field::new("created_by_user_id", DataType::Utf8, true)),
+            Arc::new(Field::new("created_by_device_id", DataType::Utf8, true)),
+            Arc::new(Field::new("updated_by_user_id", DataType::Utf8, true)),
+            Arc::new(Field::new("updated_by_device_id", DataType::Utf8, true)),
+            Arc::new(Field::new("deleted_at", DataType::Utf8, true)),
+            Arc::new(Field::new("deleted_by_user_id", DataType::Utf8, true)),
+            Arc::new(Field::new("deleted_by_device_id", DataType::Utf8, true)),
+        ];
+        
+        Ok(Arc::new(Schema::new(fields)))
+    }
+    
     /// Get entity count for progress estimation
     async fn get_entity_count(&self, filters: &[EntityFilter]) -> ServiceResult<usize> {
         if let Some(filter) = filters.first() {
@@ -1492,6 +1666,84 @@ impl ExportServiceV2 {
             Some(ExportFormat::Csv { compress: true, .. }) => JobPriority::Normal,
             _ => JobPriority::Low,
         }
+    }
+
+    /// Copies documents for projects to a destination directory.
+    async fn copy_documents_for_projects(&self, dest_dir: &Path, ids: &[Uuid]) -> ServiceResult<u64> {
+        // Early bailout if no IDs
+        if ids.is_empty() {
+            log::debug!("No project IDs provided, skipping document copy");
+            return Ok(0);
+        }
+
+        log::debug!("Checking for documents related to {} projects", ids.len());
+        
+        let media_doc_repo = globals::get_media_document_repo()
+            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+        
+        // Quick count check first to avoid unnecessary work
+        let document_count = media_doc_repo
+            .count_by_related_entities("projects", &ids)
+            .await
+            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+            
+        if document_count == 0 {
+            log::debug!("No documents found for projects, skipping file operations");
+            return Ok(0);
+        }
+
+        log::debug!("Found {} documents to copy", document_count);
+        
+        let all_documents = media_doc_repo
+            .find_by_related_entities("projects", &ids)
+            .await
+            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+            
+        if all_documents.is_empty() {
+            log::debug!("Document query returned empty results");
+            return Ok(0);
+        }
+
+        // Create organized folder structure: files/projects/project_id/
+        let files_dir = dest_dir.join("files");
+        let projects_dir = files_dir.join("projects");
+        tokio::fs::create_dir_all(&projects_dir).await
+            .map_err(|e| ServiceError::InternalError(format!("Failed to create projects directory: {}", e)))?;
+        
+        let mut total_bytes = 0;
+        let mut copied_count = 0;
+
+        // Group documents by project ID and copy to organized folders
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                // Create project-specific folder
+                let project_dir = projects_dir.join(related_id.to_string());
+                tokio::fs::create_dir_all(&project_dir).await
+                    .map_err(|e| ServiceError::InternalError(format!("Failed to create project directory {}: {}", related_id, e)))?;
+
+                let (source_file_path, _) = crate::domains::export::service::select_best_file_path_with_storage(&document, &self.file_storage);
+                let abs_source_path = self.file_storage.get_absolute_path(source_file_path);
+
+                if abs_source_path.exists() {
+                    let dest_file_path = project_dir.join(&document.original_filename);
+                    match tokio::fs::copy(&abs_source_path, &dest_file_path).await {
+                        Ok(bytes_copied) => {
+                            total_bytes += bytes_copied;
+                            copied_count += 1;
+                            log::debug!("Copied document {} to project folder {}", document.original_filename, related_id);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to copy document {} to project folder {}: {}", document.original_filename, related_id, e);
+                        }
+                    }
+                } else {
+                    log::warn!("Document file not found: {}", source_file_path);
+                }
+            }
+        }
+
+        log::info!("Copied {} documents ({} bytes) for {} projects", copied_count, total_bytes, ids.len());
+        Ok(total_bytes)
     }
 
     /// Copies documents for strategic goals to a destination directory.

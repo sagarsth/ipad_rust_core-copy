@@ -8,7 +8,7 @@ use crate::domains::document::types::{MediaDocumentResponse};
 use crate::domains::permission::Permission;
 use crate::domains::strategic_goal::repository::StrategicGoalRepository;
 use crate::domains::strategic_goal::types::{
-    NewStrategicGoal, StrategicGoal, StrategicGoalResponse, UpdateStrategicGoal, StrategicGoalInclude, UserGoalRole, GoalValueSummaryResponse,
+    NewStrategicGoal, StrategicGoal, StrategicGoalResponse, StrategicGoalSummaryResponse, UpdateStrategicGoal, StrategicGoalInclude, UserGoalRole, GoalValueSummaryResponse,
 };
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
 use crate::errors::{DomainError, DomainResult, ServiceError, ServiceResult, ValidationError, DbError};
@@ -64,6 +64,14 @@ pub trait StrategicGoalService: DeleteService<StrategicGoal> + Send + Sync {
         include: Option<&[StrategicGoalInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<StrategicGoalResponse>>;
+
+    /// List strategic goal summaries (lightweight for pickers)
+    /// Returns only id and objective_code for performance
+    async fn list_strategic_goal_summaries(
+        &self,
+        params: PaginationParams,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<StrategicGoalSummaryResponse>>;
 
     async fn update_strategic_goal(
         &self,
@@ -538,6 +546,29 @@ impl StrategicGoalService for StrategicGoalServiceImpl {
 
         Ok(PaginatedResult::new(
             enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    /// List strategic goal summaries (lightweight for pickers)
+    /// Returns only id and objective_code for performance
+    async fn list_strategic_goal_summaries(
+        &self,
+        params: PaginationParams,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<StrategicGoalSummaryResponse>> {
+        auth.authorize(Permission::ViewStrategicGoals)?;
+
+        let paginated_result = self.repo.find_all(params).await.map_err(ServiceError::Domain)?;
+        
+        let summaries: Vec<StrategicGoalSummaryResponse> = paginated_result.items
+            .into_iter()
+            .map(StrategicGoalSummaryResponse::from)
+            .collect();
+
+        Ok(PaginatedResult::new(
+            summaries,
             paginated_result.total,
             params,
         ))

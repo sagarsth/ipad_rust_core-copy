@@ -1189,6 +1189,42 @@ pub unsafe extern "C" fn strategic_goal_get_filtered_ids(payload_json: *const c_
     })
 }
 
+/// List strategic goal summaries (lightweight for pickers)
+/// Expected JSON payload:
+/// {
+///   "pagination": { PaginationDto },
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn strategic_goal_list_summaries(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            pagination: Option<PaginationDto>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let params = parse_pagination(p.pagination);
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        let svc = globals::get_strategic_goal_service()?;
+        let goals = block_on_async(svc.list_strategic_goal_summaries(params, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&goals)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Memory Management
 // ---------------------------------------------------------------------------

@@ -1,35 +1,46 @@
 //
-//  StrategicGoalDocumentAdapter.swift
+//  ProjectDocumentAdapter.swift
 //  ActionAid SwiftUI
 //
-//  Adapter to make StrategicGoalResponse work with the new generic document system
+//  Adapter to make ProjectResponse work with the new generic document system
 //
 
 import Foundation
 
-// MARK: - Strategic Goal Document Upload Adapter
+// MARK: - Project Document Upload Adapter
 
-/// Wrapper that provides document upload functionality for Strategic Goals
-struct StrategicGoalDocumentAdapter: DocumentUploadable {
-    let goal: StrategicGoalResponse
-    private let ffiHandler = StrategicGoalFFIHandler()
+/// Wrapper that provides document upload functionality for Projects
+struct ProjectDocumentAdapter: DocumentUploadable {
+    let project: ProjectResponse
+    private let ffiHandler = ProjectFFIHandler()
+    private let documentHandler = DocumentFFIHandler()
     
     // MARK: - DocumentIntegratable Implementation
     
     var entityId: String {
-        return goal.entityId
+        return project.id
     }
     
     var entityTableName: String {
-        return goal.entityTableName
+        return "projects"
     }
     
     var linkableFields: [(String, String)] {
-        return goal.linkableFields
+        return [
+            ("", "None"),
+            ("objective", "Objective"),
+            ("outcome", "Outcome"),
+            ("timeline", "Timeline"),
+            ("proposal_document", "Proposal Document"),
+            ("budget_document", "Budget Document"),
+            ("logical_framework", "Logical Framework"),
+            ("final_report", "Final Report"),
+            ("monitoring_plan", "Monitoring Plan")
+        ]
     }
     
     var entityTypeName: String {
-        return goal.entityTypeName
+        return "Project"
     }
     
     // MARK: - DocumentUploadable Implementation
@@ -44,16 +55,32 @@ struct StrategicGoalDocumentAdapter: DocumentUploadable {
         compressionPriority: CompressionPriority?,
         auth: AuthContextPayload
     ) async -> Result<MediaDocumentResponse, Error> {
-        return await ffiHandler.uploadDocumentFromPath(
-            goalId: goal.id,
+        // Use the optimized generic document upload function instead of project-specific base64 upload
+        // This eliminates the need to load entire files into memory and convert to base64
+        
+        print("🚀 [ProjectDocumentAdapter] Using optimized path-based upload: \(filePath)")
+        
+        // Convert AuthContextPayload to AuthCtxDto for the generic document handler
+        let authCtx = AuthCtxDto(
+            userId: auth.user_id,
+            role: auth.role,
+            deviceId: auth.device_id,
+            offlineMode: auth.offline_mode
+        )
+        
+        // Use the generic optimized document upload function
+        return await documentHandler.uploadDocumentFromPath(
             filePath: filePath,
             originalFilename: originalFilename,
             title: title,
             documentTypeId: documentTypeId,
+            relatedEntityId: project.id,
+            relatedEntityType: "projects",
             linkedField: linkedField,
-            syncPriority: syncPriority,
-            compressionPriority: compressionPriority ?? .normal,
-            auth: auth
+            syncPriority: syncPriority.rawValue,
+            compressionPriority: compressionPriority?.rawValue,
+            tempRelatedId: nil,
+            auth: authCtx
         )
     }
     
@@ -67,9 +94,17 @@ struct StrategicGoalDocumentAdapter: DocumentUploadable {
     ) async -> Result<[MediaDocumentResponse], Error> {
         
         // ✅ OPTIMIZED APPROACH: Use individual path-based uploads instead of base64 bulk upload
-        // This matches the same pattern as ProjectDocumentAdapter
+        // This avoids loading all files into memory simultaneously and eliminates base64 encoding overhead
         
-        print("🚀 [StrategicGoalDocumentAdapter] Using optimized bulk upload for \(files.count) files")
+        print("🚀 [ProjectDocumentAdapter] Using optimized bulk upload for \(files.count) files")
+        
+        // Convert AuthContextPayload to AuthCtxDto for the generic document handler
+        let authCtx = AuthCtxDto(
+            userId: auth.user_id,
+            role: auth.role,
+            deviceId: auth.device_id,
+            offlineMode: auth.offline_mode
+        )
         
         var results: [MediaDocumentResponse] = []
         var errors: [Error] = []
@@ -84,17 +119,19 @@ struct StrategicGoalDocumentAdapter: DocumentUploadable {
                 // Write data to temp file
                 try fileData.write(to: tempPath)
                 
-                // Use domain-specific optimized path-based upload
-                let result = await ffiHandler.uploadDocumentFromPath(
-                    goalId: goal.id,
+                // Use optimized path-based upload
+                let result = await documentHandler.uploadDocumentFromPath(
                     filePath: tempPath.path,
                     originalFilename: filename,
                     title: title,
                     documentTypeId: documentTypeId,
+                    relatedEntityId: project.id,
+                    relatedEntityType: "projects",
                     linkedField: nil, // Bulk uploads don't support field linking
-                    syncPriority: syncPriority,
-                    compressionPriority: compressionPriority ?? .normal,
-                    auth: auth
+                    syncPriority: syncPriority.rawValue,
+                    compressionPriority: compressionPriority?.rawValue,
+                    tempRelatedId: nil,
+                    auth: authCtx
                 )
                 
                 // Clean up temp file
@@ -120,7 +157,7 @@ struct StrategicGoalDocumentAdapter: DocumentUploadable {
         } else if let firstError = errors.first {
             return .failure(firstError)
         } else {
-            return .failure(NSError(domain: "StrategicGoalDocumentAdapter", code: 1, userInfo: [NSLocalizedDescriptionKey: "No files processed"]))
+            return .failure(NSError(domain: "ProjectDocumentAdapter", code: 1, userInfo: [NSLocalizedDescriptionKey: "No files processed"]))
         }
     }
     
@@ -212,4 +249,41 @@ struct StrategicGoalDocumentAdapter: DocumentUploadable {
     }
 }
 
-// MARK: - Note: asDocumentUploadable() extension is defined in StrategicGoalModels.swift 
+// MARK: - DocumentIntegratable Implementation for ProjectResponse
+
+extension ProjectResponse: DocumentIntegratable {
+    var entityId: String {
+        return id
+    }
+    
+    var entityTableName: String {
+        return "projects"
+    }
+    
+    var linkableFields: [(String, String)] {
+        return [
+            ("", "None"),
+            ("objective", "Objective"),
+            ("outcome", "Outcome"),
+            ("timeline", "Timeline"),
+            ("proposal_document", "Proposal Document"),
+            ("budget_document", "Budget Document"),
+            ("logical_framework", "Logical Framework"),
+            ("final_report", "Final Report"),
+            ("monitoring_plan", "Monitoring Plan")
+        ]
+    }
+    
+    var entityTypeName: String {
+        return "Project"
+    }
+}
+
+// MARK: - Helper Extension
+
+extension ProjectResponse {
+    /// Convert to DocumentUploadable adapter
+    func asDocumentUploadAdapter() -> ProjectDocumentAdapter {
+        return ProjectDocumentAdapter(project: self)
+    }
+} 

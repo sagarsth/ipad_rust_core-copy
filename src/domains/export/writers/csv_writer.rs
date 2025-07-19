@@ -63,10 +63,12 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
         }
     }
     
-    async fn write_headers_for_strategic_goals(&mut self) -> Result<(), ExportError> {
+    async fn write_headers_for_entity_type(&mut self, first_entity: &serde_json::Value) -> Result<(), ExportError> {
         if self.header_written.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        
+        log::debug!("[CSV_WRITER] Writing headers for entity type detection");
         
         // Add UTF-8 BOM for Excel compatibility
         self.inner.write_all(b"\xEF\xBB\xBF").await.map_err(|e| ExportError::Io(e.to_string()))?;
@@ -78,8 +80,10 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
                 .quote(self.config.quote_char)
                 .from_writer(&mut buffer);
             
-            // Use CsvRecord trait headers
-            let headers = crate::domains::strategic_goal::types::StrategicGoalResponse::headers();
+            // Determine entity type and use appropriate headers
+            let headers = self.detect_headers_from_entity(first_entity)?;
+            log::debug!("[CSV_WRITER] Using headers: {:?}", headers);
+            
             wtr.write_record(&headers).map_err(|e| ExportError::Serialization(e.to_string()))?;
             wtr.flush().map_err(|e| ExportError::Io(e.to_string()))?;
         }
@@ -87,7 +91,31 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
         self.inner.write_all(&buffer).await.map_err(|e| ExportError::Io(e.to_string()))?;
         self.stats.bytes_written += buffer.len() + 3; // Include BOM bytes
         
+        log::debug!("[CSV_WRITER] Headers written successfully");
         Ok(())
+    }
+    
+    fn detect_headers_from_entity(&self, entity: &serde_json::Value) -> Result<Vec<&'static str>, ExportError> {
+        if let Some(obj) = entity.as_object() {
+            log::debug!("[CSV_WRITER] Detecting entity type from JSON fields");
+            
+            // Detect entity type based on unique field combinations
+            if obj.contains_key("objective") && obj.contains_key("outcome") && obj.contains_key("responsible_team") {
+                log::debug!("[CSV_WRITER] Detected as ProjectExport - has objective, outcome, responsible_team");
+                return Ok(crate::domains::export::repository_v2::ProjectExport::headers());
+            }
+            
+            if obj.contains_key("gender") && obj.contains_key("disability") && obj.contains_key("age_group") {
+                log::debug!("[CSV_WRITER] Detected as ParticipantExport - has gender, disability, age_group");
+                return Ok(crate::domains::export::repository_v2::ParticipantExport::headers());
+            }
+            
+            // Default to strategic goals if no other pattern matches
+            log::debug!("[CSV_WRITER] Defaulting to StrategicGoalResponse - no other patterns matched");
+            return Ok(crate::domains::strategic_goal::types::StrategicGoalResponse::headers());
+        }
+        
+        Err(ExportError::InvalidConfig("Cannot detect entity type from non-object JSON".to_string()))
     }
     
     async fn write_csv_record<T: CsvRecord>(&mut self, record: &T) -> Result<(), ExportError> {
@@ -118,15 +146,33 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
     
     // Keep the legacy JSON method for backward compatibility but fix it
     async fn write_json_record(&mut self, record: &serde_json::Value) -> Result<(), ExportError> {
-        // Try to deserialize as StrategicGoalResponse first (most common)
+        log::debug!("[CSV_WRITER] Writing JSON record");
+        
+        // Try to deserialize as ProjectExport first
+        if let Ok(project) = serde_json::from_value::<crate::domains::export::repository_v2::ProjectExport>(record.clone()) {
+            log::debug!("[CSV_WRITER] Successfully deserialized as ProjectExport: {}", project.id);
+            return self.write_csv_record(&project).await;
+        }
+        
+        // Try to deserialize as ParticipantExport
+        if let Ok(participant) = serde_json::from_value::<crate::domains::export::repository_v2::ParticipantExport>(record.clone()) {
+            log::debug!("[CSV_WRITER] Successfully deserialized as ParticipantExport: {}", participant.id);
+            return self.write_csv_record(&participant).await;
+        }
+        
+        // Try to deserialize as StrategicGoalResponse
         if let Ok(strategic_goal) = serde_json::from_value::<crate::domains::strategic_goal::types::StrategicGoalResponse>(record.clone()) {
+            log::debug!("[CSV_WRITER] Successfully deserialized as StrategicGoalResponse: {}", strategic_goal.id);
             return self.write_csv_record(&strategic_goal).await;
         }
         
         // Try to deserialize as StrategicGoal
         if let Ok(strategic_goal) = serde_json::from_value::<crate::domains::strategic_goal::types::StrategicGoal>(record.clone()) {
+            log::debug!("[CSV_WRITER] Successfully deserialized as StrategicGoal: {}", strategic_goal.id);
             return self.write_csv_record(&strategic_goal).await;
         }
+        
+        log::debug!("[CSV_WRITER] Could not deserialize as known type, using generic JSON handling");
         
         // Fallback to generic JSON handling
         let mut buffer = self.adaptive_buffer.get_buffer().await;
@@ -160,25 +206,50 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
         let obj = json_value.as_object()
             .ok_or_else(|| ExportError::Serialization("Expected JSON object".to_string()))?;
         
-        // Extract fields in the expected order for strategic goals (matching database schema)
-        let fields = vec![
-            "id",
-            "objective_code", 
-            "outcome",
-            "kpi",
-            "target_value",
-            "actual_value", 
-            "progress_percentage", // Calculated field
-            "status_id",
-            "responsible_team",
-            "sync_priority",
-            "created_at",
-            "updated_at",
-            "created_by_user_id",
-            "updated_by_user_id",
-            "deleted_at",
-            "last_synced_at" // Not in database, will be empty
-        ];
+        log::debug!("[CSV_WRITER] Extracting fields from JSON for entity detection");
+        
+        // Detect entity type and extract appropriate fields
+        let fields = if obj.contains_key("objective") && obj.contains_key("outcome") && obj.contains_key("responsible_team") {
+            log::debug!("[CSV_WRITER] Using project field extraction");
+            // Project fields
+            vec![
+                "id",
+                "name",
+                "objective", 
+                "outcome",
+                "status_id",
+                "timeline",
+                "responsible_team",
+                "strategic_goal_id",
+                "sync_priority",
+                "created_at",
+                "updated_at",
+                "created_by_user_id",
+                "updated_by_user_id",
+                "deleted_at"
+            ]
+        } else {
+            log::debug!("[CSV_WRITER] Using strategic goal field extraction");
+            // Strategic goal fields (default)
+            vec![
+                "id",
+                "objective_code", 
+                "outcome",
+                "kpi",
+                "target_value",
+                "actual_value", 
+                "progress_percentage", // Calculated field
+                "status_id",
+                "responsible_team",
+                "sync_priority",
+                "created_at",
+                "updated_at",
+                "created_by_user_id",
+                "updated_by_user_id",
+                "deleted_at",
+                "last_synced_at" // Not in database, will be empty
+            ]
+        };
         
         let mut csv_record = Vec::new();
         for field in fields {
@@ -188,6 +259,7 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
             csv_record.push(value);
         }
         
+        log::debug!("[CSV_WRITER] Extracted {} fields", csv_record.len());
         Ok(csv_record)
     }
     
@@ -216,20 +288,26 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
 impl<W: AsyncWrite + Unpin + Send + Sync + 'static> StreamingExportWriter for StreamingCsvWriter<W> {
     async fn write_json_stream(&mut self, mut stream: Box<dyn Stream<Item = Result<serde_json::Value, ExportError>> + Send + Unpin>) -> Result<ExportStats, ExportError>
     {
+        log::debug!("[CSV_WRITER] Starting JSON stream processing");
+        
         let mut batch = Vec::with_capacity(self.config.batch_size);
         let mut first_item = true;
+        let mut first_entity_for_headers: Option<serde_json::Value> = None;
         
         while let Some(result) = stream.next().await {
             let item = result?;
             
-            // Write headers on first item
+            // Write headers on first item with dynamic detection
             if first_item {
-                self.write_headers_for_strategic_goals().await?;
+                log::debug!("[CSV_WRITER] Processing first item for header detection");
+                first_entity_for_headers = Some(item.clone());
+                self.write_headers_for_entity_type(&item).await?;
                 first_item = false;
             }
             
             // Check memory pressure
             if self.memory_observer.is_critical() {
+                log::debug!("[CSV_WRITER] Memory pressure detected, flushing");
                 self.flush().await?;
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
@@ -238,7 +316,9 @@ impl<W: AsyncWrite + Unpin + Send + Sync + 'static> StreamingExportWriter for St
             
             // Write batch when full
             if batch.len() >= self.config.batch_size {
-                for item in &batch {
+                log::debug!("[CSV_WRITER] Writing batch of {} items", batch.len());
+                for (idx, item) in batch.iter().enumerate() {
+                    log::debug!("[CSV_WRITER] Writing item {}", idx);
                     self.write_json_record(item).await?;
                 }
                 batch.clear();
@@ -249,13 +329,17 @@ impl<W: AsyncWrite + Unpin + Send + Sync + 'static> StreamingExportWriter for St
         }
         
         // Write remaining items
-        for item in &batch {
+        log::debug!("[CSV_WRITER] Writing remaining {} items", batch.len());
+        for (idx, item) in batch.iter().enumerate() {
+            log::debug!("[CSV_WRITER] Writing final item {}", idx);
             self.write_json_record(item).await?;
         }
         
         self.flush().await?;
         
         self.stats.duration_ms = self.start_time.elapsed().as_millis() as u64;
+        log::debug!("[CSV_WRITER] Stream processing completed. Entities: {}, Bytes: {}, Duration: {}ms", 
+                   self.stats.entities_written, self.stats.bytes_written, self.stats.duration_ms);
         Ok(self.stats.clone())
     }
     

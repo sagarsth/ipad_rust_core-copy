@@ -374,6 +374,15 @@ pub enum EntityFilter {
         start_date: DateTime<Utc>, 
         end_date: DateTime<Utc> 
     },
+    /// Export all participants
+    ParticipantsAll,
+    /// Export participants by specific IDs
+    ParticipantsByIds { ids: Vec<Uuid> },
+    /// Export participants within date range
+    ParticipantsByDateRange { 
+        start_date: DateTime<Utc>, 
+        end_date: DateTime<Utc> 
+    },
     /// Export all workshops
     WorkshopsAll { include_participants: bool },
     /// Export workshops by specific IDs

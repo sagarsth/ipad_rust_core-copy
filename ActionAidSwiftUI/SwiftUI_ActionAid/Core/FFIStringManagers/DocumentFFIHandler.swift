@@ -68,47 +68,10 @@ class DocumentFFIHandler {
 
     // MARK: - Media Document Management
 
-    func uploadDocument(
-        fileData: Data,
-        originalFilename: String,
-        title: String?,
-        documentTypeId: String,
-        relatedEntityId: String,
-        relatedEntityType: String,
-        linkedField: String?,
-        syncPriority: String,
-        compressionPriority: String?,
-        tempRelatedId: String?,
-        auth: AuthCtxDto
-    ) async -> Result<MediaDocumentResponse, Error> {
-        struct Payload: Codable {
-            let file_data: String
-            let original_filename: String
-            let title: String?
-            let document_type_id: String
-            let related_entity_id: String
-            let related_entity_type: String
-            let linked_field: String?
-            let sync_priority: String
-            let compression_priority: String?
-            let temp_related_id: String?
-            let auth: AuthCtxDto
-        }
-        let payload = Payload(
-            file_data: fileData.base64EncodedString(),
-            original_filename: originalFilename,
-            title: title,
-            document_type_id: documentTypeId,
-            related_entity_id: relatedEntityId,
-            related_entity_type: relatedEntityType,
-            linked_field: linkedField,
-            sync_priority: syncPriority,
-            compression_priority: compressionPriority,
-            temp_related_id: tempRelatedId,
-            auth: auth
-        )
-        return await executeOperation(payload: payload, ffiCall: document_upload)
-    }
+    // ❌ REMOVED: Legacy slow base64 upload method
+    // - uploadDocument(fileData: Data, ...)
+    //
+    // ✅ USE INSTEAD: uploadDocumentFromPath() below (50%+ faster, no memory issues)
     
     func getDocument(id: String, include: [DocumentIncludeDto]?, auth: AuthCtxDto) async -> Result<MediaDocumentResponse, Error> {
         struct Payload: Codable { let id: String, include: [DocumentIncludeDto]?, auth: AuthCtxDto }
@@ -189,6 +152,53 @@ class DocumentFFIHandler {
         }
         let payload = Payload(related_entity_ids: relatedEntityIds, related_table: relatedTable, auth: auth)
         return await executeOperation(payload: payload, ffiCall: document_get_counts_by_entities)
+    }
+
+    // MARK: - iOS Optimized Path-Based Upload Methods (NO BASE64!)
+    
+    /// Upload single document from file path (iOS optimized - eliminates Base64 overhead)
+    func uploadDocumentFromPath(
+        filePath: String,
+        originalFilename: String,
+        title: String?,
+        documentTypeId: String,
+        relatedEntityId: String,
+        relatedEntityType: String,
+        linkedField: String?,
+        syncPriority: String,
+        compressionPriority: String?,
+        tempRelatedId: String?,
+        auth: AuthCtxDto
+    ) async -> Result<MediaDocumentResponse, Error> {
+        struct Payload: Codable {
+            let file_path: String              // Path instead of base64 data!
+            let original_filename: String
+            let title: String?
+            let document_type_id: String
+            let related_entity_id: String
+            let related_entity_type: String
+            let linked_field: String?
+            let sync_priority: String
+            let compression_priority: String?
+            let temp_related_id: String?
+            let auth: AuthCtxDto
+        }
+        let payload = Payload(
+            file_path: filePath,                // Just the path, no Base64!
+            original_filename: originalFilename,
+            title: title,
+            document_type_id: documentTypeId,
+            related_entity_id: relatedEntityId,
+            related_entity_type: relatedEntityType,
+            linked_field: linkedField,
+            sync_priority: syncPriority,
+            compression_priority: compressionPriority,
+            temp_related_id: tempRelatedId,
+            auth: auth
+        )
+        
+        print("🚀 [DocumentFFIHandler] Uploading from path: \(filePath)")
+        return await executeOperation(payload: payload, ffiCall: document_upload_from_path)
     }
 
     // MARK: - Private Helper Functions

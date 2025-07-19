@@ -4,6 +4,12 @@
 //
 //  Users management matching TypeScript UI
 //
+//  Refresh Strategy:
+//  - Only refreshes on first load (preserves scroll position)
+//  - Manual refresh via pull-to-refresh or toolbar button
+//  - Auto-refresh after user operations (create, edit, delete, toggle)
+//  - Auto-refresh when app returns from background
+//
 
 import SwiftUI
 
@@ -38,6 +44,9 @@ struct UsersListView: View {
     @State private var showCreateSheet = false
     @State private var errorMessage: String?
     @State private var showErrorAlert = false
+    
+    // Add state to track if users have been loaded
+    @State private var hasLoadedUsers = false
     
     // Stats
     @State private var totalUsers = 0
@@ -88,6 +97,7 @@ struct UsersListView: View {
                 .padding(.horizontal)
             }
             .padding(.vertical)
+            .background(Color(.systemGroupedBackground))
             
             // Filters
             VStack(spacing: 12) {
@@ -211,6 +221,9 @@ struct UsersListView: View {
                     .padding(.horizontal)
                     .padding(.bottom)
                 }
+                .refreshable {
+                    await refreshUsers()
+                }
             }
         }
         .navigationTitle("User Management")
@@ -228,7 +241,7 @@ struct UsersListView: View {
         }
         .sheet(isPresented: $showCreateSheet) {
             CreateUserSheet(onSave: {
-                loadUsers()
+                loadUsers(forceRefresh: true)
             })
         }
         .sheet(item: $selectedUserForDetails) { user in
@@ -236,7 +249,7 @@ struct UsersListView: View {
         }
         .sheet(item: $selectedUserForEdit) { user in
             EditUserSheet(user: user, onSave: {
-                loadUsers()
+                loadUsers(forceRefresh: true)
             })
         }
         .alert("Error", isPresented: $showErrorAlert) {
@@ -292,7 +305,18 @@ struct UsersListView: View {
             }
         }
         .onAppear {
-            loadUsers()
+            // Only load users on first appearance or if not loaded yet
+            if !hasLoadedUsers {
+                loadUsers()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            // Refresh when app comes back from background to get latest data
+            if hasLoadedUsers {
+                Task {
+                    await refreshUsers()
+                }
+            }
         }
         .overlay(
             // Success Toast
@@ -328,7 +352,7 @@ struct UsersListView: View {
         )
     }
     
-    private func loadUsers() {
+    private func loadUsers(forceRefresh: Bool = false) {
         isLoading = true
         
         Task {
@@ -367,6 +391,7 @@ struct UsersListView: View {
                 
                 await MainActor.run {
                     self.users = result
+                    self.hasLoadedUsers = true
                     print("📋 Loaded \(result.count) users:")
                     for user in result {
                         print("   👤 \(user.name) (\(user.email)) - Active: \(user.active)")
@@ -380,6 +405,36 @@ struct UsersListView: View {
                     self.errorMessage = error.localizedDescription
                     self.showErrorAlert = true
                 }
+            }
+        }
+    }
+    
+    // Async function for pull-to-refresh
+    private func refreshUsers() async {
+        do {
+            guard let currentUser = authManager.currentUser else {
+                throw NSError(domain: "AuthError", code: 401, userInfo: [NSLocalizedDescriptionKey: "Not authenticated"])
+            }
+            
+            let userHandler = UserFFIHandler()
+            let authContext = AuthContextPayload(
+                user_id: currentUser.userId,
+                role: currentUser.role,
+                device_id: authManager.getDeviceId(),
+                offline_mode: false
+            )
+            let result = try await userHandler.getAllUsers(auth: authContext).get()
+            
+            await MainActor.run {
+                self.users = result
+                self.hasLoadedUsers = true
+                print("🔄 Refreshed \(result.count) users via pull-to-refresh")
+                updateStats()
+            }
+        } catch {
+            await MainActor.run {
+                self.errorMessage = error.localizedDescription
+                self.showErrorAlert = true
             }
         }
     }
@@ -463,7 +518,7 @@ struct UsersListView: View {
                             } catch {
                                 print("❌ Refresh failed: \(error)")
                                 // Fallback to regular load
-                                self.loadUsers()
+                                self.loadUsers(forceRefresh: true)
                             }
                         }
                         
@@ -528,7 +583,7 @@ struct UsersListView: View {
                         // Success - reload users
                         self.successMessage = "User deleted successfully"
                         self.showSuccessToast = true
-                        loadUsers()
+                        loadUsers(forceRefresh: true)
                         
                     case .failure(let error):
                         print("❌ Delete failed: \(error)")
@@ -856,9 +911,19 @@ struct UserStatsCard: View {
         }
         .padding()
         .frame(minWidth: 100)
-        .background(Color(.systemBackground))
-        .cornerRadius(12)
-        .shadow(color: Color.black.opacity(0.05), radius: 3, x: 0, y: 2)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.regularMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(Color(.systemBackground).opacity(0.2))
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color(.systemGray4), lineWidth: 0.5)
+        )
+        .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
     }
 }
 

@@ -31,6 +31,12 @@ func strategic_goal_list(
     _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
 ) -> CInt
 
+@_silgen_name("strategic_goal_list_summaries")
+func strategic_goal_list_summaries(
+    _ payload_json: UnsafePointer<CChar>,
+    _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>
+) -> CInt
+
 @_silgen_name("strategic_goal_update")
 func strategic_goal_update(
     _ payload_json: UnsafePointer<CChar>,

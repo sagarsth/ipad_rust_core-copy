@@ -87,6 +87,7 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
     // MARK: - Configuration
     let domainName: String
     let userRole: String?
+    @Binding var showColumnCustomizer: Bool
     
     // MARK: - Private State
     @State private var isInSelectionMode = false
@@ -129,7 +130,8 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
         tableColumns: [TableColumn],
         rowContent: @escaping (Entity, [TableColumn]) -> RowContent,
         domainName: String,
-        userRole: String?
+        userRole: String?,
+        showColumnCustomizer: Binding<Bool>
     ) {
         self.entities = entities
         self.isLoading = isLoading
@@ -147,6 +149,7 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
         self.rowContent = rowContent
         self.domainName = domainName
         self.userRole = userRole
+        self._showColumnCustomizer = showColumnCustomizer
     }
     
     // MARK: - Body
@@ -178,7 +181,8 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
                     userRole: userRole,
                     isInSelectionMode: $isInSelectionMode,
                     selectedItems: $selectedItems,
-                    onFilterBasedSelectAll: onFilterBasedSelectAll
+                    onFilterBasedSelectAll: onFilterBasedSelectAll,
+                    showColumnCustomizer: $showColumnCustomizer
                 )
             }
         }
@@ -193,6 +197,26 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
         }
         .onChange(of: selectedItems) { oldValue, newValue in
             selectionManager.selectedItems = newValue
+        }
+        .onChange(of: selectedFilters) { oldValue, newValue in
+            // BACKEND FILTER CHANGE: Only re-trigger selection if "Select All" is active
+            print("🔍 [FILTER_CHANGE] oldValue: \(oldValue) → newValue: \(newValue)")
+            print("🔍 [FILTER_CHANGE] isSelectAllActive: \(selectionManager.isSelectAllActive)")
+            
+            if selectionManager.isSelectAllActive {
+                print("🔍 [FILTER_CHANGE] ✅ Triggering backend filter selection")
+                // Re-select all items matching the new backend filter criteria
+                onFilterBasedSelectAll?()
+            } else {
+                print("🔍 [FILTER_CHANGE] ❌ Select All not active, skipping backend call")
+            }
+        }
+        .onChange(of: searchText) { oldValue, newValue in
+            // BACKEND FILTER CHANGE: Search text is also a backend filter
+            if selectionManager.isSelectAllActive {
+                // Re-select all items matching the new search criteria
+                onFilterBasedSelectAll?()
+            }
         }
     }
     
@@ -307,7 +331,8 @@ extension EntityListView {
             tableColumns: [],
             rowContent: { _, _ in EmptyView() },
             domainName: domainName,
-            userRole: nil
+            userRole: nil,
+            showColumnCustomizer: .constant(false)
         )
     }
 }

@@ -35,6 +35,9 @@ struct StrategicGoalsView: View {
     // Goal detail view state
     @State private var selectedGoal: StrategicGoalResponse?
     
+    // Column customization state
+    @State private var showColumnCustomizer = false
+    
     // Document viewing state
     @State private var selectedDocumentURL: IdentifiableURL?
     
@@ -70,11 +73,21 @@ struct StrategicGoalsView: View {
     /// Setup callbacks for shared component managers
     private func setupCallbacks() {
         // CRUD manager callbacks
-        crudManager.onEntityCreated = { _ in
+        crudManager.onEntityCreated = { newGoal in
             loadGoals()
+            
+            // ✅ Notify cache of new strategic goal for instant picker updates
+            Task {
+                await StrategicGoalsCache.shared.notifyStrategicGoalCreated(newGoal, authManager: authManager)
+            }
         }
-        crudManager.onEntityUpdated = { _ in
+        crudManager.onEntityUpdated = { updatedGoal in
             loadGoals()
+            
+            // ✅ Notify cache of updated strategic goal for instant picker updates
+            Task {
+                await StrategicGoalsCache.shared.notifyStrategicGoalUpdated(updatedGoal)
+            }
         }
         crudManager.onEntityDeleted = { _ in
             loadGoals()
@@ -128,17 +141,33 @@ struct StrategicGoalsView: View {
                     )
                 },
                 domainName: "strategic_goals",
-                userRole: authManager.currentUser?.role
+                userRole: authManager.currentUser?.role,
+                showColumnCustomizer: $showColumnCustomizer
             )
         }
         .navigationTitle("Strategic Goals")
-        .navigationBarTitleDisplayMode(.large)
+        .navigationBarTitleDisplayMode(UIDevice.current.userInterfaceIdiom == .pad ? .large : .inline)
         .navigationBarHidden(isActionBarCollapsed)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button(action: { crudManager.presentCreateSheet() }) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title3)
+                HStack(spacing: 8) {
+                    ViewStyleSwitcher(
+                        currentViewStyle: currentViewStyle,
+                        onViewStyleChange: { newStyle in
+                            currentViewStyle = newStyle
+                            viewStyleManager.setViewStyle(newStyle, for: "strategic_goals")
+                            // Clear selection when switching views
+                            selectionManager.clearSelection()
+                        },
+                        onShowColumnCustomizer: {
+                            showColumnCustomizer = true
+                        }
+                    )
+                    
+                    Button(action: { crudManager.presentCreateSheet() }) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.title3)
+                    }
                 }
             }
         }
@@ -326,16 +355,25 @@ struct StrategicGoalsView: View {
     
     /// Get filtered goal IDs for bulk selection based on current UI filters
     private func getFilteredGoalIds() async {
-        guard !selectionManager.isLoadingFilteredIds else { return }
+        print("🔄 [BACKEND_FILTER] getFilteredGoalIds called")
+        print("🔄 [BACKEND_FILTER] selectedFilters: \(selectedFilters)")
+        print("🔄 [BACKEND_FILTER] isSelectAllActive: \(selectionManager.isSelectAllActive)")
+        
+        guard !selectionManager.isLoadingFilteredIds else { 
+            print("🔄 [BACKEND_FILTER] ❌ Already loading, returning")
+            return 
+        }
         
         // Check if we have any backend filters active (search, status, etc.)
         let hasBackendFilters = !searchText.isEmpty || !selectedFilters.contains("all")
+        print("🔄 [BACKEND_FILTER] hasBackendFilters: \(hasBackendFilters)")
         
         // If no backend filters are applied, select all visible items
         if !hasBackendFilters {
             await MainActor.run {
                 let allVisibleIds = Set(filteredGoals.map(\.id))
-                selectionManager.selectItems(allVisibleIds)
+                print("🔄 [BACKEND_FILTER] No backend filters, selecting \(allVisibleIds.count) visible items")
+                selectionManager.selectAllItems(allVisibleIds)
             }
             return
         }
@@ -366,6 +404,8 @@ struct StrategicGoalsView: View {
             statusIds = mapFilterIdsToStatusIds(selectedFilters)
         }
         
+        print("🔄 [BACKEND_FILTER] Mapped statusIds: \(statusIds ?? [])")
+        
         let currentFilter = StrategicGoalFilter(
             statusIds: statusIds,
             responsibleTeams: nil,
@@ -388,11 +428,14 @@ struct StrategicGoalsView: View {
             selectionManager.isLoadingFilteredIds = false
             switch result {
             case .success(let filteredIds):
+                print("🔄 [BACKEND_FILTER] ✅ Backend returned \(filteredIds.count) filtered IDs")
                 // Only select IDs that are currently visible (intersection with filtered data)
                 let visibleIds = Set(filteredGoals.map(\.id))
                 let filteredVisibleIds = Set(filteredIds).intersection(visibleIds)
-                selectionManager.selectItems(filteredVisibleIds)
+                print("🔄 [BACKEND_FILTER] Visible IDs: \(visibleIds.count), Final selection: \(filteredVisibleIds.count)")
+                selectionManager.selectAllItems(filteredVisibleIds)
             case .failure(let error):
+                print("🔄 [BACKEND_FILTER] ❌ Backend error: \(error.localizedDescription)")
                 crudManager.errorMessage = "Failed to get filtered IDs: \(error.localizedDescription)"
                 crudManager.showErrorAlert = true
             }
@@ -915,7 +958,7 @@ struct EditGoalSheet: View {
     
     var body: some View {
         NavigationView {
-            Form {
+            Form { 
                 Section("Goal Information") {
                     TextField("Objective Code", text: $objectiveCode)
                         .focused($focusedField, equals: .objectiveCode)
@@ -1838,13 +1881,13 @@ struct GoalDeleteOptionsSheet: View {
                     Image(systemName: "trash.fill")
                         .foregroundColor(.red)
                         .font(.title2)
-                    Text("Delete Goal")
+                    Text("Conditional Delete")
                         .font(.headline)
                         .foregroundColor(.red)
                     Spacer()
                 }
                 
-                Text("Permanently delete goal if no dependencies exist. Goals with projects will be archived instead.")
+                Text("Permanently delete goal if no dependencies exist. Goals with projects will fail to delete.")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.leading)

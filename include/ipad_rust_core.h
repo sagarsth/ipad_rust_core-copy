@@ -167,14 +167,17 @@ int32_t donor_get_with_document_timeline(const char*, char**);
 void donor_free(char*);
 
 // ============================================================================
-// EXPORT FUNCTIONS (26 functions)
+// EXPORT FUNCTIONS (29 functions)
 // ============================================================================
 
 int32_t export_create_export(const char*, const char*, char**);
 int32_t export_get_status(const char*, char**);
 int32_t export_strategic_goals_by_ids(const char*, const char*, char**);
 int32_t export_strategic_goals_all(const char*, const char*, char**);
+int32_t export_projects_by_ids(const char*, const char*, char**);
 int32_t export_projects_all(const char*, const char*, char**);
+int32_t export_participants_by_ids(const char*, const char*, char**);
+int32_t export_participants_all(const char*, const char*, char**);
 int32_t export_activities_all(const char*, const char*, char**);
 int32_t export_donors_all(const char*, const char*, char**);
 int32_t export_funding_all(const char*, const char*, char**);
@@ -276,7 +279,7 @@ int32_t participant_get_with_document_timeline(const char*, char**);
 void participant_free(char*);
 
 // ============================================================================
-// PROJECT FUNCTIONS (18 functions)
+// PROJECT FUNCTIONS (24 functions)
 // ============================================================================
 
 int32_t project_create(const char*, char**);
@@ -296,10 +299,16 @@ int32_t project_find_by_date_range(const char*, char**);
 int32_t project_search(const char*, char**);
 int32_t project_get_with_document_timeline(const char*, char**);
 int32_t project_get_document_references(const char*, char**);
+int32_t project_get_filtered_ids(const char*, char**);
+int32_t project_get_team_workload_distribution(const char*, char**);
+int32_t project_get_strategic_goal_distribution(const char*, char**);
+int32_t project_find_stale(const char*, char**);
+int32_t project_get_document_coverage_analysis(const char*, char**);
+int32_t project_get_activity_timeline(const char*, char**);
 void project_free(char*);
 
 // ============================================================================
-// STRATEGIC_GOAL FUNCTIONS (20 functions)
+// STRATEGIC_GOAL FUNCTIONS (21 functions)
 // ============================================================================
 
 int32_t strategic_goal_create(const char*, char**);
@@ -321,6 +330,7 @@ int32_t strategic_goal_find_by_date_range(const char*, char**);
 int32_t strategic_goal_get_status_distribution(const char*, char**);
 int32_t strategic_goal_get_value_statistics(const char*, char**);
 int32_t strategic_goal_get_filtered_ids(const char*, char**);
+int32_t strategic_goal_list_summaries(const char*, char**);
 void strategic_goal_free(char*);
 
 // ============================================================================

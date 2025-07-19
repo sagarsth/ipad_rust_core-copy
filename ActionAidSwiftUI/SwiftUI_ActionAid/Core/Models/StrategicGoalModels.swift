@@ -124,6 +124,11 @@ struct StrategicGoalListRequest: Codable {
     let auth: AuthContextPayload
 }
 
+struct StrategicGoalListSummariesRequest: Codable {
+    let pagination: PaginationDto?
+    let auth: AuthContextPayload
+}
+
 struct StrategicGoalUpdateRequest: Codable {
     let id: String
     let update: UpdateStrategicGoal
@@ -172,55 +177,12 @@ enum FailureReason: String, Codable, CaseIterable {
     case unknown = "Unknown"
 }
 
-struct UploadDocumentRequest: Codable {
-    let goalId: String
-    let fileData: String
-    let originalFilename: String
-    let title: String?
-    let documentTypeId: String
-    let linkedField: String?
-    let syncPriority: SyncPriority
-    let compressionPriority: CompressionPriority?
-    let auth: AuthContextPayload
-    
-    enum CodingKeys: String, CodingKey {
-        case title, auth
-        case goalId = "goal_id"
-        case fileData = "file_data"
-        case originalFilename = "original_filename"
-        case documentTypeId = "document_type_id"
-        case linkedField = "linked_field"
-        case syncPriority = "sync_priority"
-        case compressionPriority = "compression_priority"
-    }
-}
-
-struct BulkUploadDocumentsRequest: Codable {
-    struct File: Codable {
-        let fileData: String
-        let filename: String
-        
-        enum CodingKeys: String, CodingKey {
-            case filename
-            case fileData = "file_data"
-        }
-    }
-    let goalId: String
-    let files: [File]
-    let title: String?
-    let documentTypeId: String
-    let syncPriority: SyncPriority
-    let compressionPriority: CompressionPriority?
-    let auth: AuthContextPayload
-    
-    enum CodingKeys: String, CodingKey {
-        case files, title, auth
-        case goalId = "goal_id"
-        case documentTypeId = "document_type_id"
-        case syncPriority = "sync_priority"
-        case compressionPriority = "compression_priority"
-    }
-}
+// ❌ REMOVED: Legacy base64 upload request structs
+// - UploadDocumentRequest
+// - BulkUploadDocumentsRequest
+// 
+// These are no longer needed since strategic goals now use optimized 
+// path-based uploads for better performance
 
 // MARK: - iOS Optimized Path-Based Upload Requests (NO BASE64!)
 
@@ -410,7 +372,18 @@ struct StrategicGoalResponse: Codable, Identifiable, MonthGroupable, Equatable {
     }
 }
 
-struct CreateWithDocumentsResponse: Codable {
+/// Lightweight response for strategic goal summaries (for pickers)
+struct StrategicGoalSummaryResponse: Codable, Identifiable {
+    let id: String
+    let objectiveCode: String
+    
+    enum CodingKeys: String, CodingKey {
+        case id
+        case objectiveCode = "objective_code"
+    }
+}
+
+struct StrategicGoalCreateWithDocumentsResponse: Codable {
     let goal: StrategicGoalResponse
     // Define a simplified document result for now
     // let documentResults: [Result<MediaDocumentResponse, String>]

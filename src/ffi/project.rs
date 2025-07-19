@@ -125,6 +125,7 @@ enum ProjectIncludeDto {
     DocumentReferences,
     ActivityTimeline,
     StatusDetails,
+    Counts,
     All,
 }
 
@@ -140,6 +141,7 @@ impl From<ProjectIncludeDto> for ProjectInclude {
             ProjectIncludeDto::DocumentReferences => ProjectInclude::DocumentReferences,
             ProjectIncludeDto::ActivityTimeline => ProjectInclude::ActivityTimeline,
             ProjectIncludeDto::StatusDetails => ProjectInclude::StatusDetails,
+            ProjectIncludeDto::Counts => ProjectInclude::Counts,
             ProjectIncludeDto::All => ProjectInclude::All,
         }
     }
@@ -152,7 +154,7 @@ impl From<ProjectIncludeDto> for ProjectInclude {
 /// Create a new project
 /// Expected JSON payload:
 /// {
-///   "project": { NewProject },
+///   "project": { NewProjectDto },
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
@@ -164,16 +166,55 @@ pub unsafe extern "C" fn project_create(payload_json: *const c_char, result: *mu
         let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
         
         #[derive(Deserialize)]
+        struct NewProjectDto {
+            name: String,
+            objective: Option<String>,
+            outcome: Option<String>,
+            status_id: Option<i64>,
+            timeline: Option<String>,
+            responsible_team: Option<String>,
+            strategic_goal_id: Option<String>,
+            sync_priority: String,
+            created_by_user_id: Option<String>,
+        }
+        
+        #[derive(Deserialize)]
         struct Payload {
-            project: NewProject,
+            project: NewProjectDto,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_project_service()?;
         
-        let project = block_on_async(svc.create_project(p.project, &auth))
+        // Convert DTO to domain struct with UUID parsing
+        let strategic_goal_id = p.project.strategic_goal_id.as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid strategic_goal_id"))?;
+        
+        let created_by_user_id = p.project.created_by_user_id.as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid created_by_user_id"))?;
+        
+        let sync_priority = SyncPriority::from_str(&p.project.sync_priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+        
+        let new_project = NewProject {
+            name: p.project.name,
+            objective: p.project.objective,
+            outcome: p.project.outcome,
+            status_id: p.project.status_id,
+            timeline: p.project.timeline,
+            responsible_team: p.project.responsible_team,
+            strategic_goal_id,
+            sync_priority,
+            created_by_user_id,
+        };
+        
+        let svc = globals::get_project_service()?;
+        let project = block_on_async(svc.create_project(new_project, &auth))
             .map_err(FFIError::from_service_error)?;
         
         let json_resp = serde_json::to_string(&project)
@@ -208,8 +249,21 @@ pub unsafe extern "C" fn project_create_with_documents(payload_json: *const c_ch
         }
         
         #[derive(Deserialize)]
+        struct NewProjectDto {
+            name: String,
+            objective: Option<String>,
+            outcome: Option<String>,
+            status_id: Option<i64>,
+            timeline: Option<String>,
+            responsible_team: Option<String>,
+            strategic_goal_id: Option<String>,
+            sync_priority: String,
+            created_by_user_id: Option<String>,
+        }
+        
+        #[derive(Deserialize)]
         struct Payload {
-            project: NewProject,
+            project: NewProjectDto,
             documents: Vec<DocumentData>,
             document_type_id: String,
             auth: AuthCtxDto,
@@ -228,10 +282,36 @@ pub unsafe extern "C" fn project_create_with_documents(payload_json: *const c_ch
         let document_type_id = Uuid::parse_str(&p.document_type_id)
             .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_project_service()?;
         
+        // Convert DTO to domain struct with UUID parsing
+        let strategic_goal_id = p.project.strategic_goal_id.as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid strategic_goal_id"))?;
+        
+        let created_by_user_id = p.project.created_by_user_id.as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid created_by_user_id"))?;
+        
+        let sync_priority = SyncPriority::from_str(&p.project.sync_priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+        
+        let new_project = NewProject {
+            name: p.project.name,
+            objective: p.project.objective,
+            outcome: p.project.outcome,
+            status_id: p.project.status_id,
+            timeline: p.project.timeline,
+            responsible_team: p.project.responsible_team,
+            strategic_goal_id,
+            sync_priority,
+            created_by_user_id,
+        };
+        
+        let svc = globals::get_project_service()?;
         let (project, doc_results) = block_on_async(svc.create_project_with_documents(
-            p.project, documents, document_type_id, &auth
+            new_project, documents, document_type_id, &auth
         )).map_err(FFIError::from_service_error)?;
         
         #[derive(Serialize)]
@@ -358,6 +438,16 @@ pub unsafe extern "C" fn project_update(payload_json: *const c_char, result: *mu
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        
+        // Debug: Print the deserialized UpdateProject struct
+        println!("🔧 [FFI_UPDATE] Deserialized UpdateProject:");
+        println!("   • strategic_goal_id: {:?}", p.update.strategic_goal_id);
+        println!("   • Raw JSON strategic_goal_id: {:?}", 
+            serde_json::from_str::<serde_json::Value>(json)
+                .and_then(|v| Ok(v.get("update").and_then(|u| u.get("strategic_goal_id")).cloned()))
+                .unwrap_or(Some(serde_json::Value::String("PARSE_ERROR".to_string())))
+        );
+        
         let id = Uuid::parse_str(&p.id).map_err(|_| FFIError::invalid_argument("uuid"))?;
         let auth: AuthContext = p.auth.try_into()?;
         let svc = globals::get_project_service()?;

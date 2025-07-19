@@ -358,6 +358,8 @@ impl ProjectServiceImpl {
                     ).await?;
                 // Attach the fetched documents to the response
                 response.documents = Some(docs_result.items);
+                // FIXED: Also set the document_count field based on the total from pagination
+                response.document_count = Some(docs_result.total as i64);
             }
              // --- END PRESERVED Document Enrichment ---
 
@@ -380,7 +382,10 @@ impl ProjectServiceImpl {
 
             // ADDED: Count-based Enrichment - pre-compute related entity counts
             let include_counts = includes.contains(&ProjectInclude::All) || includes.contains(&ProjectInclude::Counts);
-            if include_counts {
+            let include_activity_count = include_counts || includes.contains(&ProjectInclude::ActivityCount);
+            let include_workshop_count = include_counts || includes.contains(&ProjectInclude::WorkshopCount);
+            
+            if include_activity_count {
                 // Count activities for this project
                 match self.activity_repo.find_by_project_id(response.id, PaginationParams::default()).await {
                     Ok(activities_result) => {
@@ -391,7 +396,9 @@ impl ProjectServiceImpl {
                         response.activity_count = Some(0);
                     }
                 }
+            }
 
+            if include_workshop_count {
                 // Count workshops for this project
                 match self.workshop_repo.find_by_project_id(response.id, PaginationParams::default()).await {
                     Ok(workshops_result) => {
@@ -400,6 +407,25 @@ impl ProjectServiceImpl {
                     Err(_) => {
                         // If there's an error, set count to 0 rather than failing enrichment
                         response.workshop_count = Some(0);
+                    }
+                }
+            }
+
+            // FIXED: Count documents for this project (only if not already set by document enrichment)
+            if response.document_count.is_none() && include_counts {
+                match self.document_service.list_media_documents_by_related_entity(
+                    auth,
+                    "projects",
+                    response.id,
+                    PaginationParams { page: 1, per_page: 1 }, // Just get count, don't fetch actual documents
+                    None,
+                ).await {
+                    Ok(docs_result) => {
+                        response.document_count = Some(docs_result.total as i64);
+                    }
+                    Err(_) => {
+                        // If there's an error, set count to 0 rather than failing enrichment
+                        response.document_count = Some(0);
                     }
                 }
             }

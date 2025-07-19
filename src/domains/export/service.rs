@@ -287,8 +287,8 @@ async fn perform_export_job(
                         Ok::<i64, String>(0)
                     }
                     EntityFilter::ProjectsByIds { ids } => {
-                        export_projects_by_ids(&temp_dir_path, &ids).await?;
-                        Ok::<i64, String>(0)
+                        let count = export_projects_by_ids_with_options(&temp_dir_path, &ids, include_blobs, &file_storage_clone2).await?;
+                        Ok::<i64, String>(count)
                     }
                     EntityFilter::ActivitiesAll => {
                         export_activities(&temp_dir_path).await?;
@@ -320,6 +320,14 @@ async fn perform_export_job(
                     }
                     EntityFilter::LivelihoodsByIds { ids } => {
                         export_livelihoods_by_ids(&temp_dir_path, &ids).await?;
+                        Ok::<i64, String>(0)
+                    }
+                    EntityFilter::ParticipantsAll => {
+                        export_participants(&temp_dir_path).await?;
+                        Ok::<i64, String>(0)
+                    }
+                    EntityFilter::ParticipantsByIds { ids } => {
+                        export_participants_by_ids(&temp_dir_path, &ids).await?;
                         Ok::<i64, String>(0)
                     }
                     EntityFilter::WorkshopsAll { include_participants } => {
@@ -387,6 +395,10 @@ async fn perform_export_job(
                     }
                     EntityFilter::LivelihoodsByDateRange { start_date, end_date } => {
                         export_livelihoods_by_date_range(&temp_dir_path, start_date, end_date).await?;
+                        Ok::<i64, String>(0)
+                    }
+                    EntityFilter::ParticipantsByDateRange { start_date, end_date } => {
+                        export_participants_by_date_range(&temp_dir_path, start_date, end_date).await?;
                         Ok::<i64, String>(0)
                     }
                     EntityFilter::WorkshopsByDateRange { start_date, end_date, include_participants } => {
@@ -932,6 +944,25 @@ async fn export_unified(
         }
     }
 
+    // Participants
+    {
+        let repo = globals::get_participant_repo().map_err(|e| e.to_string())?;
+        let mut page = 1u32;
+        loop {
+            let params = PaginationParams { page, per_page };
+            let page_result = if let Some((start, end)) = date_range {
+                repo.find_by_date_range(start, end, params).await.map_err(|e| e.to_string())?
+            } else {
+                repo.find_all(params).await.map_err(|e| e.to_string())?
+            };
+            for entity in &page_result.items {
+                write_jsonl_line(&mut file, entity, "participant", include_type_tags)?;
+            }
+            if page >= page_result.total_pages { break; }
+            page += 1;
+        }
+    }
+
     // Workshops
     {
         let repo = globals::get_workshop_repo().map_err(|e| e.to_string())?;
@@ -1071,19 +1102,21 @@ async fn export_fundings_by_date_range(dest_dir: &Path, start: DateTime<Utc>, en
 async fn export_livelihoods_by_date_range(dest_dir: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<(), String> {
     let repo = globals::get_livelihood_repo().map_err(|e| e.to_string())?;
     let file_path = dest_dir.join("livelihoods.jsonl");
-    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    let mut writer = OptimizedJsonLWriter::new(&file_path)?;
+
     let mut page = 1u32;
     let per_page = 200;
     loop {
         let params = PaginationParams { page, per_page };
         let page_result = repo.find_by_date_range(start, end, params).await.map_err(|e| e.to_string())?;
         for entity in page_result.items {
-            let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
-            writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+            writer.write_entity(&entity)?;
         }
         if page >= page_result.total_pages { break; }
         page += 1;
     }
+    
+    writer.finalize()?;
     Ok(())
 }
 
@@ -1230,7 +1263,7 @@ pub async fn export_strategic_goals_by_ids(dest_dir: &Path, ids: &[Uuid], includ
     let strategic_goals_file_path = dest_dir.join("strategic_goals.jsonl");
     let mut strategic_goals_writer = OptimizedJsonLWriter::new(&strategic_goals_file_path)?;
 
-    let mut total_documents_exported = 0;
+    let total_documents_exported = 0;
     let mut total_files_copied = 0;
 
     if include_documents {
@@ -1327,22 +1360,144 @@ pub async fn export_strategic_goals_by_ids(dest_dir: &Path, ids: &[Uuid], includ
 }
 
 async fn export_projects_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+    export_projects_by_ids_with_options(dest_dir, ids, false, &Arc::new(crate::globals::get_file_storage_service().map_err(|e| e.to_string())?)).await.map(|_| ())
+}
+
+pub async fn export_projects_by_ids_with_options(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
     if ids.is_empty() {
-        return Ok(());
+        log::info!("Export projects by IDs: empty IDs list");
+        return Ok(0);
     }
 
-    let repo = globals::get_project_repo().map_err(|e| e.to_string())?;
-    let file_path = dest_dir.join("projects.jsonl");
-    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    log::info!("Export projects by IDs: {} IDs, include_documents: {}", ids.len(), include_documents);
 
+    let project_repo = globals::get_project_repo().map_err(|e| e.to_string())?;
+    
+    // Get projects
     let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
-    let result = repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+    log::info!("Calling project repo.find_by_ids with params: page={}, per_page={}", params.page, params.per_page);
+    let result = project_repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
 
-    for entity in result.items {
-        let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
-        writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+    log::info!("Repository returned {} items, total={}", result.items.len(), result.total);
+
+    // Export projects using optimized writer
+    let projects_file_path = dest_dir.join("projects.jsonl");
+    let mut projects_writer = OptimizedJsonLWriter::new(&projects_file_path)?;
+
+    let mut total_documents_exported = 0;
+    let mut total_files_copied = 0;
+
+    if include_documents {
+        let media_doc_repo = globals::get_media_document_repo().map_err(|e| e.to_string())?;
+        
+        // Get all project IDs
+        let project_ids: Vec<Uuid> = result.items.iter().map(|p| p.id).collect();
+        log::info!("Fetching all documents for {} projects efficiently", project_ids.len());
+        
+        // Fetch ALL documents for ALL projects in a single query - this solves the N+1 problem
+        let all_documents = media_doc_repo
+            .find_by_related_entities("projects", &project_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        // Group documents by related_id (project_id) for efficient lookup
+        let mut documents_by_project: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                documents_by_project.entry(related_id).or_insert_with(Vec::new).push(document);
+            }
+        }
+        
+        log::info!("Found {} total documents across all projects", documents_by_project.values().map(|v| v.len()).sum::<usize>());
+
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing entity {} to file: id={}", i + 1, entity.id);
+            
+            // Get document count from our pre-fetched data
+            let document_count = documents_by_project.get(&entity.id).map(|docs| docs.len()).unwrap_or(0);
+            let metadata = serde_json::json!({
+                "document_count": document_count,
+                "has_documents": document_count > 0
+            });
+            
+            projects_writer.write_enhanced_entity(entity, metadata)?;
+        }
+
+        // Export associated media documents and files
+        log::info!("Exporting associated media documents");
+        let mut documents_writer_opt: Option<OptimizedJsonLWriter> = None;
+        let mut files_dir_created = false;
+        let files_dir = dest_dir.join("files");
+        
+        // Check if we actually have documents before processing
+        let total_docs_count: usize = documents_by_project.values().map(|docs| docs.len()).sum();
+        log::info!("Total documents to export: {}", total_docs_count);
+        
+        if total_docs_count > 0 {
+            // Create organized directory structure: files/projects/{project_id}/
+            let projects_dir = files_dir.join("projects");
+            std::fs::create_dir_all(&projects_dir).map_err(|e| e.to_string())?;
+            files_dir_created = true;
+            
+            // Process all documents we already fetched (no more database calls!)
+            for (project_id, documents) in documents_by_project.iter() {
+                if !documents.is_empty() {
+                    // Create project-specific directory
+                    let project_dir = projects_dir.join(project_id.to_string());
+                    std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
+                    
+                    for document in documents {
+                        let (source_file_path, file_source_type) = select_best_file_path_with_storage(&document, file_storage);
+                        let dest_file_path = project_dir.join(&document.original_filename);
+                        let abs_source_path = file_storage.get_absolute_path(source_file_path);
+
+                        if abs_source_path.exists() {
+                            match std::fs::copy(&abs_source_path, &dest_file_path) {
+                                Ok(_) => {
+                                    log::info!("Successfully copied {} file: {} -> projects/{}/{}", file_source_type, source_file_path, project_id, document.original_filename);
+                                    total_files_copied += 1;
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                                }
+                            }
+                        } else {
+                            log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
+                        }
+                        
+                        // Export document metadata to JSONL
+                        if documents_writer_opt.is_none() {
+                            let documents_file_path = dest_dir.join("media_documents.jsonl");
+                            documents_writer_opt = Some(OptimizedJsonLWriter::new(&documents_file_path)?);
+                        }
+                        if let Some(ref mut documents_writer) = documents_writer_opt {
+                            documents_writer.write_entity(&document)?;
+                            total_documents_exported += 1;
+                        }
+                    }
+                }
+            }
+            
+            // Finalize documents writer
+            if let Some(documents_writer) = documents_writer_opt {
+                documents_writer.finalize()?;
+            }
+        } else {
+            log::info!("No documents found, skipping document export files");
+        }
+    } else {
+        // Export projects without document metadata
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing entity {} to file: id={}", i + 1, entity.id);
+            projects_writer.write_entity(entity)?;
+        }
     }
-    Ok(())
+    
+    // Finalize projects writer
+    projects_writer.finalize()?;
+    
+    log::info!("Export projects by IDs completed: wrote {} projects, {} documents, {} files", result.items.len(), total_documents_exported, total_files_copied);
+    Ok(result.items.len() as i64)
 }
 
 async fn export_activities_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
@@ -1640,6 +1795,71 @@ where
         if page >= page_result.total_pages {
             break;
         }
+        page += 1;
+    }
+    
+    writer.finalize()?;
+    Ok(())
+}
+
+// Participants export functions
+async fn export_participants(dest_dir: &Path) -> Result<(), String> {
+    let repo = globals::get_participant_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("participants.jsonl");
+    let mut writer = OptimizedJsonLWriter::new(&file_path)?;
+
+    let mut page: u32 = 1;
+    let per_page = 500;
+    loop {
+        let params = PaginationParams { page, per_page };
+        let page_result = repo.find_all(params).await.map_err(|e| e.to_string())?;
+        for entity in page_result.items {
+            writer.write_entity(&entity)?;
+        }
+        if page >= page_result.total_pages {
+            break;
+        }
+        page += 1;
+    }
+    
+    writer.finalize()?;
+    Ok(())
+}
+
+async fn export_participants_by_ids(dest_dir: &Path, ids: &[Uuid]) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let repo = globals::get_participant_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("participants.jsonl");
+    let mut writer = OptimizedJsonLWriter::new(&file_path)?;
+
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    let result = repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    for entity in result.items {
+        writer.write_entity(&entity)?;
+    }
+    
+    writer.finalize()?;
+    Ok(())
+}
+
+async fn export_participants_by_date_range(dest_dir: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<(), String> {
+    let repo = globals::get_participant_repo().map_err(|e| e.to_string())?;
+    let file_path = dest_dir.join("participants.jsonl");
+    let mut writer = OptimizedJsonLWriter::new(&file_path)?;
+
+    let mut page = 1u32;
+    let per_page = 200;
+    loop {
+        let params = PaginationParams { page, per_page };
+        let page_result = repo.find_by_date_range(start, end, params).await.map_err(|e| e.to_string())?;
+        for entity in page_result.items {
+            writer.write_entity(&entity)?;
+        }
+        if page >= page_result.total_pages { break; }
         page += 1;
     }
     

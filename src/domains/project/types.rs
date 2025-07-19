@@ -3,6 +3,7 @@ use crate::validation::{Validate, ValidationBuilder};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
+use serde_json;
 use sqlx::FromRow;
 use crate::domains::document::types::MediaDocumentResponse;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
@@ -129,6 +130,7 @@ impl Validate for NewProject {
 /// UpdateProject DTO - used when updating an existing project
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UpdateProject {
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "double_option::deserialize")]
     pub strategic_goal_id: Option<Option<Uuid>>,
     pub name: Option<String>,
     pub objective: Option<String>,
@@ -138,6 +140,69 @@ pub struct UpdateProject {
     pub responsible_team: Option<String>,
     pub sync_priority: Option<SyncPriorityFromSyncDomain>,
     pub updated_by_user_id: Uuid,
+}
+
+// Custom serde module for proper double-optional handling
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use uuid::Uuid;
+
+    pub fn serialize<S>(value: &Option<Option<Uuid>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(Some(uuid)) => uuid.serialize(serializer),
+            Some(None) => serializer.serialize_none(),
+            None => serializer.serialize_none(), // Field not present in update
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Option<Uuid>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::{Error, Visitor};
+        use std::fmt;
+        
+        struct DoubleOptionVisitor;
+        
+        impl<'de> Visitor<'de> for DoubleOptionVisitor {
+            type Value = Option<Option<Uuid>>;
+            
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a UUID string, null, or missing field")
+            }
+            
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                println!("🔧 [SERDE_DESERIALIZE] visit_none - field missing");
+                Ok(None)
+            }
+            
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                println!("🔧 [SERDE_DESERIALIZE] visit_unit - field is null");
+                Ok(Some(None))
+            }
+            
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                println!("🔧 [SERDE_DESERIALIZE] visit_str - field has UUID string");
+                let uuid = Uuid::parse_str(value)
+                    .map_err(|e| E::custom(format!("Invalid UUID format: {}", e)))?;
+                Ok(Some(Some(uuid)))
+            }
+        }
+        
+        deserializer.deserialize_any(DoubleOptionVisitor)
+    }
 }
 
 impl Validate for UpdateProject {

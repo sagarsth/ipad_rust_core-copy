@@ -55,6 +55,13 @@ pub trait ParticipantRepository: DeleteServiceRepository<Participant> + Mergeabl
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Participant>>;
     
+    /// Find participants by specific IDs
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Participant>>;
+    
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
@@ -596,6 +603,57 @@ impl ParticipantRepository for SqliteParticipantRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Participant>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+    
+    async fn find_by_ids(
+        &self,
+        ids: &[Uuid],
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Participant>> {
+        if ids.is_empty() {
+            return Ok(PaginatedResult::new(Vec::new(), 0, params));
+        }
+
+        let offset = (params.page - 1) * params.per_page;
+        let id_strings: Vec<String> = ids.iter().map(Uuid::to_string).collect();
+
+        // Build dynamic count query
+        let count_query = format!(
+            "SELECT COUNT(*) FROM participants WHERE id IN ({}) AND deleted_at IS NULL",
+            vec!["?"; ids.len()].join(", ")
+        );
+        let mut count_builder = query_scalar::<_, i64>(&count_query);
+        for id_str in &id_strings {
+            count_builder = count_builder.bind(id_str);
+        }
+        let total = count_builder.fetch_one(&self.pool).await.map_err(DbError::from)?;
+
+        // Build dynamic select query
+        let select_query = format!(
+            "SELECT * FROM participants WHERE id IN ({}) AND deleted_at IS NULL ORDER BY name ASC LIMIT ? OFFSET ?",
+            vec!["?"; ids.len()].join(", ")
+        );
+        let mut select_builder = query_as::<_, ParticipantRow>(&select_query);
+        for id_str in &id_strings {
+            select_builder = select_builder.bind(id_str);
+        }
+        let rows = select_builder
+            .bind(params.per_page as i64)
+            .bind(offset as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(DbError::from)?;
 
         let entities = rows
             .into_iter()
@@ -1361,7 +1419,7 @@ impl SqliteParticipantRepository {
                 created_by_device_id, updated_by_device_id,
                 deleted_at, deleted_by_user_id, deleted_by_device_id
             ) VALUES (
-                ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?, ?,?,?, ?,?,?,?
+                ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?
             )
         "#)
         .bind(remote.id.to_string())

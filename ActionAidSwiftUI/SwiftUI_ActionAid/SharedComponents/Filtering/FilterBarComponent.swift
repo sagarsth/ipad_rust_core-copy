@@ -15,6 +15,7 @@ struct FilterBarConfig {
     let maxVisibleFilters: Int
     let compactMode: Bool
     let showActiveFilterSummary: Bool
+    let adaptiveWidth: Bool  // New property for adaptive width
     
     init(
         placeholder: String = "Search...",
@@ -22,7 +23,8 @@ struct FilterBarConfig {
         allowMultipleSelection: Bool = true,
         maxVisibleFilters: Int = 4,
         compactMode: Bool = false,
-        showActiveFilterSummary: Bool = true
+        showActiveFilterSummary: Bool = false,  // Default to false as it's redundant
+        adaptiveWidth: Bool = true  // Default to true for smart behavior
     ) {
         self.placeholder = placeholder
         self.showSearchBar = showSearchBar
@@ -30,6 +32,7 @@ struct FilterBarConfig {
         self.maxVisibleFilters = maxVisibleFilters
         self.compactMode = compactMode
         self.showActiveFilterSummary = showActiveFilterSummary
+        self.adaptiveWidth = adaptiveWidth
     }
     
     static let `default` = FilterBarConfig()
@@ -40,7 +43,8 @@ struct FilterBarConfig {
         allowMultipleSelection: true,
         maxVisibleFilters: 4,
         compactMode: false,
-        showActiveFilterSummary: false
+        showActiveFilterSummary: false,
+        adaptiveWidth: true
     )
     
     static let projects = FilterBarConfig(
@@ -48,7 +52,9 @@ struct FilterBarConfig {
         showSearchBar: true,
         allowMultipleSelection: true,
         maxVisibleFilters: 3,
-        compactMode: false
+        compactMode: false,
+        showActiveFilterSummary: false,
+        adaptiveWidth: true
     )
     
     static let users = FilterBarConfig(
@@ -56,7 +62,9 @@ struct FilterBarConfig {
         showSearchBar: true,
         allowMultipleSelection: false,
         maxVisibleFilters: 3,
-        compactMode: true
+        compactMode: true,
+        showActiveFilterSummary: false,
+        adaptiveWidth: true
     )
     
     static let compact = FilterBarConfig(
@@ -64,7 +72,9 @@ struct FilterBarConfig {
         showSearchBar: true,
         allowMultipleSelection: true,
         maxVisibleFilters: 2,
-        compactMode: true
+        compactMode: true,
+        showActiveFilterSummary: false,
+        adaptiveWidth: true
     )
 }
 
@@ -102,10 +112,10 @@ struct FilterOption: Identifiable {
     // MARK: - Projects Filters
     static let projectFilters: [FilterOption] = [
         FilterOption(id: "all", displayName: "All", icon: "folder", color: .gray, isDefault: true),
-        FilterOption(id: "active", displayName: "Active", icon: "play.circle", color: .green),
-        FilterOption(id: "planning", displayName: "Planning", icon: "calendar", color: .blue),
-        FilterOption(id: "on_hold", displayName: "On Hold", icon: "pause.circle", color: .orange),
-        FilterOption(id: "completed", displayName: "Completed", icon: "checkmark.circle.fill", color: .purple)
+        FilterOption(id: "on_track", displayName: "On Track", icon: "checkmark.circle", color: .green),
+        FilterOption(id: "at_risk", displayName: "At Risk", icon: "exclamationmark.triangle", color: .orange),
+        FilterOption(id: "delayed", displayName: "Delayed", icon: "xmark.circle", color: .red),
+        FilterOption(id: "completed", displayName: "Completed", icon: "checkmark.circle.fill", color: .blue)
     ]
     
     // MARK: - Users Filters
@@ -127,6 +137,7 @@ struct FilterBarComponent: View {
     // Internal state
     @State private var showAllFilters = false
     @State private var isSearchFocused = false
+    @State private var availableWidth: CGFloat = 0
     @FocusState private var searchFieldFocused: Bool
     
     // Computed properties
@@ -138,16 +149,61 @@ struct FilterBarComponent: View {
         searchText.isEmpty ? selectedFilters.filter { $0 != "all" }.count : selectedFilters.filter { $0 != "all" }.count + 1
     }
     
+    private var adaptiveMaxVisibleFilters: Int {
+        guard config.adaptiveWidth && availableWidth > 0 else {
+            return config.maxVisibleFilters
+        }
+        
+        let moreButtonWidth: CGFloat = 80 // Estimated width for "More" button
+        let chipSpacing: CGFloat = 8
+        let horizontalPadding: CGFloat = 32 // Total horizontal padding from container
+        
+        var usedWidth: CGFloat = horizontalPadding
+        var visibleCount = 0
+        
+        for (index, option) in filterOptions.enumerated() {
+            let estimatedChipWidth = estimateChipWidth(for: option.displayName)
+            
+            // Check if we can fit this chip
+            if usedWidth + estimatedChipWidth <= availableWidth {
+                usedWidth += estimatedChipWidth + chipSpacing
+                visibleCount += 1
+            } else {
+                // If there are more filters, reserve space for "More" button
+                if index < filterOptions.count - 1 {
+                    if usedWidth + moreButtonWidth <= availableWidth {
+                        break
+                    } else if visibleCount > 0 {
+                        visibleCount -= 1 // Remove last filter to make room for "More" button
+                    }
+                }
+                break
+            }
+        }
+        
+        // Ensure we show at least 1 filter (the "All" filter)
+        return max(1, visibleCount)
+    }
+    
     private var visibleFilterOptions: [FilterOption] {
         if showAllFilters || config.compactMode {
             return filterOptions
         } else {
-            return Array(filterOptions.prefix(config.maxVisibleFilters))
+            return Array(filterOptions.prefix(adaptiveMaxVisibleFilters))
         }
     }
     
     private var hasMoreFilters: Bool {
-        filterOptions.count > config.maxVisibleFilters && !config.compactMode
+        let maxVisible = config.adaptiveWidth ? adaptiveMaxVisibleFilters : config.maxVisibleFilters
+        return filterOptions.count > maxVisible && !config.compactMode
+    }
+    
+    // Helper method to estimate chip width based on text content
+    private func estimateChipWidth(for text: String) -> CGFloat {
+        let basePadding: CGFloat = 32 // 16px horizontal padding on each side
+        let characterWidth: CGFloat = 9 // Slightly more accurate character width for system font
+        let extraBuffer: CGFloat = 10 // Buffer for checkmark icon and safe spacing
+        return basePadding + (CGFloat(text.count) * characterWidth) + extraBuffer
     }
     
     var body: some View {
@@ -157,43 +213,52 @@ struct FilterBarComponent: View {
                 searchBar
             }
             
-            // Filter chips
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(visibleFilterOptions, id: \.id) { option in
-                        MultiSelectFilterChip(
-                            title: option.displayName,
-                            value: option.id,
-                            selections: $selectedFilters,
-                            color: option.color ?? .blue
-                        )
-                    }
-                    
-                    // Show more/less button
-                    if hasMoreFilters {
-                        Button(action: { 
-                            withAnimation(.easeInOut(duration: 0.3)) {
-                                showAllFilters.toggle()
-                            }
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: showAllFilters ? "chevron.up" : "chevron.down")
-                                    .font(.caption2)
-                                Text(showAllFilters ? "Less" : "More")
-                                    .font(.caption)
-                                    .fontWeight(.medium)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(Color(.systemGray5))
-                            .foregroundColor(.secondary)
-                            .cornerRadius(6)
+            // Filter chips with adaptive width detection
+            GeometryReader { geometry in
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(visibleFilterOptions, id: \.id) { option in
+                            MultiSelectFilterChip(
+                                title: option.displayName,
+                                value: option.id,
+                                selections: $selectedFilters,
+                                color: option.color ?? .blue
+                            )
                         }
-                        .transition(.scale.combined(with: .opacity))
+                        
+                        // Show more/less button
+                        if hasMoreFilters {
+                            Button(action: { 
+                                withAnimation(.easeInOut(duration: 0.3)) {
+                                    showAllFilters.toggle()
+                                }
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: showAllFilters ? "chevron.up" : "chevron.down")
+                                        .font(.caption2)
+                                    Text(showAllFilters ? "Less" : "More")
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(Color(.systemGray5))
+                                .foregroundColor(.secondary)
+                                .cornerRadius(6)
+                            }
+                            .transition(.scale.combined(with: .opacity))
+                        }
                     }
+                    .padding(.horizontal)
                 }
-                .padding(.horizontal)
+                .onAppear {
+                    availableWidth = geometry.size.width
+                }
+                .onChange(of: geometry.size.width) { oldValue, newValue in
+                    availableWidth = newValue
+                }
             }
+            .frame(height: 50) // Fixed height for the filter chips area
             
             // Active filter summary
             if hasActiveFilters && config.showActiveFilterSummary {
