@@ -29,7 +29,7 @@ struct StrategicGoalsView: View {
     @StateObject private var exportManager = ExportManager(service: StrategicGoalExportService())
     @StateObject private var crudManager = CRUDSheetManager<StrategicGoalResponse>(config: .strategicGoal)
     @StateObject private var documentTracker = DocumentCountTracker(config: .strategicGoals)
-    @StateObject private var statsManager = StatsManager<StrategicGoalResponse>.strategicGoalsManager()
+    @StateObject private var backendStatsManager = BackendStrategicGoalStatsManager()
     @StateObject private var viewStyleManager = ViewStylePreferenceManager()
     
     // Goal detail view state
@@ -264,11 +264,46 @@ struct StrategicGoalsView: View {
             // Load saved view style preference (following shared architecture pattern)
             currentViewStyle = viewStyleManager.getViewStyle(for: "strategic_goals")
         }
-        .withSharedStats(
-            manager: statsManager,
-            entities: goals,
-            entityName: "Strategic Goals"
+        .onChange(of: goals.count) { oldCount, newCount in
+            // Fetch backend stats when goals data changes
+            if newCount != oldCount {
+                Task {
+                    await fetchBackendStats()
+                }
+            }
+        }
+        .onAppear {
+            // Fetch backend stats on first appearance if goals are loaded
+            if !goals.isEmpty {
+                Task {
+                    await fetchBackendStats()
+                }
+            }
+        }
+    }
+    
+    // MARK: - Backend Statistics
+    
+    private func fetchBackendStats() async {
+        guard let currentUser = authManager.currentUser else { return }
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
         )
+        
+        await backendStatsManager.fetchStats(auth: authContext)
+        
+        // Register with shared context for Stats tab display
+        await MainActor.run {
+            let anyStatsManager = backendStatsManager.createAnyStatsManager()
+            sharedStatsContext.currentEntityStats = anyStatsManager
+            sharedStatsContext.entityName = "Strategic Goals"
+            
+            print("📊 Registered strategic goal stats with shared context: \(backendStatsManager.stats.count) stats")
+        }
     }
     
     // MARK: - Core Data Operations
@@ -309,6 +344,9 @@ struct StrategicGoalsView: View {
                     crudManager.showErrorAlert = true
                 }
             }
+            
+            // Fetch backend stats after loading goals
+            await fetchBackendStats()
         }
     }
     

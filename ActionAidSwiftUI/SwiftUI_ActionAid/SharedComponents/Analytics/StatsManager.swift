@@ -303,8 +303,8 @@ extension StatsManager where Entity == StrategicGoalResponse {
                 calculator: ConditionalCountCalculator<StrategicGoalResponse> { $0.statusId == 2 }
             ),
             StatConfig(
-                key: "behind",
-                title: "Behind",
+                key: "delayed",
+                title: "Delayed",
                 icon: "xmark.circle",
                 color: .red,
                 calculator: ConditionalCountCalculator<StrategicGoalResponse> { $0.statusId == 3 }
@@ -382,20 +382,426 @@ extension StatsManager where Entity == ProjectResponse {
 }
 
 // MARK: - Users Stats Configuration
-extension StatsManager {
-    static func usersManager<UserEntity>() -> StatsManager<UserEntity> {
+extension StatsManager where Entity == UserResponse {
+    static func usersManager() -> StatsManager<UserResponse> {
         let configs = [
             StatConfig(
                 key: "total",
                 title: "Total Users",
-                icon: "person.2",
+                icon: "person.2.fill",
                 color: .blue,
                 calculator: CountCalculator()
             ),
-            // Add user-specific stat configs here
+            StatConfig(
+                key: "active",
+                title: "Active Users",
+                icon: "checkmark.circle.fill",
+                color: .green,
+                calculator: ConditionalCountCalculator<UserResponse> { $0.active }
+            ),
+            StatConfig(
+                key: "admin",
+                title: "Admins",
+                icon: "shield.fill",
+                color: .red,
+                calculator: ConditionalCountCalculator<UserResponse> { $0.role.lowercased() == "admin" }
+            ),
+            StatConfig(
+                key: "field_tl",
+                title: "Team Leads",
+                icon: "person.badge.key.fill",
+                color: .orange,
+                calculator: ConditionalCountCalculator<UserResponse> { $0.role.lowercased() == "field_tl" }
+            ),
+            StatConfig(
+                key: "field",
+                title: "Field Officers",
+                icon: "person.badge.plus",
+                color: .purple,
+                calculator: ConditionalCountCalculator<UserResponse> { $0.role.lowercased() == "field" }
+            ),
+            StatConfig(
+                key: "inactive",
+                title: "Inactive",
+                icon: "person.crop.circle.badge.xmark",
+                color: .gray,
+                calculator: ConditionalCountCalculator<UserResponse> { !$0.active }
+            )
         ]
         
-        return StatsManager<UserEntity>(statConfigs: configs)
+        return StatsManager(statConfigs: configs)
+    }
+}
+
+// MARK: - Backend-Powered User Stats Manager
+/// Specialized stats manager for users that fetches comprehensive statistics from backend
+@MainActor
+class BackendUserStatsManager: ObservableObject {
+    @Published var stats: [StatResult] = []
+    @Published var isCalculating = false
+    @Published var lastCalculated = Date.distantPast
+    @Published var backendStats: UserStats?
+    
+    private let userHandler = UserFFIHandler()
+    
+    /// Fetch comprehensive user statistics from backend
+    func fetchStats(auth: AuthContextPayload) async {
+        guard !isCalculating else { return }
+        
+        isCalculating = true
+        defer { isCalculating = false }
+        
+        do {
+            let userStats = try await userHandler.getUserStats(auth: auth).get()
+            
+            await MainActor.run {
+                self.backendStats = userStats
+                self.generateStatsFromBackend(userStats)
+                self.lastCalculated = Date()
+            }
+        } catch {
+            print("Failed to fetch user stats from backend: \(error)")
+            // Fallback to empty stats
+            await MainActor.run {
+                self.stats = []
+            }
+        }
+    }
+    
+    private func generateStatsFromBackend(_ userStats: UserStats) {
+        let configs = [
+            StatConfig(
+                key: "total",
+                title: "Total Users",
+                icon: "person.2.fill",
+                color: .blue,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "active",
+                title: "Active Users", 
+                icon: "checkmark.circle.fill",
+                color: .green,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "admin",
+                title: "Admins",
+                icon: "shield.fill",
+                color: .red,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "field_tl",
+                title: "Team Leads",
+                icon: "person.badge.key.fill",
+                color: .orange,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "field",
+                title: "Field Officers",
+                icon: "person.badge.plus",
+                color: .purple,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "inactive",
+                title: "Inactive",
+                icon: "person.crop.circle.badge.xmark",
+                color: .gray,
+                calculator: CountCalculator()
+            )
+        ]
+        
+        // Map backend stats to StatResult objects
+        let backendValues: [String: Int] = [
+            "total": Int(userStats.total),
+            "active": Int(userStats.active),
+            "admin": Int(userStats.admin),
+            "field_tl": Int(userStats.fieldTl),
+            "field": Int(userStats.field),
+            "inactive": Int(userStats.inactive)
+        ]
+        
+        let now = Date()
+        self.stats = configs.map { config in
+            let value = backendValues[config.key] ?? 0
+            return StatResult(
+                config: config,
+                value: .count(value),
+                trend: nil, // Could implement trend tracking later
+                lastUpdated: now
+            )
+        }
+    }
+    
+    /// Get stats for display in a horizontal scroll view
+    func getDisplayStats() -> [EntityStatsCard.EntityStat] {
+        return stats.map { statResult in
+            EntityStatsCard.EntityStat(
+                title: statResult.config.title,
+                value: statResult.value.displayValue,
+                icon: statResult.config.icon,
+                color: statResult.config.color
+            )
+        }
+    }
+    
+    /// Create an AnyStatsManager compatible instance for shared context
+    func createAnyStatsManager() -> AnyStatsManager {
+        return AnyStatsManager(
+            stats: self.stats,
+            isCalculating: self.isCalculating,
+            lastCalculated: self.lastCalculated
+        )
+    }
+}
+
+// MARK: - Backend-Powered Strategic Goal Stats Manager
+/// Specialized stats manager for strategic goals that fetches comprehensive statistics from backend
+@MainActor
+class BackendStrategicGoalStatsManager: ObservableObject {
+    @Published var stats: [StatResult] = []
+    @Published var isCalculating = false
+    @Published var lastCalculated = Date.distantPast
+    @Published var statusDistribution: StatusDistributionResponse?
+    @Published var valueStatistics: GoalValueSummaryResponse?
+    
+    private let strategicGoalHandler = StrategicGoalFFIHandler()
+    
+    /// Fetch comprehensive strategic goal statistics from backend
+    func fetchStats(auth: AuthContextPayload) async {
+        guard !isCalculating else { return }
+        
+        isCalculating = true
+        defer { isCalculating = false }
+        
+        async let statusResult = strategicGoalHandler.getStatusDistribution(auth: auth)
+        async let valueResult = strategicGoalHandler.getValueStatistics(auth: auth)
+        
+        do {
+            let (statusDistribution, valueStatistics) = try await (statusResult.get(), valueResult.get())
+            
+            await MainActor.run {
+                self.statusDistribution = statusDistribution
+                self.valueStatistics = valueStatistics
+                self.generateStatsFromBackend(statusDistribution, valueStatistics)
+                self.lastCalculated = Date()
+            }
+        } catch {
+            print("Failed to fetch strategic goal stats from backend: \(error)")
+            await MainActor.run {
+                self.stats = []
+            }
+        }
+    }
+    
+    private func generateStatsFromBackend(_ statusDist: StatusDistributionResponse, _ valueStats: GoalValueSummaryResponse) {
+        let configs = [
+            StatConfig(
+                key: "total",
+                title: "Total Goals",
+                icon: "target",
+                color: .blue,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "on_track",
+                title: "On Track",
+                icon: "checkmark.circle",
+                color: .green,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "at_risk", 
+                title: "At Risk",
+                icon: "exclamationmark.triangle",
+                color: .orange,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "delayed",
+                title: "Delayed",
+                icon: "xmark.circle",
+                color: .red,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "completed",
+                title: "Completed",
+                icon: "checkmark.circle.fill",
+                color: .blue,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "avg_progress",
+                title: "Avg Progress",
+                icon: "percent",
+                color: .purple,
+                calculator: CountCalculator()
+            )
+        ]
+        
+        // Map backend stats to StatResult objects
+        let backendValues: [String: StatValue] = [
+            "total": .count(valueStats.count),
+            "on_track": .count(statusDist.onTrack),
+            "at_risk": .count(statusDist.atRisk),
+            "delayed": .count(statusDist.delayed),
+            "completed": .count(statusDist.completed),
+            "avg_progress": .percentage(valueStats.avgProgressPercentage ?? 0.0)
+        ]
+        
+        let now = Date()
+        self.stats = configs.map { config in
+            let value = backendValues[config.key] ?? .count(0)
+            return StatResult(
+                config: config,
+                value: value,
+                trend: nil, // Could implement trend tracking later
+                lastUpdated: now
+            )
+        }
+    }
+    
+    /// Create an AnyStatsManager compatible instance for shared context
+    func createAnyStatsManager() -> AnyStatsManager {
+        return AnyStatsManager(
+            stats: self.stats,
+            isCalculating: self.isCalculating,
+            lastCalculated: self.lastCalculated
+        )
+    }
+}
+
+// MARK: - Backend-Powered Project Stats Manager
+/// Specialized stats manager for projects that fetches comprehensive statistics from backend
+@MainActor
+class BackendProjectStatsManager: ObservableObject {
+    @Published var stats: [StatResult] = []
+    @Published var isCalculating = false
+    @Published var lastCalculated = Date.distantPast
+    @Published var projectStatistics: ProjectStatistics?
+    @Published var statusBreakdown: [ProjectStatusBreakdown]?
+    
+    private let projectHandler = ProjectFFIHandler()
+    
+    /// Fetch comprehensive project statistics from backend
+    func fetchStats(auth: AuthContextPayload) async {
+        guard !isCalculating else { return }
+        
+        print("🔄 [BackendProjectStatsManager] Starting stats fetch...")
+        isCalculating = true
+        defer { isCalculating = false }
+        
+        async let statsResult = projectHandler.getStatistics(auth: auth)
+        async let breakdownResult = projectHandler.getStatusBreakdown(auth: auth)
+        
+        do {
+            print("🔄 [BackendProjectStatsManager] Awaiting backend responses...")
+            let (projectStats, statusBreakdown) = try await (statsResult.get(), breakdownResult.get())
+            
+            print("✅ [BackendProjectStatsManager] Backend data received:")
+            print("  - Project Stats: \(projectStats)")
+            print("  - Status Breakdown: \(statusBreakdown)")
+            
+            await MainActor.run {
+                self.projectStatistics = projectStats
+                self.statusBreakdown = statusBreakdown
+                self.generateStatsFromBackend(projectStats, statusBreakdown)
+                self.lastCalculated = Date()
+                print("📊 [BackendProjectStatsManager] Generated \(self.stats.count) stats")
+            }
+        } catch {
+            print("❌ [BackendProjectStatsManager] Failed to fetch project stats from backend: \(error)")
+            if let detailedError = error as? FFIError {
+                print("❌ [BackendProjectStatsManager] Detailed FFI Error: \(detailedError)")
+            }
+            await MainActor.run {
+                self.stats = []
+            }
+        }
+    }
+    
+    private func generateStatsFromBackend(_ projectStats: ProjectStatistics, _ statusBreakdown: [ProjectStatusBreakdown]) {
+        let configs = [
+            StatConfig(
+                key: "total",
+                title: "Total Projects",
+                icon: "folder",
+                color: .blue,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "on_track",
+                title: "On Track", 
+                icon: "checkmark.circle",
+                color: .green,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "at_risk",
+                title: "At Risk",
+                icon: "exclamationmark.triangle",
+                color: .orange,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "delayed",
+                title: "Delayed",
+                icon: "xmark.circle",
+                color: .red,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "completed",
+                title: "Completed",
+                icon: "checkmark.circle.fill",
+                color: .blue,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "documents",
+                title: "Documents",
+                icon: "doc.text",
+                color: .indigo,
+                calculator: CountCalculator()
+            )
+        ]
+        
+        // Map status breakdown to counts by status ID
+        let statusCounts = Dictionary(uniqueKeysWithValues: statusBreakdown.map { ($0.statusId, Int($0.count)) })
+        
+        // Map backend stats to StatResult objects
+        let backendValues: [String: Int] = [
+            "total": Int(projectStats.totalProjects),
+            "on_track": statusCounts[1] ?? 0,    // Status ID 1 = On Track
+            "at_risk": statusCounts[2] ?? 0,     // Status ID 2 = At Risk  
+            "delayed": statusCounts[3] ?? 0,     // Status ID 3 = Delayed
+            "completed": statusCounts[4] ?? 0,   // Status ID 4 = Completed
+            "documents": Int(projectStats.documentCount)
+        ]
+        
+        let now = Date()
+        self.stats = configs.map { config in
+            let value = backendValues[config.key] ?? 0
+            return StatResult(
+                config: config,
+                value: .count(value),
+                trend: nil, // Could implement trend tracking later
+                lastUpdated: now
+            )
+        }
+    }
+    
+    /// Create an AnyStatsManager compatible instance for shared context
+    func createAnyStatsManager() -> AnyStatsManager {
+        return AnyStatsManager(
+            stats: self.stats,
+            isCalculating: self.isCalculating,
+            lastCalculated: self.lastCalculated
+        )
     }
 }
 
@@ -644,6 +1050,13 @@ struct AnyStatsManager {
         self.stats = manager.stats
         self.isCalculating = manager.isCalculating
         self.lastCalculated = manager.lastCalculated
+    }
+    
+    /// Direct initializer for custom stats managers
+    init(stats: [StatResult], isCalculating: Bool, lastCalculated: Date) {
+        self.stats = stats
+        self.isCalculating = isCalculating
+        self.lastCalculated = lastCalculated
     }
 }
 

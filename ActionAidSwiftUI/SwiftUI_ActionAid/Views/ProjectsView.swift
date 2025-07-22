@@ -147,7 +147,7 @@ struct ProjectsView: View {
     @StateObject private var selectionManager = SelectionManager()
     @StateObject private var exportManager = ExportManager(service: ProjectExportService())
     @StateObject private var crudManager = CRUDSheetManager<ProjectResponse>(config: .project)
-    @StateObject private var statsManager = StatsManager<ProjectResponse>.projectsManager()
+    @StateObject private var backendStatsManager = BackendProjectStatsManager()
     @StateObject private var viewStyleManager = ViewStylePreferenceManager()
     
     // Project detail view state
@@ -215,6 +215,19 @@ struct ProjectsView: View {
     
     var body: some View {
         VStack(spacing: 0) {
+            // DEBUG: Temporary debug button (remove after testing)
+            HStack {
+                Button("🔧 Debug Project Stats") {
+                    Task {
+                        await debugProjectStats()
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(.blue)
+                Spacer()
+            }
+            .padding(.horizontal)
+            
             // Main Entity List with date filtering integration
             EntityListView(
                 entities: filteredProjects,
@@ -366,11 +379,88 @@ struct ProjectsView: View {
             // Load saved view style preference (following shared architecture pattern)
             currentViewStyle = viewStyleManager.getViewStyle(for: "projects")
         }
-        .withSharedStats(
-            manager: statsManager,
-            entities: projects,
-            entityName: "Projects"
+        .onChange(of: projects.count) { oldCount, newCount in
+            // Fetch backend stats when projects data changes
+            if newCount != oldCount {
+                Task {
+                    await fetchBackendStats()
+                }
+            }
+        }
+        .onAppear {
+            // Fetch backend stats on first appearance if projects are loaded
+            if !projects.isEmpty {
+                Task {
+                    await fetchBackendStats()
+                }
+            }
+        }
+    }
+    
+    // MARK: - Backend Statistics
+    
+    private func fetchBackendStats() async {
+        guard let currentUser = authManager.currentUser else { return }
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
         )
+        
+        await backendStatsManager.fetchStats(auth: authContext)
+        
+        // Register with shared context for Stats tab display
+        await MainActor.run {
+            let anyStatsManager = backendStatsManager.createAnyStatsManager()
+            sharedStatsContext.currentEntityStats = anyStatsManager
+            sharedStatsContext.entityName = "Projects"
+            
+            print("📊 Registered project stats with shared context: \(backendStatsManager.stats.count) stats")
+        }
+    }
+    
+    // DEBUG: Temporary debug method (remove after testing)
+    private func debugProjectStats() async {
+        print("🔧 [DEBUG] Starting manual project stats test...")
+        
+        guard let currentUser = authManager.currentUser else {
+            print("❌ [DEBUG] No authenticated user")
+            return
+        }
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+        
+        print("🔧 [DEBUG] Auth context: userId=\(authContext.user_id), role=\(authContext.role)")
+        
+        // Test individual FFI calls
+        let projectHandler = ProjectFFIHandler()
+        
+        print("🔧 [DEBUG] Testing getStatistics...")
+        let statsResult = await projectHandler.getStatistics(auth: authContext)
+        switch statsResult {
+        case .success(let stats):
+            print("✅ [DEBUG] getStatistics SUCCESS: \(stats)")
+        case .failure(let error):
+            print("❌ [DEBUG] getStatistics FAILED: \(error)")
+        }
+        
+        print("🔧 [DEBUG] Testing getStatusBreakdown...")
+        let breakdownResult = await projectHandler.getStatusBreakdown(auth: authContext)
+        switch breakdownResult {
+        case .success(let breakdown):
+            print("✅ [DEBUG] getStatusBreakdown SUCCESS: \(breakdown)")
+        case .failure(let error):
+            print("❌ [DEBUG] getStatusBreakdown FAILED: \(error)")
+        }
+        
+        print("🔧 [DEBUG] Manual test complete.")
     }
     
     // MARK: - Core Data Operations
@@ -413,6 +503,9 @@ struct ProjectsView: View {
                     crudManager.showErrorAlert = true
                 }
             }
+            
+            // Fetch backend stats after loading projects
+            await fetchBackendStats()
         }
     }
     

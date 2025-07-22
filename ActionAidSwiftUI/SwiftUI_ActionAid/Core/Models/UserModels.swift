@@ -126,4 +126,9 @@ struct UserStats: Codable {
     let admin: Int
     let fieldTl: Int
     let field: Int
+    
+    enum CodingKeys: String, CodingKey {
+        case total, active, inactive, admin, field
+        case fieldTl = "field_tl"
+    }
 } 

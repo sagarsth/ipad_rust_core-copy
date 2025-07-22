@@ -200,17 +200,37 @@ class ProjectFFIHandler {
     // MARK: - Analytics and Statistics
     
     func getStatistics(auth: AuthContextPayload) async -> Result<ProjectStatistics, Error> {
-        let payload = StatsRequest(auth: auth)
-        return await executeOperation(payload: payload, ffiCall: project_get_statistics)
+        print("🔄 [ProjectFFIHandler] getStatistics called")
+        let payload = ProjectStatsRequest(auth: auth)
+        let result: Result<ProjectStatistics, Error> = await executeOperation(payload: payload, ffiCall: project_get_statistics)
+        
+        switch result {
+        case .success(let stats):
+            print("✅ [ProjectFFIHandler] getStatistics success: \(stats)")
+        case .failure(let error):
+            print("❌ [ProjectFFIHandler] getStatistics failed: \(error)")
+        }
+        
+        return result
     }
 
     func getStatusBreakdown(auth: AuthContextPayload) async -> Result<[ProjectStatusBreakdown], Error> {
-        let payload = StatsRequest(auth: auth)
-        return await executeOperation(payload: payload, ffiCall: project_get_status_breakdown)
+        print("🔄 [ProjectFFIHandler] getStatusBreakdown called")
+        let payload = ProjectStatsRequest(auth: auth)
+        let result: Result<[ProjectStatusBreakdown], Error> = await executeOperation(payload: payload, ffiCall: project_get_status_breakdown)
+        
+        switch result {
+        case .success(let breakdown):
+            print("✅ [ProjectFFIHandler] getStatusBreakdown success: \(breakdown)")
+        case .failure(let error):
+            print("❌ [ProjectFFIHandler] getStatusBreakdown failed: \(error)")
+        }
+        
+        return result
     }
 
     func getMetadataCounts(auth: AuthContextPayload) async -> Result<ProjectMetadataCounts, Error> {
-        let payload = StatsRequest(auth: auth)
+        let payload = ProjectStatsRequest(auth: auth)
         return await executeOperation(payload: payload, ffiCall: project_get_metadata_counts)
     }
 
@@ -263,12 +283,12 @@ class ProjectFFIHandler {
     }
     
     func getTeamWorkloadDistribution(auth: AuthContextPayload) async -> Result<[TeamWorkloadDistribution], Error> {
-        let payload = StatsRequest(auth: auth)
+        let payload = ProjectStatsRequest(auth: auth)
         return await executeOperation(payload: payload, ffiCall: project_get_team_workload_distribution)
     }
     
     func getStrategicGoalDistribution(auth: AuthContextPayload) async -> Result<[StrategicGoalDistribution], Error> {
-        let payload = StatsRequest(auth: auth)
+        let payload = ProjectStatsRequest(auth: auth)
         return await executeOperation(payload: payload, ffiCall: project_get_strategic_goal_distribution)
     }
     
@@ -278,7 +298,7 @@ class ProjectFFIHandler {
     }
     
     func getDocumentCoverageAnalysis(auth: AuthContextPayload) async -> Result<DocumentCoverageAnalysis, Error> {
-        let payload = StatsRequest(auth: auth)
+        let payload = ProjectStatsRequest(auth: auth)
         return await executeOperation(payload: payload, ffiCall: project_get_document_coverage_analysis)
     }
 }
@@ -287,6 +307,10 @@ class ProjectFFIHandler {
 
 struct ProjectCreateRequest: Codable {
     let project: NewProject
+    let auth: AuthContextPayload
+}
+
+struct ProjectStatsRequest: Codable {
     let auth: AuthContextPayload
 }
 
@@ -380,5 +404,7 @@ struct ProjectFindStaleRequest: Codable {
     let include: [ProjectInclude]?
     let auth: AuthContextPayload
 }
+
+
 
  

@@ -227,6 +227,13 @@ struct ProjectStatusBreakdown: Codable {
     let statusName: String
     let count: Int64
     let percentage: Double
+    
+    enum CodingKeys: String, CodingKey {
+        case statusId = "status_id"
+        case statusName = "status_name"
+        case count
+        case percentage
+    }
 }
 
 struct ProjectMetadataCounts: Codable {

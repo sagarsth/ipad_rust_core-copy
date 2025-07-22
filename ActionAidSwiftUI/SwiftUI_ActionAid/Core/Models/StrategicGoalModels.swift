@@ -478,14 +478,24 @@ enum DeleteResponse: Codable {
 struct StatusDistributionResponse: Codable {
     let onTrack: Int
     let atRisk: Int
-    let behind: Int
+    let delayed: Int  // Changed from 'behind' to 'delayed' to match backend
     let completed: Int
     
     enum CodingKeys: String, CodingKey {
         case onTrack = "On Track"
         case atRisk = "At Risk"
-        case behind = "Behind"
+        case delayed = "Delayed"  // Changed from "Behind" to "Delayed"
         case completed = "Completed"
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        // Use decodeIfPresent and provide default values for missing status counts
+        onTrack = try container.decodeIfPresent(Int.self, forKey: .onTrack) ?? 0
+        atRisk = try container.decodeIfPresent(Int.self, forKey: .atRisk) ?? 0
+        delayed = try container.decodeIfPresent(Int.self, forKey: .delayed) ?? 0  // Changed
+        completed = try container.decodeIfPresent(Int.self, forKey: .completed) ?? 0
     }
 }
 

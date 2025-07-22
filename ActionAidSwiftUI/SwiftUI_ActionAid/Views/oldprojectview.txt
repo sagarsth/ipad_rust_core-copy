@@ -1,376 +1,269 @@
 //
-//  StrategicGoalsView.swift
+//  ProjectsView.swift
 //  ActionAid SwiftUI
 //
-//  Strategic Goals management with real UI
+//  Projects management with basic functionality
 //
 
 import SwiftUI
 import UniformTypeIdentifiers
 import PhotosUI
-import QuickLook
 
-// MARK: - Removed: IdentifiableURL (now in DocumentManagement/Components/QuickLookView.swift)
-
-// MARK: - Main View
-struct StrategicGoalsView: View {
-    @EnvironmentObject var authManager: AuthenticationManager
-    @StateObject private var viewStyleManager = ViewStylePreferenceManager()
-    private let ffiHandler = StrategicGoalFFIHandler()
-    private let documentHandler = DocumentFFIHandler()
-
-    @State private var goals: [StrategicGoalResponse] = []
-    @State private var isLoading = false
-    @State private var searchText = ""
-    @State private var selectedStatuses: Set<String> = ["all"] // Changed to Set for multiple selection
-    @State private var showCreateSheet = false
-    @State private var selectedGoal: StrategicGoalResponse?
-    @State private var showErrorAlert = false
-    @State private var errorMessage: String?
-    @State private var currentViewStyle: ListViewStyle = .cards
-    @State private var isScrolling = false
-    @State private var scrollOffset: CGFloat = 0
-    @State private var lastScrollValue: CGFloat = 0
-    @State private var isActionBarCollapsed: Bool = false
+// MARK: - Global Strategic Goals Cache
+@MainActor
+class StrategicGoalsCache: ObservableObject {
+    static let shared = StrategicGoalsCache()
     
-    // Selection state using shared SelectionManager
-    @StateObject private var selectionManager = SelectionManager()
+    @Published var goals: [StrategicGoalSummary] = []
+    @Published var isLoading = false
+    private var lastFetch: Date?
+    private let cacheTimeout: TimeInterval = 300 // 5 minutes
     
-    // Filter-aware bulk selection state
-    @State private var currentFilter = StrategicGoalFilter.all()
+    private init() {} // Singleton
     
-    // Export manager for shared export functionality
-    @StateObject private var exportManager = ExportManager(service: StrategicGoalExportService())
-    
-    // Document tracking
-    @State private var goalDocumentCounts: [String: Int] = [:]
-    
-    // Stats
-    @State private var totalGoals = 0
-    @State private var onTrackGoals = 0
-    @State private var atRiskGoals = 0
-    @State private var completedGoals = 0
-    
-    // Document viewing state
-    @State private var selectedDocumentURL: IdentifiableURL?
-    @State private var isOpeningDocument = false
-    
-    // Bulk delete state
-    @State private var showBulkDeleteOptions = false
-    @State private var isPerformingBulkDelete = false
-    @State private var bulkDeleteResults: BatchDeleteResult?
-    @State private var showBulkDeleteResults = false
-    
-    // Export state - using shared export manager
-    @State private var showExportOptions = false
-    
-    // Computed property to determine if we should hide the top section
-    private var shouldHideTopSection: Bool {
-        scrollOffset > 100
+    func loadIfNeeded(authManager: AuthenticationManager) async {
+        // Return immediately if cache is fresh
+        if let lastFetch = lastFetch,
+           Date().timeIntervalSince(lastFetch) < cacheTimeout,
+           !goals.isEmpty {
+            print("📋 [CACHE] Using cached strategic goals (\(goals.count) items)")
+            return
+        }
+        
+        guard !isLoading else { 
+            print("📋 [CACHE] Already loading strategic goals")
+            return 
+        }
+        
+        print("📋 [CACHE] Loading fresh strategic goals...")
+        isLoading = true
+        
+        guard let currentUser = authManager.currentUser else {
+            isLoading = false
+            return
+        }
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+        
+        let handler = StrategicGoalFFIHandler()
+        let result = await handler.listSummaries(
+            pagination: PaginationDto(page: 1, perPage: 50),
+            auth: authContext
+        )
+        
+        switch result {
+        case .success(let paginatedResult):
+            // Process mapping off main thread - now using lightweight response
+            let summaries = paginatedResult.items.map { summary in
+                StrategicGoalSummary(
+                    id: summary.id,
+                    objectiveCode: summary.objectiveCode,
+                    outcome: nil // Not available in lightweight response
+                )
+            }
+            
+            await MainActor.run {
+                self.goals = summaries
+                self.lastFetch = Date()
+                print("📋 [CACHE] ✅ Cached \(summaries.count) strategic goals")
+            }
+        case .failure(let error):
+            print("📋 [CACHE] ❌ Failed to load strategic goals: \(error.localizedDescription)")
+        }
+        
+        isLoading = false
     }
     
-    // MARK: - Table Configuration
-    // Note: tableColumns is defined in StrategicGoalTableRow.swift as an extension
+    func refresh(authManager: AuthenticationManager) async {
+        lastFetch = nil
+        await loadIfNeeded(authManager: authManager)
+    }
     
-    var filteredGoals: [StrategicGoalResponse] {
-        goals.filter { goal in
+    /// Force refresh cache (called when strategic goals are created/updated)
+    func invalidateCache(authManager: AuthenticationManager) async {
+        print("📋 [CACHE] ♻️ Invalidating cache due to strategic goal changes")
+        lastFetch = nil
+        goals.removeAll()
+        await loadIfNeeded(authManager: authManager)
+    }
+    
+    /// Called from strategic goal creation to keep cache fresh
+    func notifyStrategicGoalCreated(_ newGoal: StrategicGoalResponse, authManager: AuthenticationManager) async {
+        print("📋 [CACHE] ➕ Adding new strategic goal to cache: \(newGoal.objectiveCode)")
+        
+        let summary = StrategicGoalSummary(
+            id: newGoal.id,
+            objectiveCode: newGoal.objectiveCode,
+            outcome: newGoal.outcome
+        )
+        
+        await MainActor.run {
+            // Add to existing cache
+            self.goals.append(summary)
+            
+            // Sort by objective code for consistent ordering
+            self.goals.sort { $0.objectiveCode < $1.objectiveCode }
+            
+            print("📋 [CACHE] ✅ Cache updated with new goal, total: \(self.goals.count)")
+        }
+    }
+    
+    /// Called from strategic goal updates to keep cache fresh  
+    func notifyStrategicGoalUpdated(_ updatedGoal: StrategicGoalResponse) async {
+        await MainActor.run {
+            if let index = self.goals.firstIndex(where: { $0.id == updatedGoal.id }) {
+                self.goals[index] = StrategicGoalSummary(
+                    id: updatedGoal.id,
+                    objectiveCode: updatedGoal.objectiveCode,
+                    outcome: updatedGoal.outcome
+                )
+                print("📋 [CACHE] 🔄 Updated strategic goal in cache: \(updatedGoal.objectiveCode)")
+            }
+        }
+    }
+}
+
+// MARK: - Main View
+struct ProjectsView: View {
+    @EnvironmentObject var authManager: AuthenticationManager
+    @EnvironmentObject var sharedStatsContext: SharedStatsContext
+    private let ffiHandler = ProjectFFIHandler()
+    
+    // Core data state
+    @State private var projects: [ProjectResponse] = []
+    @State private var isLoading = false
+    @State private var searchText = ""
+    @State private var selectedFilters: Set<String> = ["all"]
+    
+    // Project detail view state
+    @State private var selectedProject: ProjectResponse?
+    
+    // CRUD sheet state
+    @State private var showCreateSheet = false
+    // Edit sheet state
+    @State private var projectToEdit: ProjectResponse?
+    
+    // MARK: - Computed Properties
+    
+    /// Properly filtered projects with working OR gate logic for status filters
+    var filteredProjects: [ProjectResponse] {
+        projects.filter { project in
             let matchesSearch = searchText.isEmpty ||
-                goal.objectiveCode.localizedCaseInsensitiveContains(searchText) ||
-                (goal.outcome ?? "").localizedCaseInsensitiveContains(searchText) ||
-                (goal.responsibleTeam ?? "").localizedCaseInsensitiveContains(searchText)
+                project.name.localizedCaseInsensitiveContains(searchText) ||
+                (project.objective ?? "").localizedCaseInsensitiveContains(searchText) ||
+                (project.outcome ?? "").localizedCaseInsensitiveContains(searchText) ||
+                (project.responsibleTeam ?? "").localizedCaseInsensitiveContains(searchText)
             
             // OR gate logic for status filters
-            let matchesStatus = selectedStatuses.contains("all") ||
-                (selectedStatuses.contains("on_track") && goal.statusId == 1) ||
-                (selectedStatuses.contains("at_risk") && goal.statusId == 2) ||
-                (selectedStatuses.contains("behind") && goal.statusId == 3) ||
-                (selectedStatuses.contains("completed") && goal.statusId == 4)
+            let matchesStatus = selectedFilters.contains("all") ||
+                (selectedFilters.contains("on_track") && project.statusId == 1) ||
+                (selectedFilters.contains("at_risk") && project.statusId == 2) ||
+                (selectedFilters.contains("delayed") && project.statusId == 3) ||
+                (selectedFilters.contains("completed") && project.statusId == 4)
             
             return matchesSearch && matchesStatus
         }
     }
     
-    // Helper to create filter from current UI state
-    private func createCurrentFilter() -> StrategicGoalFilter {
-        var statusIds: [Int64]? = nil
-        
-        // OR gate logic: if "all" is not selected, collect all selected status IDs
-        if !selectedStatuses.contains("all") {
-            var ids: [Int64] = []
-            if selectedStatuses.contains("on_track") { ids.append(1) }
-            if selectedStatuses.contains("at_risk") { ids.append(2) }
-            if selectedStatuses.contains("behind") { ids.append(3) }
-            if selectedStatuses.contains("completed") { ids.append(4) }
-            statusIds = ids.isEmpty ? nil : ids
-        }
-        
-        let searchTextFilter = searchText.isEmpty ? nil : searchText
-        
-        return StrategicGoalFilter(
-            statusIds: statusIds,
-            responsibleTeams: nil,
-            years: nil, // Year/month filtering is handled by AdaptiveListView now
-            months: nil, // Year/month filtering is handled by AdaptiveListView now
-            userRole: nil,
-            syncPriorities: nil,
-            searchText: searchTextFilter,
-            progressRange: nil,
-            targetValueRange: nil,
-            actualValueRange: nil,
-            dateRange: nil,
-            daysStale: nil,
-            excludeDeleted: true
+    /// Create auth context for API calls
+    private func createAuthContext() -> AuthContextPayload {
+        return AuthContextPayload(
+            user_id: authManager.currentUser?.userId ?? "",
+            role: authManager.currentUser?.role ?? "",
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
         )
     }
     
     var body: some View {
-        GeometryReader { geometry in
-            mainScrollView
+        VStack(spacing: 0) {
+            // Search bar
+            HStack {
+                TextField("Search projects...", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(.horizontal)
+            }
+            .padding(.vertical, 8)
+            
+            // Simple list view for now
+            if isLoading {
+                ProgressView("Loading projects...")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if filteredProjects.isEmpty {
+                VStack(spacing: 16) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 50))
+                        .foregroundColor(.secondary)
+                    Text("No projects found")
+                        .font(.headline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(filteredProjects) { project in
+                    ProjectRowView(project: project)
+                        .onTapGesture {
+                            selectedProject = project
+                        }
+                }
+            }
         }
-        .navigationTitle("Strategic Goals")
-        .navigationBarTitleDisplayMode(shouldHideTopSection ? .inline : .large)
-        .navigationBarHidden(isActionBarCollapsed)
+        .navigationTitle("Projects")
+        .navigationBarTitleDisplayMode(.large)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button(action: { showCreateSheet = true }) {
+                Button(action: { 
+                    showCreateSheet = true
+                }) {
                     Image(systemName: "plus.circle.fill")
                         .font(.title3)
                 }
             }
         }
-        .overlay(
-            // Selection action bar using shared component
-            Group {
-                if selectionManager.isInSelectionMode && selectionManager.hasSelection && !isActionBarCollapsed {
-                    SelectionActionBar(
-                        selectedCount: selectionManager.selectedCount,
-                        userRole: authManager.currentUser?.role,
-                        isPerformingBulkOperation: isPerformingBulkDelete,
-                        onClearSelection: {
-                            selectionManager.clearSelection()
-                        },
-                        onExport: {
-                            showExportOptions = true
-                        },
-                        onDelete: {
-                            showBulkDeleteOptions = true
-                        }
-                    )
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            },
-            alignment: .bottom
-        )
         .sheet(isPresented: $showCreateSheet) {
-            CreateGoalSheet(ffiHandler: self.ffiHandler, onSave: { newGoal in
-                loadGoals()
-            })
-        }
-        .fullScreenCover(item: $selectedGoal) { goal in
-            GoalDetailView(goal: goal, onUpdate: {
-                loadGoals()
-            })
-        }
-        .fullScreenCover(item: $selectedDocumentURL) { identifiableURL in
-            NavigationView {
-                QuickLookView(url: identifiableURL.url) {
-                    // Cleanup when document viewer is dismissed
-                    selectedDocumentURL = nil
-                }
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .navigationBarLeading) {
-                        Button("Close") {
-                            selectedDocumentURL = nil
-                        }
-                    }
-                }
+            CreateProjectSheet { createdProject in
+                // Add the new project to the list and refresh
+                projects.append(createdProject)
+                loadProjects() // Refresh to get updated data
             }
+            .environmentObject(authManager)
         }
-        .alert("Error", isPresented: $showErrorAlert) {
-            Button("OK") { }
-        } message: {
-            Text(errorMessage ?? "An error occurred")
-        }
-        .sheet(isPresented: $showBulkDeleteOptions) {
-            EntityDeleteOptionsSheet(
-                config: .strategicGoal(isPlural: true),
-                selectedCount: selectionManager.selectedCount,
-                userRole: authManager.currentUser?.role ?? "",
-                onDelete: { hardDelete, force in
-                    performBulkDelete(hardDelete: hardDelete, force: force)
+        .sheet(item: $projectToEdit) { project in
+            EditProjectSheet(project: project, ffiHandler: self.ffiHandler) { updatedProject in
+                // Update the project in the list immediately
+                if let index = projects.firstIndex(where: { $0.id == updatedProject.id }) {
+                    projects[index] = updatedProject
                 }
-            )
-        }
-        .sheet(isPresented: $showBulkDeleteResults) {
-            if let results = bulkDeleteResults {
-                DeleteResultsSheet(results: results, entityName: "Strategic Goal", entityNamePlural: "Strategic Goals")
+                // Refresh to get any additional updated data
+                loadProjects()
             }
+            .environmentObject(authManager)
         }
-        .sheet(isPresented: $showExportOptions) {
-            GenericExportOptionsSheet(
-                selectedItemCount: selectionManager.selectedCount,
-                entityName: "Strategic Goal",
-                entityNamePlural: "Strategic Goals",
-                onExport: { includeBlobs, format in
-                    performExportFromSelection(includeBlobs: includeBlobs, format: format)
-                },
-                isExporting: $exportManager.isExporting,
-                exportError: $exportManager.exportError
+        .fullScreenCover(item: $selectedProject) { project in
+            ProjectDetailView(
+                project: project, 
+                onUpdate: {
+                    loadProjects()
+                }
             )
         }
         .onAppear {
-            currentViewStyle = viewStyleManager.getViewStyle(for: "strategic_goals")
-            loadGoals()
-        }
-        .onChange(of: searchText) { oldValue, newValue in
-            updateFilterState()
-        }
-        .onChange(of: selectedStatuses) { oldValue, newValue in
-            updateFilterState()
+            loadProjects()
         }
     }
     
-    // MARK: - View Components
-    
-    private var mainScrollView: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                searchFiltersSection
-                goalsListSection
-            }
-            .background(ScrollOffsetReader())
-        }
-        .onScrollOffsetChanged { value in
-            let newScrollValue = value
-            // update scrollOffset for header collapse logic
-            withAnimation(.easeInOut(duration: 0.1)) {
-                scrollOffset = -newScrollValue
-            }
-            // detect scroll direction to collapse/expand action bar
-            let delta = newScrollValue - lastScrollValue
-            if delta < -10 {
-                // scrolled up (content moved up) -> hide action bar
-                withAnimation(.easeIn(duration: 0.2)) {
-                    isActionBarCollapsed = true
-                }
-            } else if delta > 10 {
-                // scrolled down (content moved down) -> show action bar
-                withAnimation(.easeOut(duration: 0.2)) {
-                    isActionBarCollapsed = false
-                }
-            }
-            lastScrollValue = newScrollValue
-            // maintain isScrolling flag
-            isScrolling = abs(newScrollValue) > 50
-        }
-    }
-    
-    private var searchFiltersSection: some View {
-        VStack(spacing: shouldHideTopSection ? 8 : 12) {
-            searchBar
-            statusFilters
-        }
-        .padding(.horizontal)
-        .padding(.bottom, shouldHideTopSection ? 8 : 16)
-        .background(Color(.systemBackground))
-        .animation(.easeInOut(duration: 0.3), value: shouldHideTopSection)
-    }
-    
-    private var searchBar: some View {
-        HStack {
-            Image(systemName: "magnifyingglass")
-                .foregroundColor(.secondary)
-            TextField("Search goals...", text: $searchText)
-            if !searchText.isEmpty {
-                Button(action: { searchText = "" }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
-                }
-            }
-        }
-        .padding(shouldHideTopSection ? 8 : 10)
-        .background(Color(.systemGray6))
-        .cornerRadius(8)
-    }
-    
-    private var statusFilters: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                MultiSelectFilterChip(title: "All", value: "all", selections: $selectedStatuses)
-                MultiSelectFilterChip(title: "On Track", value: "on_track", selections: $selectedStatuses, color: .green)
-                MultiSelectFilterChip(title: "At Risk", value: "at_risk", selections: $selectedStatuses, color: .orange)
-                MultiSelectFilterChip(title: "Behind", value: "behind", selections: $selectedStatuses, color: .red)
-                MultiSelectFilterChip(title: "Completed", value: "completed", selections: $selectedStatuses, color: .blue)
-            }
-        }
-    }
-    
-    private var goalsListSection: some View {
-        Group {
-            if isLoading {
-                LoadingView(message: "Loading goals...")
-            } else if filteredGoals.isEmpty {
-                emptyStateView
-            } else {
-                adaptiveListView
-            }
-        }
-    }
-    
-    private var emptyStateView: some View {
-        let showClearButton = !searchText.isEmpty || !selectedStatuses.contains("all")
-        
-        return EmptyStateView(
-            icon: "target",
-            title: "No goals found",
-            actionTitle: showClearButton ? "Clear Filters" : nil,
-            action: showClearButton ? {
-                    searchText = ""
-                    selectedStatuses = ["all"]
-            } : nil
-        )
-    }
-    
-    private var adaptiveListView: some View {
-        AdaptiveListView(
-            items: filteredGoals,
-            viewStyle: currentViewStyle,
-            onViewStyleChange: { newStyle in
-                currentViewStyle = newStyle
-                viewStyleManager.setViewStyle(newStyle, for: "strategic_goals")
-            },
-            onItemTap: { goal in
-                selectedGoal = goal
-            },
-            cardContent: { goal in
-                GoalCard(goal: goal, documentCounts: goalDocumentCounts)
-            },
-            tableColumns: StrategicGoalsView.tableColumns,
-            rowContent: { goal, columns in
-                StrategicGoalTableRow(goal: goal, columns: columns, documentCounts: goalDocumentCounts)
-            },
-            domainName: "strategic_goals",
-            userRole: authManager.currentUser?.role,
-            isInSelectionMode: $selectionManager.isInSelectionMode,
-            selectedItems: $selectionManager.selectedItems,
-            onFilterBasedSelectAll: {
-                // Trigger backend filter-aware selection
-                Task {
-                    await getFilteredGoalIds()
-                }
-            }
-        )
-    }
-    
-    private func loadGoals() {
+    /// Load projects from backend
+    private func loadProjects() {
         isLoading = true
         Task {
             guard let currentUser = authManager.currentUser else {
                 await MainActor.run {
-                    self.errorMessage = "User not authenticated."
-                    self.showErrorAlert = true
-                    self.isLoading = false
+                    isLoading = false
                 }
                 return
             }
@@ -382,1470 +275,150 @@ struct StrategicGoalsView: View {
                 offline_mode: false
             )
 
-            let result = await ffiHandler.list(pagination: PaginationDto(page: 1, perPage: 100), include: [.documentCounts], auth: authContext)
+            let result = await ffiHandler.list(
+                pagination: PaginationDto(page: 1, perPage: 100), 
+                include: [], 
+                auth: authContext
+            )
             
             await MainActor.run {
                 isLoading = false
                 switch result {
                 case .success(let paginatedResult):
-                    self.goals = paginatedResult.items
-                    updateStats()
-                    // Load document counts for all goals with delay if triggered by document upload
-                    loadDocumentCounts(withDelay: true)
+                    projects = paginatedResult.items
                 case .failure(let error):
-                    self.errorMessage = "Failed to load goals: \(error.localizedDescription)"
-                    self.showErrorAlert = true
-                }
-            }
-        }
-    }
-    
-    // MARK: - Helper Functions
-    
-    /// Load document counts with optional delay to ensure backend has processed uploads
-    private func loadDocumentCounts(withDelay: Bool = false) {
-        if withDelay {
-            // Add a small delay to ensure backend has processed any recent uploads
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.loadDocumentCountsInternal()
-            }
-        } else {
-            loadDocumentCountsInternal()
-        }
-    }
-    
-    private func loadDocumentCountsInternal() {
-        Task {
-            guard let currentUser = authManager.currentUser else { return }
-            
-            let authContext = AuthCtxDto(
-                userId: currentUser.userId,
-                role: currentUser.role,
-                deviceId: authManager.getDeviceId(),
-                offlineMode: false
-            )
-            
-            // Use the efficient backend function to get document counts for ALL goals in one call
-            let goalIds = goals.map(\.id)
-            
-            if goalIds.isEmpty {
-                print("📎 [DOCUMENT_COUNTS] No goals to check for documents")
-                return
-            }
-            
-            print("📎 [DOCUMENT_COUNTS] Getting document counts for \(goalIds.count) goals using backend function")
-            
-            let result = await documentHandler.getDocumentCountsByEntities(
-                relatedEntityIds: goalIds,
-                relatedTable: "strategic_goals",
-                auth: authContext
-            )
-            
-            await MainActor.run {
-                switch result {
-                case .success(let documentCounts):
-                    print("📎 [DEBUG] Backend returned \(documentCounts.count) count responses")
-                    
-                    // Debug: Print all returned counts
-                    for countResponse in documentCounts {
-                        if countResponse.documentCount > 0 {
-                            print("📎 [DEBUG] Backend says entity \(countResponse.entityId) has \(countResponse.documentCount) documents")
-                        }
-                    }
-                    
-                    // Clear existing counts
-                    self.goalDocumentCounts.removeAll()
-                    
-                    // Update with backend-provided counts
-                    for countResponse in documentCounts {
-                        self.goalDocumentCounts[countResponse.entityId] = Int(countResponse.documentCount)
-                    }
-                    
-                    // Ensure all goals have an entry (even if 0)
-                    for goal in self.goals {
-                        if self.goalDocumentCounts[goal.id] == nil {
-                            self.goalDocumentCounts[goal.id] = 0
-                        }
-                    }
-                    
-                    let goalsWithDocs = self.goalDocumentCounts.filter { $0.value > 0 }.count
-                    print("📎 [DOCUMENT_COUNTS] ✅ Backend function completed: \(goalsWithDocs)/\(self.goals.count) goals have documents")
-                    
-                    // Debug: Print final dictionary state
-                    print("📎 [DEBUG] Final goalDocumentCounts dictionary has \(self.goalDocumentCounts.count) entries")
-                    for (goalId, count) in self.goalDocumentCounts {
-                        if count > 0 {
-                            print("📎 [DEBUG] Dictionary entry: \(goalId) -> \(count)")
-                        }
-                    }
-                    
-                    // Debug: Print goals with documents for troubleshooting
-                    for goal in self.goals {
-                        if let count = self.goalDocumentCounts[goal.id], count > 0 {
-                            print("📎 [HAS_DOCS] \(goal.objectiveCode) (ID: \(goal.id)): \(count) documents")
-                        }
-                    }
-                    
-                case .failure(let error):
-                    print("❌ [DOCUMENT_COUNTS] Backend function failed: \(error)")
-                    
-                    // Fallback: Set all counts to 0 to prevent UI inconsistencies
-                    self.goalDocumentCounts.removeAll()
-                    for goal in self.goals {
-                        self.goalDocumentCounts[goal.id] = 0
-                    }
-                }
-            }
-            
-            // DEBUG: Try manual count for TRANSPORT-2024-016 to verify backend (outside MainActor.run)
-            // if case .failure = result {
-            //     await debugSingleGoalDocumentCount()
-            // }
-        }
-    }
-    
-    private func updateStats() {
-        totalGoals = goals.count
-        onTrackGoals = goals.filter { $0.statusId == 1 }.count
-        atRiskGoals = goals.filter { $0.statusId == 2 }.count
-        completedGoals = goals.filter { $0.statusId == 4 }.count
-    }
-    
-    // MARK: - Filter-Aware Bulk Selection
-    
-    /// Get filtered goal IDs for bulk selection based on current UI filters (backend filters only)
-    private func getFilteredGoalIds() async {
-        guard !selectionManager.isLoadingFilteredIds else { return }
-        
-        // Update current filter based on UI state (backend filters only - year/month handled by AdaptiveListView)
-        currentFilter = createCurrentFilter()
-        
-        // Check if we have any backend filters active (search, status, etc.)
-        let hasBackendFilters = !searchText.isEmpty || !selectedStatuses.contains("all")
-        
-        // If no backend filters are applied, select all visible items
-        if !hasBackendFilters {
-            await MainActor.run {
-                // Select all currently visible items (respecting AdaptiveListView's year/month filtering)
-                let allVisibleIds = Set(filteredGoals.map(\.id))
-                selectionManager.selectItems(allVisibleIds)
-            }
-            return
-        }
-        
-        await MainActor.run {
-            selectionManager.isLoadingFilteredIds = true
-        }
-        
-        guard let currentUser = authManager.currentUser else {
-            await MainActor.run {
-                selectionManager.isLoadingFilteredIds = false
-                errorMessage = "User not authenticated."
-                showErrorAlert = true
-            }
-            return
-        }
-        
-        let authContext = AuthContextPayload(
-            user_id: currentUser.userId,
-            role: currentUser.role,
-            device_id: authManager.getDeviceId(),
-            offline_mode: false
-        )
-        
-        let result = await ffiHandler.getFilteredIds(filter: currentFilter, auth: authContext)
-        
-        await MainActor.run {
-            selectionManager.isLoadingFilteredIds = false
-            switch result {
-            case .success(let filteredIds):
-                // Only select IDs that are currently visible (intersection with loaded data)
-                let visibleIds = Set(filteredGoals.map(\.id))
-                let filteredVisibleIds = Set(filteredIds).intersection(visibleIds)
-                selectionManager.selectItems(filteredVisibleIds)
-            case .failure(let error):
-                errorMessage = "Failed to get filtered IDs: \(error.localizedDescription)"
-                showErrorAlert = true
-            }
-        }
-    }
-    
-    /// Update filter when UI state changes (backend filters only)
-    private func updateFilterState() {
-        // Update current filter based on UI changes (backend filters only)
-        currentFilter = createCurrentFilter()
-        
-        // Check if we have backend filters active
-        let hasBackendFilters = !searchText.isEmpty || !selectedStatuses.contains("all")
-        
-        // If in selection mode with backend filters, refresh the selection
-        if selectionManager.isInSelectionMode && hasBackendFilters {
-            Task {
-                await getFilteredGoalIds()
-            }
-        } else if !hasBackendFilters && selectionManager.isInSelectionMode {
-            // If no backend filters but still in selection mode, keep current selection
-            // (Year/month filtering is handled by AdaptiveListView)
-            // Don't clear selection automatically
-        }
-    }
-    
-    /// DEBUG: Manual count for a specific goal to verify backend
-    private func debugSingleGoalDocumentCount() async {
-        guard let currentUser = authManager.currentUser else { return }
-        
-        let authContext = AuthCtxDto(
-            userId: currentUser.userId,
-            role: currentUser.role,
-            deviceId: authManager.getDeviceId(),
-            offlineMode: false
-        )
-        
-        // Look for TRANSPORT-2024-016 goal
-        if let transportGoal = goals.first(where: { $0.objectiveCode == "TRANSPORT-2024-016" }) {
-            print("📎 [DEBUG_MANUAL] Found TRANSPORT-2024-016 goal with ID: \(transportGoal.id)")
-            
-            // Try the individual document listing to compare
-            let result = await documentHandler.listDocumentsByEntity(
-                relatedTable: "strategic_goals",
-                relatedId: transportGoal.id,
-                pagination: PaginationDto(page: 1, perPage: 10),
-                include: [],
-                auth: authContext
-            )
-            
-            switch result {
-            case .success(let paginatedResult):
-                print("📎 [DEBUG_MANUAL] listDocumentsByEntity found \(paginatedResult.total) documents for TRANSPORT-2024-016")
-                if paginatedResult.total > 0 {
-                    print("📎 [DEBUG_MANUAL] ✅ This goal DOES have documents! Backend issue confirmed.")
-                    for doc in paginatedResult.items.prefix(3) {
-                        print("📎 [DEBUG_MANUAL] Document: \(doc.originalFilename)")
-                    }
-                }
-            case .failure(let error):
-                print("📎 [DEBUG_MANUAL] listDocumentsByEntity failed: \(error)")
-            }
-        } else {
-            print("📎 [DEBUG_MANUAL] TRANSPORT-2024-016 goal not found")
-            // Debug: Print all goal codes to see what's available
-            print("📎 [DEBUG_MANUAL] Available goal codes: \(goals.prefix(10).map(\.objectiveCode))")
-        }
-    }
-    
-    /// Debug compression system
-    private func debugCompression() async {
-        print("🔧 [DEBUG] Starting compression debug...")
-        
-        // Call FFI debug function
-        var result: UnsafeMutablePointer<CChar>?
-        let status = compression_debug_info(&result)
-        
-        if let resultStr = result {
-            defer { compression_free(resultStr) }
-            
-            if status == 0 {
-                let debugResponse = String(cString: resultStr)
-                print("🔧 [DEBUG] Compression debug info:")
-                print(debugResponse)
-                
-                // Parse JSON response and extract debug info
-                if let data = debugResponse.data(using: .utf8),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let debugInfo = json["debug_info"] as? String {
-                    
-                    DispatchQueue.main.async {
-                        // Show debug info in an alert or console
-                        self.showDebugAlert(title: "Compression Debug Info", message: debugInfo)
-                    }
-                }
-            } else {
-                print("❌ [DEBUG] Failed to get compression debug info")
-                DispatchQueue.main.async {
-                    self.showDebugAlert(title: "Debug Error", message: "Failed to get compression debug information")
-                }
-            }
-        }
-        
-        // Additional debugging: Check for stuck documents
-        await checkStuckDocuments()
-        
-        // Additional debugging: Verify database constraints
-        await checkDatabaseConstraints()
-    }
-    
-    /// Check for documents stuck in processing/compression states
-    private func checkStuckDocuments() async {
-        print("🔍 [DEBUG] Checking for stuck documents...")
-        
-        // This would ideally call a backend function to find stuck documents
-        // For now, we'll add this as a placeholder for future implementation
-        print("📊 [DEBUG] Stuck document check completed")
-    }
-    
-    /// Check database constraints that might be causing failures
-    private func checkDatabaseConstraints() async {
-        print("🗃️ [DEBUG] Checking database constraints...")
-        
-        // This would check for:
-        // 1. Status constraint mismatches
-        // 2. Foreign key violations
-        // 3. Locking issues
-        print("🔒 [DEBUG] Database constraint check completed")
-    }
-    
-    /// Reset stuck compression jobs with comprehensive database fixes
-    private func resetStuckCompressions() async {
-        print("🔄 [RESET] Starting comprehensive compression reset...")
-        
-        guard let currentUser = authManager.currentUser else {
-            await MainActor.run {
-                showDebugAlert(title: "Reset Failed", message: "User not authenticated")
-            }
-            return
-        }
-        
-        let authContext = AuthContextPayload(
-            user_id: currentUser.userId,
-            role: currentUser.role,
-            device_id: authManager.getDeviceId(),
-            offline_mode: false
-        )
-        
-        let compressionHandler = CompressionFFIHandler()
-        let request = ComprehensiveResetRequest(
-            timeoutMinutes: 10, // Reset jobs stuck for more than 10 minutes
-            auth: authContext
-        )
-        
-        let result = await compressionHandler.resetStuckJobsComprehensive(request: request)
-        
-        await MainActor.run {
-            switch result {
-            case .success(let response):
-                let issuesText = response.issuesFound.isEmpty ? 
-                    "No issues found" : 
-                    "📊 ISSUES FIXED:\n" + response.issuesFound.map { "• \($0)" }.joined(separator: "\n")
-                
-                let recommendationsText = response.recommendations.isEmpty ? 
-                    "" : 
-                    "\n\n🔧 SYSTEM STATUS:\n" + response.recommendations.map { "• \($0)" }.joined(separator: "\n")
-                
-                let message = """
-                ✅ Comprehensive Reset Complete
-                Reset \(response.resetCount) database entries.
-                
-                \(issuesText)\(recommendationsText)
-                
-                Your compression system is now optimized and ready for use.
-                """
-                print("✅ [RESET] \(message)")
-                showDebugAlert(title: "Compression System Fixed", message: message)
-            case .failure(let error):
-                let message = """
-                ❌ Failed to reset compression system: \(error.localizedDescription)
-                
-                🚨 CRITICAL ISSUES:
-                Your compression system needs manual intervention.
-                
-                ⚠️ RECOMMENDED ACTIONS:
-                1. Check database file permissions
-                2. Restart the application
-                3. Check available disk space
-                4. Contact support if issues persist
-                """
-                print("❌ [RESET] \(message)")
-                showDebugAlert(title: "Reset Failed", message: message)
-            }
-        }
-    }
-    
-    /// Enhanced debug alert with detailed compression analysis
-    private func showDebugAlert(title: String, message: String) {
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        
-        // Add copy button
-        alert.addAction(UIAlertAction(title: "Copy Details", style: .default) { _ in
-            let fullMessage = """
-            \(title)
-            
-            \(message)
-            
-            📊 LOG ANALYSIS:
-            • PDF: 2.8MB → 2.8MB (0.03% reduction) - ineffective but working
-            • DOCX: 32KB → 0 bytes - CRITICAL DATA LOSS
-            • HTML: 14KB → 2KB (85% reduction) - working correctly
-            
-            🚨 DATABASE ERRORS:
-            • CHECK constraint failed: status IN ('pending', 'processing', 'completed', 'failed')
-            • Database locked errors from concurrent operations
-            
-            🔧 IMMEDIATE FIXES NEEDED:
-            1. Change 'in_progress' to 'processing' in Rust code
-            2. Fix DOCX compressor zero-byte output
-            3. Add database retry logic for locking
-            4. Add compression validation before file save
-            """
-            UIPasteboard.general.string = fullMessage
-        })
-        
-        // Add view logs button
-        alert.addAction(UIAlertAction(title: "View Analysis", style: .default) { _ in
-            // This could open a detailed log viewer
-            print("📋 [DEBUG] User requested detailed analysis")
-        })
-        
-        // Add close button
-        alert.addAction(UIAlertAction(title: "Close", style: .cancel))
-        
-        // Present the alert
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootViewController = windowScene.windows.first?.rootViewController {
-            rootViewController.present(alert, animated: true)
-        }
-    }
-    
-    /// Helper to detect document type based on file extension
-    private func detectDocumentType(for filename: String) async -> String? {
-        let fileExtension = (filename as NSString).pathExtension.lowercased()
-        
-        // First try to get document types from backend
-        let authContext = AuthContextPayload(
-            user_id: authManager.currentUser?.userId ?? "",
-            role: authManager.currentUser?.role ?? "",
-            device_id: authManager.getDeviceId(),
-            offline_mode: false
-        )
-        
-        // Get document types and find one that matches this extension
-        var result: UnsafeMutablePointer<CChar>?
-        let status = document_type_list(
-            """
-            {
-                "pagination": {"page": 1, "per_page": 50},
-                "auth": \(encodeToJSON(authContext) ?? "{}")
-            }
-            """,
-            &result
-        )
-        
-        if let resultStr = result {
-            defer { document_free(resultStr) }
-            
-            if status == 0,
-               let data = String(cString: resultStr).data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let items = json["items"] as? [[String: Any]] {
-                
-                // Find document type that supports this extension
-                for item in items {
-                    if let allowedExtensions = item["allowed_extensions"] as? String,
-                       let docTypeId = item["id"] as? String {
-                        let extensions = allowedExtensions.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-                        if extensions.contains(fileExtension) {
-                            print("🔍 [DOC_TYPE] Found matching document type for .\(fileExtension): \(docTypeId)")
-                            return docTypeId
-                        }
-                    }
-                }
-            }
-        }
-        
-        print("⚠️ [DOC_TYPE] No specific document type found for .\(fileExtension), using default")
-        return nil // Will use default document type
-    }
-    
-    /// Helper to get default document type ID (Document type)
-    private func getDefaultDocumentTypeId() async -> String? {
-        let authContext = AuthContextPayload(
-            user_id: authManager.currentUser?.userId ?? "",
-            role: authManager.currentUser?.role ?? "",
-            device_id: authManager.getDeviceId(),
-            offline_mode: false
-        )
-        
-        // Get document types and find "Document" type
-        var result: UnsafeMutablePointer<CChar>?
-        let status = document_type_list(
-            """
-            {
-                "pagination": {"page": 1, "per_page": 50},
-                "auth": \(encodeToJSON(authContext) ?? "{}")
-            }
-            """,
-            &result
-        )
-        
-        if let resultStr = result {
-            defer { document_free(resultStr) }
-            
-            if status == 0,
-               let data = String(cString: resultStr).data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let items = json["items"] as? [[String: Any]] {
-                
-                // Find "Document" type as default
-                for item in items {
-                    if let name = item["name"] as? String,
-                       let docTypeId = item["id"] as? String,
-                       name.lowercased() == "document" {
-                        print("🔍 [DOC_TYPE] Found default Document type: \(docTypeId)")
-                        return docTypeId
-                    }
-                }
-                
-                // If no "Document" type found, use the first one
-                if let firstItem = items.first,
-                   let docTypeId = firstItem["id"] as? String {
-                    print("🔍 [DOC_TYPE] Using first available document type: \(docTypeId)")
-                    return docTypeId
-                }
-            }
-        }
-        
-        print("❌ [DOC_TYPE] No document types found!")
-        return nil
-    }
-    
-    /// Helper to encode objects to JSON string
-    private func encodeToJSON<T: Codable>(_ object: T) -> String? {
-        guard let data = try? JSONEncoder().encode(object) else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-    
-    /// Open a document for viewing
-    private func openDocument(_ document: MediaDocumentResponse) {
-        guard !isOpeningDocument else { return }
-        
-        isOpeningDocument = true
-        
-        Task {
-            guard let currentUser = authManager.currentUser else {
-                await MainActor.run {
-                    self.errorMessage = "User not authenticated."
-                    self.showErrorAlert = true
-                    self.isOpeningDocument = false
-                }
-                return
-            }
-            
-            let authContext = AuthCtxDto(
-                userId: currentUser.userId,
-                role: currentUser.role,
-                deviceId: authManager.getDeviceId(),
-                offlineMode: false
-            )
-            
-            print("📖 [DOCUMENT_OPEN] Opening document: \(document.title ?? document.originalFilename)")
-            
-            let result = await documentHandler.openDocument(id: document.id, auth: authContext)
-            
-            await MainActor.run {
-                self.isOpeningDocument = false
-                
-                switch result {
-                case .success(let openResponse):
-                    if let filePath = openResponse.filePath {
-                        print("📖 [DOCUMENT_OPEN] ✅ Got file path: \(filePath)")
-                        
-                        // Convert file path to URL
-                        let fileURL: URL
-                        if filePath.hasPrefix("file://") {
-                            fileURL = URL(string: filePath)!
-                        } else {
-                            fileURL = URL(fileURLWithPath: filePath)
-                        }
-                        
-                        // Check if file exists before trying to open
-                        if FileManager.default.fileExists(atPath: fileURL.path) {
-                            print("📖 [DOCUMENT_OPEN] ✅ File exists, opening with QuickLook")
-                            
-                            // Debug: Check actual file type vs filename
-                            let filename = fileURL.lastPathComponent
-                            let fileExtension = (filename as NSString).pathExtension.lowercased()
-                            print("📖 [DOCUMENT_OPEN] File extension from name: .\(fileExtension)")
-                            
-                            // Try to detect actual file type by reading file header
-                            if let fileData = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]) {
-                                let fileSize = fileData.count
-                                print("📖 [DOCUMENT_OPEN] Actual file size: \(fileSize) bytes")
-                                
-                                if fileSize >= 8 {
-                                    let header = fileData.prefix(8)
-                                    let headerHex = header.map { String(format: "%02x", $0) }.joined()
-                                    print("📖 [DOCUMENT_OPEN] File header (hex): \(headerHex)")
-                                    
-                                    // Check for common video file signatures
-                                    if headerHex.hasPrefix("00000018") || headerHex.hasPrefix("00000020") {
-                                        print("📖 [DOCUMENT_OPEN] 🎬 DETECTED: This appears to be an MP4 video file!")
-                                    } else if headerHex.hasPrefix("ffd8ff") {
-                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a JPEG image file")
-                                    } else if headerHex.hasPrefix("89504e47") {
-                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a PNG image file")
-                                    } else {
-                                        print("📖 [DOCUMENT_OPEN] ❓ DETECTED: Unknown file type with header: \(headerHex)")
-                                    }
-                                }
-                            }
-                            
-                            // Open with QuickLook
-                            self.selectedDocumentURL = IdentifiableURL(url: fileURL)
-                        } else {
-                            print("📖 [DOCUMENT_OPEN] ❌ File does not exist at path: \(fileURL.path)")
-                            self.errorMessage = "Document file not found on device. It may need to be downloaded first."
-                            self.showErrorAlert = true
-                        }
-                    } else {
-                        print("📖 [DOCUMENT_OPEN] ❌ No file path returned")
-                        self.errorMessage = "Document is not available locally. It may need to be downloaded first."
-                        self.showErrorAlert = true
-                    }
-                    
-                case .failure(let error):
-                    print("📖 [DOCUMENT_OPEN] ❌ Failed to open document: \(error)")
-                    
-                    // Check if it's a compression-related error
-                    let errorMessage = error.localizedDescription
-                    if errorMessage.contains("being compressed") {
-                        self.errorMessage = "Document is currently being compressed. You can still view it, but there may be a brief delay."
-                        self.showErrorAlert = true
-                        
-                        // Try again after a short delay for compression case
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            self.openDocument(document)
-                        }
-                    } else {
-                        self.errorMessage = "Failed to open document: \(errorMessage)"
-                        self.showErrorAlert = true
-                    }
-                }
-            }
-        }
-    }
-    
-    // MARK: - Selection Action Bar
-    // Selection action bar is now using shared SelectionActionBar component
-    
-    // MARK: - Export Methods
-    
-    private func performExportFromSelection(includeBlobs: Bool = false, format: ExportFormat = .default) {
-        guard !selectionManager.selectedItems.isEmpty else { return }
-        
-        print("🔄 Starting export from selection mode for \(selectionManager.selectedCount) items, includeBlobs: \(includeBlobs), format: \(format.displayName)")
-        
-        Task {
-            guard let currentUser = authManager.currentUser else {
-                await MainActor.run {
-                    self.errorMessage = "User not authenticated."
-                    self.showErrorAlert = true
-                }
-                return
-            }
-            
-            let selectedIdsArray = Array(selectionManager.selectedItems)
-            
-            await exportManager.exportSelectedItems(
-                    ids: selectedIdsArray,
-                    includeBlobs: includeBlobs,
-                    format: format,
-                authToken: currentUser.token,
-                onClearSelection: {
-                    // This will be called by the export manager when export completes
-                    self.selectionManager.clearSelection()
-                    self.showExportOptions = false
-                },
-                onCompletion: { success in
-                    // Handle completion if needed
-                    if !success {
-                        print("❌ Export completed with errors")
-                    }
-                }
-            )
-        }
-    }
-    
-    // MARK: - Export Helper Methods
-    // Export functionality is now handled by ExportManager
-    
-    // MARK: - Bulk Delete Methods
-    
-    private func performBulkDelete(hardDelete: Bool, force: Bool = false) {
-        guard !selectionManager.selectedItems.isEmpty else { return }
-        
-        isPerformingBulkDelete = true
-        
-        Task {
-            guard let currentUser = authManager.currentUser else {
-                await MainActor.run {
-                    self.errorMessage = "User not authenticated."
-                    self.showErrorAlert = true
-                    self.isPerformingBulkDelete = false
-                }
-                return
-            }
-            
-            let authContext = AuthContextPayload(
-                user_id: currentUser.userId,
-                role: currentUser.role,
-                device_id: authManager.getDeviceId(),
-                offline_mode: false
-            )
-            
-            let selectedIds = Array(selectionManager.selectedItems)
-            print("🗑️ [BULK_DELETE] Starting bulk delete for \(selectedIds.count) strategic goals")
-            print("🗑️ [BULK_DELETE] Hard delete: \(hardDelete), Force: \(force)")
-            
-            let result = await ffiHandler.bulkDelete(
-                ids: selectedIds,
-                hardDelete: hardDelete,
-                force: force,
-                auth: authContext
-            )
-            
-            await MainActor.run {
-                self.isPerformingBulkDelete = false
-                
-                switch result {
-                case .success(let batchResult):
-                    print("✅ [BULK_DELETE] Bulk delete completed")
-                    print("✅ [BULK_DELETE] Hard deleted: \(batchResult.hardDeleted.count)")
-                    print("✅ [BULK_DELETE] Soft deleted: \(batchResult.softDeleted.count)")
-                    print("✅ [BULK_DELETE] Failed: \(batchResult.failed.count)")
-                    
-                    // Store results for display
-                    self.bulkDeleteResults = batchResult
-                    
-                    // Clear selection and refresh data using shared manager
-                    self.selectionManager.clearSelection()
-                    
-                    // Refresh the goals list to reflect changes
-                    loadGoals()
-                    
-                    // Show results if there were any failures or mixed results
-                    if !batchResult.failed.isEmpty || !batchResult.dependencies.isEmpty {
-                        self.showBulkDeleteResults = true
-                    }
-                    
-                case .failure(let error):
-                    print("❌ [BULK_DELETE] Bulk delete failed: \(error)")
-                    self.errorMessage = "Bulk delete failed: \(error.localizedDescription)"
-                    self.showErrorAlert = true
+                    print("Failed to load projects: \(error.localizedDescription)")
                 }
             }
         }
     }
 }
 
-// MARK: - Goal Card Component
-struct GoalCard: View {
-    let goal: StrategicGoalResponse
-    let documentCounts: [String: Int]
+// MARK: - Project Row Component
+struct ProjectRowView: View {
+    let project: ProjectResponse
     
-    private var progress: Double {
-        let rawProgress = goal.progressPercentage ?? 0.0
-        // Ensure progress is a valid number and within bounds
-        if rawProgress.isNaN || rawProgress.isInfinite {
-            return 0.0
-        }
-        return max(0.0, rawProgress)
-    }
-    
-    private var statusInfo: (text: String, color: Color) {
-        switch goal.statusId {
-        case 1: return ("On Track", .green)
-        case 2: return ("At Risk", .orange)
-        case 3: return ("Behind", .red)
-        case 4: return ("Completed", .blue)
-        default: return ("Unknown", .gray)
-        }
-    }
-
     var body: some View {
-            VStack(alignment: .leading, spacing: 12) {
-                // Header
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 4) {
-                            Text(goal.objectiveCode)
-                                .font(.caption)
-                                .fontWeight(.medium)
-                                .foregroundColor(.secondary)
-                            
-                            if goal.hasDocumentsTracked(in: documentCounts) {
-                                Image(systemName: "paperclip")
-                                    .font(.caption2)
-                                    .foregroundColor(.blue)
-                            }
-                        }
-                        
-                        Text(goal.outcome ?? "N/A")
-                            .font(.subheadline)
-                            .fontWeight(.medium)
-                            .foregroundColor(.primary)
-                            .lineLimit(2)
-                    }
-                    
-                    Spacer()
-                    
-                    Badge(text: statusInfo.text, color: statusInfo.color)
-                }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(project.name)
+                    .font(.headline)
+                    .foregroundColor(.primary)
                 
-                // KPI and Team
-                HStack {
-                    Label(goal.kpi ?? "N/A", systemImage: "chart.line.uptrend.xyaxis")
+                Spacer()
+                
+                // Status badge
+                Text(project.statusName)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(project.statusColor.opacity(0.2))
+                    .foregroundColor(project.statusColor)
+                    .cornerRadius(12)
+            }
+            
+            if let objective = project.objective, !objective.isEmpty {
+                Text(objective)
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+            
+            HStack {
+                if let team = project.responsibleTeam, !team.isEmpty {
+                    Label(team, systemImage: "person.2")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                        .lineLimit(1)
-                    
-                    Spacer()
-                    
-                    Label(goal.responsibleTeam ?? "N/A", systemImage: "person.2")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
                 }
                 
-                // Progress Bar
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Progress")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Text("\(Int(progress))%")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(progress > 100 ? .purple : .primary)
-                    }
-                    
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color(.systemGray5))
-                                .frame(height: 8)
-                            
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(progress > 100 ? .purple : statusInfo.color)
-                                .frame(width: geometry.size.width * min(progress / 100, 1.0), height: 8)
-                        }
-                    }
-                    .frame(height: 8)
-                }
+                Spacer()
                 
-                // Bottom Info
-                HStack {
-                    HStack(spacing: 4) {
-                        Text("Target:")
-                        Text("\(Int(goal.targetValue ?? 0))")
-                            .fontWeight(.medium)
-                    }
+                Text(formatDate(project.updatedAt))
                     .font(.caption)
-                    
-                    Spacer()
-                    
-                    HStack(spacing: 4) {
-                        Text("Actual:")
-                        Text("\(Int(goal.actualValue ?? 0))")
-                            .fontWeight(.medium)
-                    }
-                    .font(.caption)
-                    
-                    Spacer()
-                    
-                    if goal.syncPriority == .high {
-                        Label("High Priority", systemImage: "arrow.up.circle.fill")
-                            .font(.caption2)
-                            .foregroundColor(.red)
-                    }
-                }
+                    .foregroundColor(.secondary)
             }
-            .padding()
-            .background(Color(.systemBackground))
-            .cornerRadius(12)
-            .shadow(color: Color.black.opacity(0.05), radius: 3, x: 0, y: 2)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color(.systemGray5), lineWidth: 1)
-            )
+        }
+        .padding(.vertical, 4)
+    }
+    
+    private func formatDate(_ dateString: String) -> String {
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: dateString) {
+            let displayFormatter = DateFormatter()
+            displayFormatter.dateStyle = .medium
+            return displayFormatter.string(from: date)
+        }
+        return dateString
     }
 }
 
-
-
-
-
-
-
-// MARK: - Create Goal Sheet
-struct CreateGoalSheet: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var authManager: AuthenticationManager
-    let ffiHandler: StrategicGoalFFIHandler
-    let onSave: (StrategicGoalResponse) -> Void
-    
-    @State private var objectiveCode = ""
-    @State private var outcome = ""
-    @State private var kpi = ""
-    @State private var targetValue = ""
-    @State private var actualValue = ""
-    @State private var statusId: Int64 = 1
-    @State private var responsibleTeam = ""
-    @State private var syncPriority: SyncPriority = .normal
-    @State private var isLoading = false
-    @State private var errorMessage: String?
-    
-    // For focus management
-    private enum Field: Hashable {
-        case objectiveCode, outcome, kpi, targetValue, actualValue, responsibleTeam
-    }
-    @FocusState private var focusedField: Field?
-    
-    private var canSave: Bool {
-        !objectiveCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !outcome.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !isLoading
-    }
-    
-    var body: some View {
-        NavigationView {
-            Form {
-                Section("Goal Information") {
-                    TextField("Objective Code", text: $objectiveCode)
-                        .focused($focusedField, equals: .objectiveCode)
-                        .textInputAutocapitalization(.characters)
-                        .submitLabel(.next)
-                        .disableAutocorrection(true)
-                        .textFieldStyle(.plain)
-                    
-                    TextField("Outcome", text: $outcome, axis: .vertical)
-                        .focused($focusedField, equals: .outcome)
-                        .lineLimit(2...4)
-                        .submitLabel(.next)
-                        .disableAutocorrection(true)
-                        .textFieldStyle(.plain)
-                    
-                    TextField("KPI", text: $kpi)
-                        .focused($focusedField, equals: .kpi)
-                        .submitLabel(.next)
-                        .disableAutocorrection(true)
-                        .textFieldStyle(.plain)
-                }
-                
-                Section("Metrics") {
-                    HStack {
-                        TextField("Target Value", text: $targetValue)
-                            .focused($focusedField, equals: .targetValue)
-                            .keyboardType(.decimalPad)
-                            .submitLabel(.next)
-                            .disableAutocorrection(true)
-                            .textFieldStyle(.plain) // Reduces rendering overhead
-                        Text("Target")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    HStack {
-                        TextField("Actual Value", text: $actualValue)
-                            .focused($focusedField, equals: .actualValue)
-                            .keyboardType(.decimalPad)
-                            .submitLabel(.done)
-                            .disableAutocorrection(true)
-                            .textFieldStyle(.plain) // Reduces rendering overhead
-                        Text("Actual")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                
-                Section("Details") {
-                    Picker("Status", selection: $statusId) {
-                        Text("On Track").tag(Int64(1))
-                        Text("At Risk").tag(Int64(2))
-                        Text("Behind").tag(Int64(3))
-                        Text("Completed").tag(Int64(4))
-                    }
-                    .pickerStyle(.menu) // More responsive than default picker
-                    
-                    TextField("Responsible Team", text: $responsibleTeam)
-                        .focused($focusedField, equals: .responsibleTeam)
-                        .submitLabel(.done)
-                        .disableAutocorrection(true)
-                        .textFieldStyle(.plain)
-                    
-                    Picker("Sync Priority", selection: $syncPriority) {
-                        Text("Low").tag(SyncPriority.low)
-                        Text("Normal").tag(SyncPriority.normal)
-                        Text("High").tag(SyncPriority.high)
-                    }
-                    .pickerStyle(.menu) // More responsive than default picker
-                }
-                
-                if let error = errorMessage {
-                    Section {
-                        Text(error)
-                            .foregroundColor(.red)
-                            .font(.caption)
-                    }
-                }
-            }
-            .navigationTitle("Create Strategic Goal")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") { 
-                        // Haptic feedback for better UX
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        dismiss() 
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Save") {
-                        // Haptic feedback for better UX
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        createGoal()
-                    }
-                    .disabled(!canSave)
-                }
-            }
-            .disabled(isLoading)
-            .overlay {
-                if isLoading {
-                    Color.black.opacity(0.3)
-                        .ignoresSafeArea()
-                    ProgressView("Creating goal...")
-                        .scaleEffect(1.2)
-                }
-            }
-        }     // end NavigationView
-         .interactiveDismissDisabled(isLoading) // Prevent accidental dismissal during creation
-         .onAppear {
-             // Give focus to the first field when the sheet appears
-             focusedField = .objectiveCode
-         }
-    } // end body of CreateGoalSheet
-
-    private func createGoal() {
-        // Dismiss keyboard before starting creation
-        focusedField = nil
-        
-        isLoading = true
-        errorMessage = nil
-        
-        let code = objectiveCode.isEmpty ? "GOAL-\(Int(Date().timeIntervalSince1970))" : objectiveCode
-        
-        guard let currentUser = authManager.currentUser else {
-            self.errorMessage = "User not authenticated."
-            self.isLoading = false
-            return
-        }
-        
-        let authContext = AuthContextPayload(
-            user_id: currentUser.userId,
-            role: currentUser.role,
-            device_id: authManager.getDeviceId(),
-            offline_mode: false
-        )
-
-        let newGoal = NewStrategicGoal(
-            objectiveCode: code,
-            outcome: outcome.isEmpty ? nil : outcome,
-            kpi: kpi.isEmpty ? nil : kpi,
-            targetValue: targetValue.isEmpty ? nil : Double(targetValue),
-            actualValue: actualValue.isEmpty ? nil : Double(actualValue),
-            statusId: statusId,
-            responsibleTeam: responsibleTeam.isEmpty ? nil : responsibleTeam,
-            syncPriority: syncPriority,
-            createdByUserId: currentUser.userId
-        )
-
-        Task {
-            let result = await ffiHandler.create(newGoal: newGoal, auth: authContext)
-            
-            await MainActor.run {
-                isLoading = false
-                switch result {
-                case .success(let createdGoal):
-                    // Success haptic feedback
-                    UINotificationFeedbackGenerator().notificationOccurred(.success)
-                    onSave(createdGoal)
-                    dismiss()
-                case .failure(let error):
-                    // Error haptic feedback
-                    UINotificationFeedbackGenerator().notificationOccurred(.error)
-                    errorMessage = "Failed to create goal: \(error.localizedDescription)"
-                }
-            }
-                    }
-            }
-}
-
-// MARK: - Edit Goal Sheet
-struct EditGoalSheet: View {
-    @Environment(\.dismiss) var dismiss
-    @EnvironmentObject var authManager: AuthenticationManager
-    let goal: StrategicGoalResponse
-    let ffiHandler: StrategicGoalFFIHandler
-    let onSave: (StrategicGoalResponse) -> Void
-    
-    @State private var objectiveCode = ""
-    @State private var outcome = ""
-    @State private var kpi = ""
-    @State private var targetValue = ""
-    @State private var actualValue = ""
-    @State private var statusId: Int64 = 1
-    @State private var responsibleTeam = ""
-    @State private var syncPriority: SyncPriority = .normal
-    @State private var isLoading = false
-    @State private var errorMessage: String?
-    
-    // For focus management
-    private enum Field: Hashable {
-        case objectiveCode, outcome, kpi, targetValue, actualValue, responsibleTeam
-    }
-    @FocusState private var focusedField: Field?
-    
-    private var canSave: Bool {
-        !objectiveCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !outcome.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !isLoading
-    }
-    
-    var body: some View {
-        NavigationView {
-            Form {
-                Section("Goal Information") {
-                    TextField("Objective Code", text: $objectiveCode)
-                        .focused($focusedField, equals: .objectiveCode)
-                        .textInputAutocapitalization(.characters)
-                        .submitLabel(.next)
-                        .disableAutocorrection(true)
-                        .textFieldStyle(.plain)
-                    
-                    TextField("Outcome", text: $outcome, axis: .vertical)
-                        .focused($focusedField, equals: .outcome)
-                        .lineLimit(2...4)
-                        .submitLabel(.next)
-                        .disableAutocorrection(true)
-                        .textFieldStyle(.plain)
-                    
-                    TextField("KPI", text: $kpi)
-                        .focused($focusedField, equals: .kpi)
-                        .submitLabel(.next)
-                        .disableAutocorrection(true)
-                        .textFieldStyle(.plain)
-                }
-                
-                Section("Metrics") {
-                    HStack {
-                        TextField("Target Value", text: $targetValue)
-                            .focused($focusedField, equals: .targetValue)
-                            .keyboardType(.decimalPad)
-                            .submitLabel(.next)
-                            .disableAutocorrection(true)
-                            .textFieldStyle(.plain)
-                        Text("Target")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    HStack {
-                        TextField("Actual Value", text: $actualValue)
-                            .focused($focusedField, equals: .actualValue)
-                            .keyboardType(.decimalPad)
-                            .submitLabel(.done)
-                            .disableAutocorrection(true)
-                            .textFieldStyle(.plain)
-                        Text("Actual")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-                
-                Section("Details") {
-                    Picker("Status", selection: $statusId) {
-                        Text("On Track").tag(Int64(1))
-                        Text("At Risk").tag(Int64(2))
-                        Text("Behind").tag(Int64(3))
-                        Text("Completed").tag(Int64(4))
-                    }
-                    .pickerStyle(.menu)
-                    
-                    TextField("Responsible Team", text: $responsibleTeam)
-                        .focused($focusedField, equals: .responsibleTeam)
-                        .submitLabel(.done)
-                        .disableAutocorrection(true)
-                        .textFieldStyle(.plain)
-                    
-                    Picker("Sync Priority", selection: $syncPriority) {
-                        Text("Low").tag(SyncPriority.low)
-                        Text("Normal").tag(SyncPriority.normal)
-                        Text("High").tag(SyncPriority.high)
-                    }
-                    .pickerStyle(.menu)
-                }
-                
-                if let error = errorMessage {
-                    Section {
-                        Text(error)
-                            .foregroundColor(.red)
-                            .font(.caption)
-                    }
-                }
-            }
-            .navigationTitle("Edit Strategic Goal")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") { 
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        dismiss() 
-                    }
-                }
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Save") {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        updateGoal()
-                    }
-                    .disabled(!canSave)
-                }
-            }
-            .disabled(isLoading)
-            .overlay {
-                if isLoading {
-                    Color.black.opacity(0.3)
-                        .ignoresSafeArea()
-                    ProgressView("Updating goal...")
-                        .scaleEffect(1.2)
-                }
-            }
-        }
-        .interactiveDismissDisabled(isLoading)
-        .onAppear {
-            populateFields()
-            focusedField = .objectiveCode
-        }
-    }
-    
-    private func populateFields() {
-        objectiveCode = goal.objectiveCode
-        outcome = goal.outcome ?? ""
-        kpi = goal.kpi ?? ""
-        targetValue = goal.targetValue != nil ? String(goal.targetValue!) : ""
-        actualValue = goal.actualValue != nil ? String(goal.actualValue!) : ""
-        statusId = goal.statusId ?? 1
-        responsibleTeam = goal.responsibleTeam ?? ""
-        syncPriority = goal.syncPriority
-    }
-    
-    private func updateGoal() {
-        focusedField = nil
-        isLoading = true
-        errorMessage = nil
-        
-        guard let currentUser = authManager.currentUser else {
-            self.errorMessage = "User not authenticated."
-            self.isLoading = false
-            return
-        }
-        
-        let authContext = AuthContextPayload(
-            user_id: currentUser.userId,
-            role: currentUser.role,
-            device_id: authManager.getDeviceId(),
-            offline_mode: false
-        )
-
-        let updateGoal = UpdateStrategicGoal(
-            objectiveCode: objectiveCode.isEmpty ? nil : objectiveCode,
-            outcome: outcome.isEmpty ? nil : outcome,
-            kpi: kpi.isEmpty ? nil : kpi,
-            targetValue: targetValue.isEmpty ? nil : Double(targetValue),
-            actualValue: actualValue.isEmpty ? nil : Double(actualValue),
-            statusId: statusId,
-            responsibleTeam: responsibleTeam.isEmpty ? nil : responsibleTeam,
-            syncPriority: syncPriority,
-            updatedByUserId: currentUser.userId
-        )
-
-        Task {
-            let result = await ffiHandler.update(id: goal.id, update: updateGoal, auth: authContext)
-            
-            await MainActor.run {
-                isLoading = false
-                switch result {
-                case .success(let updatedGoal):
-                    UINotificationFeedbackGenerator().notificationOccurred(.success)
-                    onSave(updatedGoal)
-                    dismiss()
-                case .failure(let error):
-                    UINotificationFeedbackGenerator().notificationOccurred(.error)
-                    errorMessage = "Failed to update goal: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-}
-
-
-// MARK: - Goal Detail View
-struct GoalDetailView: View {
-    let goal: StrategicGoalResponse
+// MARK: - Project Detail View
+struct ProjectDetailView: View {
+    // State so edits can update the view
+    @State private var currentProject: ProjectResponse
     let onUpdate: () -> Void
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var authManager: AuthenticationManager
-    private let ffiHandler = StrategicGoalFFIHandler()
-    private let documentHandler = DocumentFFIHandler()
-    @State private var documents: [MediaDocumentResponse] = []
-    @State private var showUploadSheet = false
-    @State private var showDeleteConfirmation = false
-    @State private var showDeleteOptions = false
+    
+    // Edit sheet
     @State private var showEditSheet = false
-    @State private var isDeleting = false
-    @State private var isLoadingDocuments = false
-    @State private var showErrorAlert = false
-    @State private var errorMessage: String?
+    private let ffiHandler = ProjectFFIHandler()
     
-    // Document viewing state
-    @State private var selectedDocumentURL: IdentifiableURL?
-    
-    // Document refresh mechanism
-    @State private var refreshTimer: Timer?
-    @State private var lastRefreshTime = Date()
-    @State private var hasActiveCompressions = false
-    @State private var lastCompressionCount = 0
+    init(project: ProjectResponse, onUpdate: @escaping () -> Void) {
+        _currentProject = State(initialValue: project)
+        self.onUpdate = onUpdate
+    }
     
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    // Goal Header
+                    // Header section
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(goal.objectiveCode)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Text(goal.outcome ?? "N/A")
-                                    .font(.headline)
-                            }
-                            Spacer()
-                            Badge(text: goal.statusText, color: goal.statusColor)
-                        }
-                        
-                        Divider()
-                        
-                        // Progress
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Text("Progress")
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                Spacer()
-                                Text("\(Int(goal.progress))%")
-                                    .font(.headline)
-                                    .foregroundColor(goal.statusColor)
-                            }
-                            
-                            GeometryReader { geometry in
-                                ZStack(alignment: .leading) {
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(Color(.systemGray5))
-                                        .frame(height: 12)
-                                    
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(goal.statusColor)
-                                        .frame(width: geometry.size.width * (goal.progress / 100), height: 12)
-                                }
-                            }
-                            .frame(height: 12)
-                            
-                            HStack {
-                                Text("Actual: \(Int(goal.actualValue ?? 0))")
-                                Spacer()
-                                Text("Target: \(Int(goal.targetValue ?? 0))")
-                            }
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        }
-                    }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
-                    
-                    // Details
-                    VStack(alignment: .leading, spacing: 16) {
-                        DetailRow(label: "KPI", value: goal.kpi ?? "N/A")
-                        DetailRow(label: "Responsible Team", value: goal.responsibleTeam ?? "N/A")
-                        DetailRow(label: "Sync Priority", value: goal.syncPriority.rawValue)
-                        
-                        Divider()
-                        
-                        DetailRow(label: "Created", value: formatDate(goal.createdAt))
-                        DetailRow(label: "Created By", value: goal.createdByUsername ?? goal.createdByUserId ?? "Unknown")
-                        DetailRow(label: "Last Updated", value: formatDate(goal.updatedAt))
-                        DetailRow(label: "Updated By", value: goal.updatedByUsername ?? goal.updatedByUserId ?? "Unknown")
-                        
-                        Divider()
+                        Text(currentProject.name)
+                            .font(.largeTitle)
+                            .fontWeight(.bold)
                         
                         HStack {
-                            Text("Sync Status")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            Text(goal.displayLastSyncedAt)
+                            Text(currentProject.statusName)
                                 .font(.subheadline)
                                 .fontWeight(.medium)
-                                .foregroundColor(goal.lastSyncedAt == nil ? .orange : .green)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 4)
+                                .background(currentProject.statusColor.opacity(0.2))
+                                .foregroundColor(currentProject.statusColor)
+                                .cornerRadius(16)
+                            
+                            Spacer()
                         }
                     }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
                     
-                    // Documents Section
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Documents")
-                                .font(.headline)
-                            Spacer()
-                            Button(action: { showUploadSheet = true }) {
-                                Image(systemName: "plus.circle.fill")
-                                    .foregroundColor(.blue)
-                            }
+                    // Details section
+                    VStack(alignment: .leading, spacing: 16) {
+                        if let objective = currentProject.objective {
+                            DetailRow(label: "Objective", value: objective)
                         }
                         
-                        if isLoadingDocuments {
-                            HStack {
-                                ProgressView()
-                                    .scaleEffect(0.8)
-                                Text(hasActiveCompressions ? "Refreshing compression status..." : "Loading documents...")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                            }
-                            .padding(.vertical, 20)
-                        } else if documents.isEmpty {
-                            Text("No documents uploaded")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 20)
-                        } else {
-                            ForEach(documents, id: \.id) { doc in
-                                DocumentRow(
-                                    document: doc,
-                                    onTap: { openDocument(doc) }
-                                )
-                            }
+                        if let outcome = currentProject.outcome {
+                            DetailRow(label: "Outcome", value: outcome)
                         }
+                        
+                        if let team = currentProject.responsibleTeam {
+                            DetailRow(label: "Responsible Team", value: team)
+                        }
+                        
+                        if let timeline = currentProject.timeline {
+                            DetailRow(label: "Timeline", value: timeline)
+                        }
+                        
+                        DetailRow(label: "Created", value: formatDate(currentProject.createdAt))
+                        DetailRow(label: "Last Updated", value: formatDate(currentProject.updatedAt))
                     }
-                    .padding()
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
                 }
                 .padding()
             }
-            .navigationTitle("Goal Details")
+            .navigationTitle("Project Details")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -1853,101 +426,30 @@ struct GoalDetailView: View {
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
-                        Button(action: { showEditSheet = true }) {
-                            Label("Edit", systemImage: "pencil")
+                        Button("Edit") {
+                            showEditSheet = true
                         }
-                        Divider()
-                        Button(role: .destructive, action: { 
-                            // Check user role to determine delete options
-                            if authManager.currentUser?.role.lowercased() == "admin" {
-                                showDeleteOptions = true
-                            } else {
-                                showDeleteConfirmation = true
-                            }
-                        }) {
-                            Label("Delete Goal", systemImage: "trash")
+                        Button("Delete", role: .destructive) {
+                            // TODO: Show delete options
                         }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
                 }
             }
-            .sheet(isPresented: $showUploadSheet) {
-                DocumentUploadSheet(
-                    entity: goal.asDocumentUploadable(),
-                    config: .standard,
-                    onUploadComplete: {
-                    loadDocuments()
-                    startDocumentRefreshTimer()
-                    // FIXED: Immediately update main view document counts after upload
-                    onUpdate()
-                    }
-                )
-            }
             .sheet(isPresented: $showEditSheet) {
-                EditGoalSheet(goal: goal, ffiHandler: self.ffiHandler, onSave: { updatedGoal in
-                    loadDocuments()
+                EditProjectSheet(project: currentProject, ffiHandler: ffiHandler) { updatedProject in
+                    // Update local state and notify parent
+                    currentProject = updatedProject
                     onUpdate()
-                })
-            }
-            .sheet(isPresented: $showDeleteOptions) {
-                GoalDeleteOptionsSheet(
-                    userRole: authManager.currentUser?.role ?? "",
-                    onDelete: { hardDelete, force in
-                        deleteGoal(hardDelete: hardDelete, force: force)
-                    }
-                )
-            }
-            .fullScreenCover(item: $selectedDocumentURL) { identifiableURL in
-                NavigationView {
-                    QuickLookView(url: identifiableURL.url) {
-                        // Cleanup when document viewer is dismissed
-                        selectedDocumentURL = nil
-                    }
-                    .navigationBarTitleDisplayMode(.inline)
-                    .toolbar {
-                        ToolbarItem(placement: .navigationBarLeading) {
-                            Button("Close") {
-                                selectedDocumentURL = nil
-                            }
-                        }
-                    }
                 }
-            }
-            .onAppear {
-                loadDocuments()
-                startDocumentRefreshTimer()
-            }
-            .onDisappear {
-                stopDocumentRefreshTimer()
-            }
-            .alert("Delete Goal", isPresented: $showDeleteConfirmation) {
-                Button("Cancel", role: .cancel) { }
-                Button("Delete", role: .destructive) {
-                    deleteGoal(hardDelete: false, force: false) // Non-admin users get soft delete
-                }
-            } message: {
-                Text("Are you sure you want to delete this strategic goal? It will be archived and can be restored later.")
-            }
-            .alert("Error", isPresented: $showErrorAlert) {
-                Button("OK") { }
-            } message: {
-                Text(errorMessage ?? "An error occurred")
-            }
-            .overlay {
-                if isDeleting {
-                    Color.black.opacity(0.3)
-                        .ignoresSafeArea()
-                    ProgressView("Deleting...")
-                }
+                .environmentObject(authManager)
             }
         }
     }
     
     private func formatDate(_ dateString: String) -> String {
         let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        
         if let date = formatter.date(from: dateString) {
             let displayFormatter = DateFormatter()
             displayFormatter.dateStyle = .medium
@@ -1956,551 +458,507 @@ struct GoalDetailView: View {
         }
         return dateString
     }
-    
-    private func loadDocuments() {
-        isLoadingDocuments = true
-        
-        Task {
-            guard let currentUser = authManager.currentUser else {
-                await MainActor.run {
-                    isLoadingDocuments = false
-                }
-                return
-            }
-            
-            let authContext = AuthCtxDto(
-                userId: currentUser.userId,
-                role: currentUser.role,
-                deviceId: authManager.getDeviceId(),
-                offlineMode: false
-            )
-            
-            let result = await documentHandler.listDocumentsByEntity(
-                relatedTable: "strategic_goals",
-                relatedId: goal.id,
-                pagination: PaginationDto(page: 1, perPage: 50),
-                include: [.documentType],
-                auth: authContext
-            )
-            
-            await MainActor.run {
-                isLoadingDocuments = false
-                switch result {
-                case .success(let paginatedResult):
-                    documents = paginatedResult.items
-                    updateCompressionStatus()
-                case .failure(let error):
-                    print("Failed to load documents: \(error)")
-                    documents = []
-                    hasActiveCompressions = false
-                }
-            }
-        }
-    }
-    
-    private func refreshDocuments() {
-        lastRefreshTime = Date()
-        loadDocuments()
-    }
-    
-    private func smartRefreshDocuments() {
-        // Check if enough time has passed since last refresh to avoid spam
-        let timeSinceLastRefresh = Date().timeIntervalSince(lastRefreshTime)
-        guard timeSinceLastRefresh >= 20.0 else { return }
-        
-        lastRefreshTime = Date()
-        loadDocuments()
-    }
-    
-    private func updateCompressionStatus() {
-        // Check if we have any documents that are currently being compressed
-        let processingStatuses = ["pending", "processing", "in_progress"]
-        let activeCompressions = documents.filter { doc in
-            processingStatuses.contains(doc.compressionStatus.lowercased())
-        }
-        
-        let newHasActiveCompressions = !activeCompressions.isEmpty
-        let newCompressionCount = activeCompressions.count
-        
-        // Check if compressions have finished (count went down)
-        let compressionsFinished = lastCompressionCount > newCompressionCount && lastCompressionCount > 0
-        
-        if newHasActiveCompressions != hasActiveCompressions {
-            hasActiveCompressions = newHasActiveCompressions
-            
-            if hasActiveCompressions {
-                print("🔄 [COMPRESSION_STATUS] \(activeCompressions.count) documents are compressing")
-            } else {
-                print("✅ [COMPRESSION_STATUS] All compressions completed")
-            }
-        } else if compressionsFinished {
-            print("⚡ [COMPRESSION_STATUS] \(lastCompressionCount - newCompressionCount) compression(s) just finished")
-        }
-        
-        lastCompressionCount = newCompressionCount
-    }
-    
-    private func startDocumentRefreshTimer() {
-        // Only start timer if we don't already have one
-        guard refreshTimer == nil else { return }
-        
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { _ in
-            // Only refresh if we have active compressions
-            if self.hasActiveCompressions {
-                Task { @MainActor in
-                    self.smartRefreshDocuments()
-                }
-            }
-        }
-    }
-    
-    private func stopDocumentRefreshTimer() {
-        refreshTimer?.invalidate()
-        refreshTimer = nil
-    }
-    
-    private func deleteGoal(hardDelete: Bool = false, force: Bool = false) {
-        isDeleting = true
-        
-        Task {
-            guard let currentUser = authManager.currentUser else {
-                await MainActor.run {
-                    isDeleting = false
-                    errorMessage = "User not authenticated."
-                    showErrorAlert = true
-                }
-                return
-            }
-            
-            let authContext = AuthContextPayload(
-                user_id: currentUser.userId,
-                role: currentUser.role,
-                device_id: authManager.getDeviceId(),
-                offline_mode: false
-            )
-            
-            if force {
-                // Use bulk delete with force option for single goal
-                print("🗑️ [DELETE] Starting force delete for goal: \(goal.id)")
-                let result = await ffiHandler.bulkDelete(ids: [goal.id], hardDelete: hardDelete, force: force, auth: authContext)
-                
-                await MainActor.run {
-                    isDeleting = false
-                    switch result {
-                    case .success(let batchResult):
-                        print("✅ [FORCE_DELETE] Force delete result: \(batchResult)")
-                        
-                        if !batchResult.hardDeleted.isEmpty || !batchResult.softDeleted.isEmpty {
-                            // Successfully deleted
-                            let wasHardDeleted = !batchResult.hardDeleted.isEmpty
-                            let message = wasHardDeleted ? "Goal permanently deleted" : "Goal archived"
-                            print("✅ [FORCE_DELETE] \(message)")
-                            onUpdate()
-                            dismiss()
-                        } else if !batchResult.failed.isEmpty {
-                            // Force delete failed (very rare)
-                            let errorMsg = batchResult.errors[goal.id] ?? "Force delete failed"
-                            errorMessage = errorMsg
-                            showErrorAlert = true
-                        }
-                    case .failure(let error):
-                        print("❌ [FORCE_DELETE] Failed to force delete goal: \(error)")
-                        errorMessage = "Failed to force delete strategic goal: \(error.localizedDescription)"
-                        showErrorAlert = true
-                    }
-                }
-            } else {
-                // Use regular delete (with dependency checks)
-                print("🗑️ [DELETE] Starting \(hardDelete ? "hard" : "soft") delete for goal: \(goal.id)")
-                let result = await ffiHandler.delete(id: goal.id, hardDelete: hardDelete, auth: authContext)
-
-                await MainActor.run {
-                    isDeleting = false
-                    switch result {
-                    case .success(let deleteResponse):
-                        print("✅ [DELETE] Goal \(hardDelete ? "hard" : "soft") delete result: \(deleteResponse)")
-                        
-                        if deleteResponse.wasDeleted {
-                            // Show success message using the response's display message
-                            print("✅ [DELETE] \(deleteResponse.displayMessage)")
-                            onUpdate()
-                            dismiss()
-                        } else {
-                            // Handle case where deletion was prevented by dependencies
-                            errorMessage = deleteResponse.displayMessage
-                            showErrorAlert = true
-                        }
-                    case .failure(let error):
-                        print("❌ [DELETE] Failed to delete goal: \(error)")
-                        errorMessage = "Failed to delete strategic goal: \(error.localizedDescription)"
-                        showErrorAlert = true
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Open a document for viewing
-    private func openDocument(_ document: MediaDocumentResponse) {
-        // Light refresh before opening to get latest status
-        refreshDocuments()
-        
-        Task {
-            guard let currentUser = authManager.currentUser else {
-                await MainActor.run {
-                    self.errorMessage = "User not authenticated."
-                    self.showErrorAlert = true
-                }
-                return
-            }
-            
-            let authContext = AuthCtxDto(
-                userId: currentUser.userId,
-                role: currentUser.role,
-                deviceId: authManager.getDeviceId(),
-                offlineMode: false
-            )
-            
-            print("📖 [DOCUMENT_OPEN] Opening document: \(document.title ?? document.originalFilename)")
-            
-            let result = await documentHandler.openDocument(id: document.id, auth: authContext)
-            
-            await MainActor.run {
-                switch result {
-                case .success(let openResponse):
-                    if let filePath = openResponse.filePath {
-                        print("📖 [DOCUMENT_OPEN] ✅ Got file path: \(filePath)")
-                        
-                        // Convert file path to URL
-                        let fileURL: URL
-                        if filePath.hasPrefix("file://") {
-                            fileURL = URL(string: filePath)!
-                        } else {
-                            fileURL = URL(fileURLWithPath: filePath)
-                        }
-                        
-                        // Check if file exists before trying to open
-                        if FileManager.default.fileExists(atPath: fileURL.path) {
-                            print("📖 [DOCUMENT_OPEN] ✅ File exists, opening with QuickLook")
-                            
-                            // Debug: Check actual file type vs filename
-                            let filename = fileURL.lastPathComponent
-                            let fileExtension = (filename as NSString).pathExtension.lowercased()
-                            print("📖 [DOCUMENT_OPEN] File extension from name: .\(fileExtension)")
-                            
-                            // Try to detect actual file type by reading file header
-                            if let fileData = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]) {
-                                let fileSize = fileData.count
-                                print("📖 [DOCUMENT_OPEN] Actual file size: \(fileSize) bytes")
-                                
-                                if fileSize >= 8 {
-                                    let header = fileData.prefix(8)
-                                    let headerHex = header.map { String(format: "%02x", $0) }.joined()
-                                    print("📖 [DOCUMENT_OPEN] File header (hex): \(headerHex)")
-                                    
-                                    // Check for common video file signatures
-                                    if headerHex.hasPrefix("00000018") || headerHex.hasPrefix("00000020") {
-                                        print("📖 [DOCUMENT_OPEN] 🎬 DETECTED: This appears to be an MP4 video file!")
-                                    } else if headerHex.hasPrefix("ffd8ff") {
-                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a JPEG image file")
-                                    } else if headerHex.hasPrefix("89504e47") {
-                                        print("📖 [DOCUMENT_OPEN] 📸 DETECTED: This appears to be a PNG image file")
-                                    } else {
-                                        print("📖 [DOCUMENT_OPEN] ❓ DETECTED: Unknown file type with header: \(headerHex)")
-                                    }
-                                }
-                            }
-                            
-                            // Open with QuickLook
-                            self.selectedDocumentURL = IdentifiableURL(url: fileURL)
-                        } else {
-                            print("📖 [DOCUMENT_OPEN] ❌ File does not exist at path: \(fileURL.path)")
-                            self.errorMessage = "Document file not found on device. It may need to be downloaded first."
-                            self.showErrorAlert = true
-                        }
-                    } else {
-                        print("📖 [DOCUMENT_OPEN] ❌ No file path returned")
-                        self.errorMessage = "Document is not available locally. It may need to be downloaded first."
-                        self.showErrorAlert = true
-                    }
-                    
-                case .failure(let error):
-                    print("📖 [DOCUMENT_OPEN] ❌ Failed to open document: \(error)")
-                    
-                    // Check if it's a compression-related error
-                    let errorMessage = error.localizedDescription
-                    if errorMessage.contains("being compressed") {
-                        self.errorMessage = "Document is currently being compressed. You can still view it, but there may be a brief delay."
-                        self.showErrorAlert = true
-                    } else {
-                        self.errorMessage = "Failed to open document: \(errorMessage)"
-                        self.showErrorAlert = true
-                    }
-                }
-            }
-        }
-    }
 }
 
-// MARK: - Helper extensions for GoalDetailView
-extension StrategicGoalResponse {
-    var progress: Double {
-        let rawProgress = progressPercentage ?? 0.0
-        // Ensure progress is a valid number and within bounds
-        if rawProgress.isNaN || rawProgress.isInfinite {
-            return 0.0
-        }
-        return max(0.0, rawProgress)
-    }
+// MARK: - Create Project Sheet
+struct CreateProjectSheet: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var authManager: AuthenticationManager
+    let onSave: (ProjectResponse) -> Void
     
-    var statusText: String {
-        switch statusId {
-        case 1: return "On Track"
-        case 2: return "At Risk"
-        case 3: return "Behind"
-        case 4: return "Completed"
-        default: return "Unknown"
-        }
-    }
+    // Form fields
+    @State private var name = ""
+    @State private var objective = ""
+    @State private var outcome = ""
+    @State private var timeline = ""
+    @State private var responsibleTeam = ""
+    @State private var statusId: Int64 = 1 // Default to "On Track"
+    @State private var strategicGoalId: String?
+    @State private var syncPriority: SyncPriority = .normal
     
-    var statusColor: Color {
-        switch statusId {
-        case 1: return .green
-        case 2: return .orange
-        case 3: return .red
-        case 4: return .blue
-        default: return .gray
-        }
-    }
+    // State management
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    @FocusState private var focusedField: Field?
     
-    func hasDocumentsTracked(in documentCounts: [String: Int]) -> Bool {
-        return (documentCounts[self.id] ?? 0) > 0
+    private let ffiHandler = ProjectFFIHandler()
+    
+    enum Field: Hashable {
+        case name, objective, outcome, timeline, responsibleTeam
     }
-}
-
-
-
-
-// MARK: - Document Models & Views
-
-// MARK: - Media Document Row
-struct MediaDocumentRow: View {
-    let document: MediaDocumentResponse
-    let onTap: () -> Void
     
     var body: some View {
-        HStack {
-            Image(systemName: fileIcon(for: document.originalFilename))
-                .font(.title3)
-                .foregroundColor(document.isAvailableLocally ?? false ? .blue : .gray)
-                .frame(width: 40)
-            
-            VStack(alignment: .leading, spacing: 2) {
-                Text(document.title ?? document.originalFilename)
-                    .font(.subheadline)
-                    .lineLimit(1)
+        NavigationStack {
+            Form {
+                Section("Basic Information") {
+                    TextField("Project Name", text: $name)
+                        .focused($focusedField, equals: .name)
+                        .textInputAutocapitalization(.words)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
+                    
+                    TextField("Objective (Optional)", text: $objective, axis: .vertical)
+                        .focused($focusedField, equals: .objective)
+                        .lineLimit(3...6)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
+                    
+                    TextField("Outcome (Optional)", text: $outcome, axis: .vertical)
+                        .focused($focusedField, equals: .outcome)
+                        .lineLimit(3...6)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
+                }
                 
-                HStack(spacing: 8) {
-                    Text(document.typeName ?? "Document")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                Section("Project Details") {
+                    TextField("Timeline (Optional)", text: $timeline)
+                        .focused($focusedField, equals: .timeline)
+                        .submitLabel(.next)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
                     
-                    if let field = document.fieldIdentifier {
-                        Text("• Linked to \(field)")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                    TextField("Responsible Team (Optional)", text: $responsibleTeam)
+                        .focused($focusedField, equals: .responsibleTeam)
+                        .submitLabel(.done)
+                        .disableAutocorrection(true)
+                        .textFieldStyle(.plain)
+                    
+                    Picker("Status", selection: $statusId) {
+                        Text("On Track").tag(Int64(1))
+                        Text("At Risk").tag(Int64(2))
+                        Text("Delayed").tag(Int64(3))
+                        Text("Completed").tag(Int64(4))
                     }
-                    
-                    Text("• \(formatFileSize(document.sizeBytes))")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                    
-                    if !(document.isAvailableLocally ?? false) {
-                        Text("• Cloud")
-                            .font(.caption2)
-                            .foregroundColor(.orange)
+                    .pickerStyle(.menu)
+                }
+                
+                Section("Strategic Goal") {
+                    if StrategicGoalsCache.shared.isLoading && StrategicGoalsCache.shared.goals.isEmpty {
+                        HStack {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Loading goals...")
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                        .frame(height: 44) // Standard row height
+                    } else {
+                        Picker("Strategic Goal (Optional)", selection: $strategicGoalId) {
+                            Text("No Strategic Goal").tag(String?.none)
+                            ForEach(StrategicGoalsCache.shared.goals, id: \.id) { goal in
+                                Text(goal.objectiveCode).tag(String?.some(goal.id))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+                }
+                
+                Section("Advanced") {
+                    Picker("Sync Priority", selection: $syncPriority) {
+                        Text("Low").tag(SyncPriority.low)
+                        Text("Normal").tag(SyncPriority.normal)
+                        Text("High").tag(SyncPriority.high)
+                    }
+                    .pickerStyle(.menu)
+                }
+                
+                if let error = errorMessage {
+                    Section {
+                        Text(error)
+                            .foregroundColor(.red)
+                            .font(.caption)
                     }
                 }
             }
-            
-            Spacer()
-            
-            CompressionBadge(status: document.compressionStatus)
+            .navigationTitle("Create Project")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { 
+                        // Haptic feedback for better UX
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        dismiss() 
+                    }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Create") {
+                        // Haptic feedback for better UX
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        createProject()
+                    }
+                    .disabled(isLoading || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .disabled(isLoading)
+            .overlay {
+                if isLoading {
+                    Color.black.opacity(0.3)
+                        .ignoresSafeArea()
+                    ProgressView("Creating project...")
+                        .scaleEffect(1.2)
+                }
+            }
         }
-        .padding(.vertical, 8)
-        .opacity((document.hasError == true) ? 0.5 : 1.0)
-        .contentShape(Rectangle()) // Make entire row tappable
-        .onTapGesture {
-            onTap()
+        .interactiveDismissDisabled(isLoading)
+        .task {
+            // Load strategic goals using cache (non-blocking)
+            await StrategicGoalsCache.shared.loadIfNeeded(authManager: authManager)
+        }
+        .onAppear {
+            // Delay focus to prevent UI hang on sheet open
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                focusedField = .name
+            }
         }
     }
     
-    private func fileIcon(for filename: String) -> String {
-        let ext = (filename as NSString).pathExtension.lowercased()
-        switch ext {
-        case "pdf": return "doc.text.fill"
-        case "doc", "docx": return "doc.richtext.fill"
-        case "jpg", "jpeg", "png": return "photo.fill"
-        case "xls", "xlsx": return "tablecells.fill"
-        case "mp4", "mov": return "video.fill"
-        case "mp3", "m4a": return "music.note"
-        default: return "doc.fill"
+    private func createProject() {
+        // Dismiss keyboard before starting creation
+        focusedField = nil
+        
+        isLoading = true
+        errorMessage = nil
+        
+        guard let currentUser = authManager.currentUser else {
+            self.errorMessage = "User not authenticated."
+            self.isLoading = false
+            return
         }
-    }
-    
-    private func formatFileSize(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useKB, .useMB]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+        
+        let newProject = NewProject(
+            strategicGoalId: strategicGoalId,
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            objective: objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : objective.trimmingCharacters(in: .whitespacesAndNewlines),
+            outcome: outcome.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : outcome.trimmingCharacters(in: .whitespacesAndNewlines),
+            statusId: statusId,
+            timeline: timeline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : timeline.trimmingCharacters(in: .whitespacesAndNewlines),
+            responsibleTeam: responsibleTeam.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : responsibleTeam.trimmingCharacters(in: .whitespacesAndNewlines),
+            syncPriority: syncPriority,
+            createdByUserId: currentUser.userId
+        )
+        
+        Task {
+            let result = await ffiHandler.create(newProject: newProject, auth: authContext)
+            
+            await MainActor.run {
+                isLoading = false
+                switch result {
+                case .success(let createdProject):
+                    // Success haptic feedback
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    onSave(createdProject)
+                    dismiss()
+                case .failure(let error):
+                    // Error haptic feedback
+                    UINotificationFeedbackGenerator().notificationOccurred(.error)
+                    errorMessage = "Failed to create project: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 }
 
-// MARK: - Removed: CompressionBadge (now in DocumentManagement/Components/CompressionBadge.swift)
-
-// MARK: - Removed: Old DocumentUploadSheet and supporting models (now using generic DocumentManagement system)
-                        
-                    // [REMOVED] - Old DocumentUploadSheet UI code moved to DocumentManagement/
-                // [REMOVED] - All old DocumentUploadSheet UI and logic moved to DocumentManagement/
-         
-     // [REMOVED] - handleFileSelection and other old DocumentUploadSheet methods moved to DocumentManagement/
-         
-     // [REMOVED] - handlePhotoSelection and photo processing methods moved to DocumentManagement/
-    // MARK: - Removed: Old DocumentUploadSheet and supporting models (now using generic DocumentManagement system)
-
-// MARK: - Goal Delete Options Sheet
-struct GoalDeleteOptionsSheet: View {
-    let userRole: String
-    let onDelete: (Bool, Bool) -> Void  // (hardDelete, force)
+// MARK: - Edit Project Sheet
+struct EditProjectSheet: View {
     @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var authManager: AuthenticationManager
+    @StateObject private var goalsCache = StrategicGoalsCache.shared
+    let project: ProjectResponse
+    let ffiHandler: ProjectFFIHandler
+    let onSave: (ProjectResponse) -> Void
+    
+    @State private var name = ""
+    @State private var objective = ""
+    @State private var outcome = ""
+    @State private var timeline = ""
+    @State private var responsibleTeam = ""
+    @State private var statusId: Int64 = 1
+    @State private var strategicGoalId: String?
+    @State private var syncPriority: SyncPriority = .normal
+    @State private var isLoading = false
+    @State private var errorMessage: String?
+    
+    // Track original values to detect changes
+    @State private var originalName = ""
+    @State private var originalObjective = ""
+    @State private var originalOutcome = ""
+    @State private var originalTimeline = ""
+    @State private var originalResponsibleTeam = ""
+    @State private var originalStatusId: Int64 = 1
+    @State private var originalStrategicGoalId: String?
+    @State private var originalSyncPriority: SyncPriority = .normal
+    
+    // For focus management
+    private enum Field: Hashable {
+        case name, objective, outcome, timeline, responsibleTeam
+    }
+    @FocusState private var focusedField: Field?
+    
+    private var canSave: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !isLoading
+    }
+    
+    /// Check if any field values have actually changed
+    private var hasChanges: Bool {
+        name != originalName ||
+        objective != originalObjective ||
+        outcome != originalOutcome ||
+        timeline != originalTimeline ||
+        responsibleTeam != originalResponsibleTeam ||
+        statusId != originalStatusId ||
+        strategicGoalId != originalStrategicGoalId ||
+        syncPriority != originalSyncPriority
+    }
     
     var body: some View {
         NavigationView {
-            VStack(spacing: 20) {
-                Text("How would you like to delete this strategic goal?")
-                    .font(.headline)
-                    .multilineTextAlignment(.center)
-                    .padding(.top)
-                
-                VStack(spacing: 16) {
-                    archiveButton
-                    if userRole.lowercased() == "admin" {
-                        deleteButton
-                        forceDeleteButton
+            Form {
+                Section("Basic Information") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Project Name")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("Enter project name", text: $name)
+                            .focused($focusedField, equals: .name)
+                            .textInputAutocapitalization(.words)
+                            .submitLabel(.next)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.plain)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Objective (Optional)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("Describe the project objective", text: $objective, axis: .vertical)
+                            .focused($focusedField, equals: .objective)
+                            .lineLimit(3...6)
+                            .submitLabel(.next)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.plain)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Outcome (Optional)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("Describe expected outcomes", text: $outcome, axis: .vertical)
+                            .focused($focusedField, equals: .outcome)
+                            .lineLimit(3...6)
+                            .submitLabel(.next)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.plain)
                     }
                 }
-                .padding(.horizontal)
                 
-                Spacer()
+                Section("Project Details") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Timeline (Optional)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("Project timeline or duration", text: $timeline)
+                            .focused($focusedField, equals: .timeline)
+                            .submitLabel(.next)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.plain)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Responsible Team (Optional)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        TextField("Team or person responsible", text: $responsibleTeam)
+                            .focused($focusedField, equals: .responsibleTeam)
+                            .submitLabel(.done)
+                            .disableAutocorrection(true)
+                            .textFieldStyle(.plain)
+                    }
+                    
+                    Picker("Status", selection: $statusId) {
+                        Text("On Track").tag(Int64(1))
+                        Text("At Risk").tag(Int64(2))
+                        Text("Delayed").tag(Int64(3))
+                        Text("Completed").tag(Int64(4))
+                    }
+                    .pickerStyle(.menu)
+                }
+                
+                Section("Strategic Goal") {
+                    if goalsCache.isLoading && goalsCache.goals.isEmpty {
+                        HStack {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Loading goals...")
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                        .frame(height: 44) // Standard row height
+                    } else {
+                        Picker("Strategic Goal (Optional)", selection: $strategicGoalId) {
+                            Text("No Strategic Goal").tag(String?.none)
+                            ForEach(goalsCache.goals, id: \.id) { goal in
+                                Text(goal.objectiveCode).tag(String?.some(goal.id))
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+                }
+                
+                Section("Advanced") {
+                    Picker("Sync Priority", selection: $syncPriority) {
+                        Text("Low").tag(SyncPriority.low)
+                        Text("Normal").tag(SyncPriority.normal)
+                        Text("High").tag(SyncPriority.high)
+                    }
+                    .pickerStyle(.menu)
+                }
+                
+                if let error = errorMessage {
+                    Section {
+                        Text(error)
+                            .foregroundColor(.red)
+                            .font(.caption)
+                    }
+                }
             }
-            .navigationTitle("Delete Goal")
+            .navigationTitle("Edit Project")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Cancel") {
-                        dismiss()
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Cancel") { 
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        dismiss() 
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button(hasChanges ? "Save" : "Done") {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        updateProject()
+                    }
+                    .disabled(!canSave)
+                }
             }
+            .disabled(isLoading)
+            .overlay {
+                if isLoading {
+                    Color.black.opacity(0.3)
+                        .ignoresSafeArea()
+                    ProgressView("Updating project...")
+                        .scaleEffect(1.2)
+                }
+            }
+        }
+        .interactiveDismissDisabled(isLoading)
+        .task {
+            // Load strategic goals using cache (likely already cached)
+            await goalsCache.loadIfNeeded(authManager: authManager)
+        }
+        .onAppear {
+            populateFields()
+            focusedField = .name
         }
     }
     
-    private var archiveButton: some View {
-        Button(action: {
-            onDelete(false, false)
-            dismiss()
-        }) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "archivebox")
-                        .foregroundColor(.orange)
-                        .font(.title2)
-                    Text("Archive Goal")
-                        .font(.headline)
-                        .foregroundColor(.primary)
-                    Spacer()
-                }
-                
-                Text("Move the goal to archive. It can be restored later. Associated documents will be preserved. Projects will remain linked.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.leading)
-            }
-            .padding()
-            .background(Color(.systemGray6))
-            .cornerRadius(12)
-        }
-        .buttonStyle(PlainButtonStyle())
+    private func populateFields() {
+        // Set current field values
+        name = project.name
+        objective = project.objective ?? ""
+        outcome = project.outcome ?? ""
+        timeline = project.timeline ?? ""
+        responsibleTeam = project.responsibleTeam ?? ""
+        statusId = project.statusId ?? 1
+        strategicGoalId = project.strategicGoalId
+        syncPriority = project.syncPriority
+        
+        // Store original values for change detection
+        originalName = project.name
+        originalObjective = project.objective ?? ""
+        originalOutcome = project.outcome ?? ""
+        originalTimeline = project.timeline ?? ""
+        originalResponsibleTeam = project.responsibleTeam ?? ""
+        originalStatusId = project.statusId ?? 1
+        originalStrategicGoalId = project.strategicGoalId
+        originalSyncPriority = project.syncPriority
     }
     
-    private var deleteButton: some View {
-        Button(action: {
-            onDelete(true, false)
+    private func updateProject() {
+        // Dismiss keyboard before starting update
+        focusedField = nil
+        
+        // Check if any changes were actually made
+        if !hasChanges {
+            // No changes detected, just dismiss without calling API or onSave
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
             dismiss()
-        }) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "trash.fill")
-                        .foregroundColor(.red)
-                        .font(.title2)
-                    Text("Delete Goal")
-                        .font(.headline)
-                        .foregroundColor(.red)
-                    Spacer()
-                }
-                
-                Text("Permanently delete goal if no dependencies exist. Goals with projects will be archived instead.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.leading)
-            }
-            .padding()
-            .background(Color.red.opacity(0.1))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.red.opacity(0.3), lineWidth: 1)
-            )
+            return
         }
-        .buttonStyle(PlainButtonStyle())
-    }
-    
-    private var forceDeleteButton: some View {
-        Button(action: {
-            onDelete(true, true)
-            dismiss()
-        }) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.red)
-                        .font(.title2)
-                    Text("Force Delete")
-                        .font(.headline)
-                        .foregroundColor(.red)
-                    Spacer()
-                }
-                
-                Text("⚠️ DANGER: Force delete goal regardless of dependencies. Projects will lose their strategic goal link. This cannot be undone.")
-                    .font(.caption)
-                    .foregroundColor(.red)
-                    .multilineTextAlignment(.leading)
-            }
-            .padding()
-            .background(Color.red.opacity(0.2))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.red, lineWidth: 2)
-            )
+        
+        isLoading = true
+        errorMessage = nil
+        
+        guard let currentUser = authManager.currentUser else {
+            self.errorMessage = "User not authenticated."
+            self.isLoading = false
+            return
         }
-        .buttonStyle(PlainButtonStyle())
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+        
+        // Handle double optional for strategic goal - required for proper null handling
+        let strategicGoalUpdate: String??
+        if strategicGoalId != originalStrategicGoalId {
+            // Strategic goal changed, send the new value (could be nil to unset)
+            strategicGoalUpdate = .some(strategicGoalId)
+        } else {
+            // Strategic goal unchanged, don't update this field
+            strategicGoalUpdate = .none
+        }
+        
+        let updateProject = UpdateProject(
+            strategicGoalId: strategicGoalUpdate,
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : name.trimmingCharacters(in: .whitespacesAndNewlines),
+            objective: objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : objective.trimmingCharacters(in: .whitespacesAndNewlines),
+            outcome: outcome.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : outcome.trimmingCharacters(in: .whitespacesAndNewlines),
+            statusId: statusId,
+            timeline: timeline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : timeline.trimmingCharacters(in: .whitespacesAndNewlines),
+            responsibleTeam: responsibleTeam.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : responsibleTeam.trimmingCharacters(in: .whitespacesAndNewlines),
+            syncPriority: syncPriority,
+            updatedByUserId: currentUser.userId
+        )
+        
+        Task {
+            let result = await ffiHandler.update(id: project.id, update: updateProject, auth: authContext)
+            
+            await MainActor.run {
+                isLoading = false
+                switch result {
+                case .success(let updatedProject):
+                    // Success haptic feedback
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    onSave(updatedProject)
+                    dismiss()
+                case .failure(let error):
+                    // Error haptic feedback
+                    UINotificationFeedbackGenerator().notificationOccurred(.error)
+                    errorMessage = "Failed to update project: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 }
-
-// MARK: - Removed: BulkDeleteOptionsSheet (now using shared EntityDeleteOptionsSheet)
-
-// MARK: - Removed: BulkDeleteResultsSheet (now using shared DeleteResultsSheet)
-
-// MARK: - Removed: QuickLook Support (now in DocumentManagement/Components/QuickLookView.swift)
-

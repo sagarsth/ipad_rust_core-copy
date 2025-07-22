@@ -36,6 +36,7 @@ extension UserResponse: Identifiable {
 // MARK: - Main View
 struct UsersListView: View {
     @EnvironmentObject var authManager: AuthenticationManager
+    @EnvironmentObject var sharedStatsContext: SharedStatsContext
     @State private var users: [UserResponse] = []
     @State private var isLoading = false
     @State private var searchText = ""
@@ -48,11 +49,8 @@ struct UsersListView: View {
     // Add state to track if users have been loaded
     @State private var hasLoadedUsers = false
     
-    // Stats
-    @State private var totalUsers = 0
-    @State private var activeUsers = 0
-    @State private var adminCount = 0
-    @State private var inactiveUsers = 0
+    // Backend-powered stats manager for comprehensive user statistics
+    @StateObject private var backendStatsManager = BackendUserStatsManager()
     
     // Confirmation dialog states
     @State private var showDeactivateConfirmation = false
@@ -86,19 +84,6 @@ struct UsersListView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // Stats Cards
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 16) {
-                    UserStatsCard(title: "Total Users", value: "\(totalUsers)", color: .blue, icon: "person.2.fill")
-                    UserStatsCard(title: "Active Users", value: "\(activeUsers)", color: .green, icon: "checkmark.circle.fill")
-                    UserStatsCard(title: "Admins", value: "\(adminCount)", color: .red, icon: "shield.fill")
-                    UserStatsCard(title: "Inactive", value: "\(inactiveUsers)", color: .gray, icon: "person.crop.circle.badge.xmark")
-                }
-                .padding(.horizontal)
-            }
-            .padding(.vertical)
-            .background(Color(.systemGroupedBackground))
-            
             // Filters
             VStack(spacing: 12) {
                 // Search Bar
@@ -350,6 +335,44 @@ struct UsersListView: View {
                 }
             }
         )
+        .onChange(of: users.count) { oldCount, newCount in
+            // Fetch backend stats when users data changes
+            if newCount != oldCount {
+                Task {
+                    await fetchBackendStats()
+                }
+            }
+        }
+        .onAppear {
+            // Fetch backend stats on first appearance if users are loaded
+            if !users.isEmpty {
+                Task {
+                    await fetchBackendStats()
+                }
+            }
+        }
+    }
+    
+    private func fetchBackendStats() async {
+        guard let currentUser = authManager.currentUser else { return }
+        
+        let authContext = AuthContextPayload(
+            user_id: currentUser.userId,
+            role: currentUser.role,
+            device_id: authManager.getDeviceId(),
+            offline_mode: false
+        )
+        
+        await backendStatsManager.fetchStats(auth: authContext)
+        
+        // Register with shared context for Stats tab display
+        await MainActor.run {
+            let anyStatsManager = backendStatsManager.createAnyStatsManager()
+            sharedStatsContext.currentEntityStats = anyStatsManager
+            sharedStatsContext.entityName = "Users"
+            
+            print("📊 Registered user stats with shared context: \(backendStatsManager.stats.count) stats")
+        }
     }
     
     private func loadUsers(forceRefresh: Bool = false) {
@@ -396,9 +419,11 @@ struct UsersListView: View {
                     for user in result {
                         print("   👤 \(user.name) (\(user.email)) - Active: \(user.active)")
                     }
-                    updateStats()
                     isLoading = false
                 }
+                
+                // Fetch backend stats after loading users
+                await fetchBackendStats()
             } catch {
                 await MainActor.run {
                     isLoading = false
@@ -429,8 +454,10 @@ struct UsersListView: View {
                 self.users = result
                 self.hasLoadedUsers = true
                 print("🔄 Refreshed \(result.count) users via pull-to-refresh")
-                updateStats()
             }
+            
+            // Fetch backend stats after refreshing users
+            await fetchBackendStats()
         } catch {
             await MainActor.run {
                 self.errorMessage = error.localizedDescription
@@ -439,12 +466,7 @@ struct UsersListView: View {
         }
     }
     
-    private func updateStats() {
-        totalUsers = users.count
-        activeUsers = users.filter { $0.active }.count
-        adminCount = users.filter { $0.role.lowercased() == "admin" }.count
-        inactiveUsers = users.filter { !$0.active }.count
-    }
+
     
     private func toggleUserStatus(_ user: UserResponse) {
         // Prevent users from deactivating themselves
@@ -513,7 +535,6 @@ struct UsersListView: View {
                                     for refreshedUser in refreshedUsers {
                                         print("   👤 \(refreshedUser.name) (\(refreshedUser.email)) - Active: \(refreshedUser.active)")
                                     }
-                                    self.updateStats()
                                 }
                             } catch {
                                 print("❌ Refresh failed: \(error)")
@@ -881,49 +902,6 @@ struct UserBadge: View {
             .background(color.opacity(0.2))
             .foregroundColor(color)
             .cornerRadius(8)
-    }
-}
-
-/// User Stats card component for displaying user statistics
-struct UserStatsCard: View {
-    let title: String
-    let value: String
-    let color: Color
-    let icon: String
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: icon)
-                    .font(.title3)
-                    .foregroundColor(color)
-                Spacer()
-            }
-            
-            Text(value)
-                .font(.title2)
-                .fontWeight(.bold)
-                .foregroundColor(.primary)
-            
-            Text(title)
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
-        .padding()
-        .frame(minWidth: 100)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(.regularMaterial)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color(.systemBackground).opacity(0.2))
-                )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color(.systemGray4), lineWidth: 0.5)
-        )
-        .shadow(color: Color.black.opacity(0.1), radius: 4, x: 0, y: 2)
     }
 }
 
