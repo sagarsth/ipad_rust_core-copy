@@ -3,7 +3,7 @@ use sqlx::{Executor, Row, Sqlite, Transaction, SqlitePool, QueryBuilder};
 use crate::domains::core::delete_service::DeleteServiceRepository;
 use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::document_linking::DocumentLinkable;
-use crate::domains::activity::types::{NewActivity, Activity, ActivityRow, UpdateActivity};
+use crate::domains::activity::types::{NewActivity, Activity, ActivityRow, UpdateActivity, ActivityDocumentReference, ActivityFilter, ActivityStatistics, ActivityStatusBreakdown, ActivityMetadataCounts};
 use crate::errors::{DbError, DomainError, DomainResult, ValidationError};
 use crate::types::{PaginatedResult, PaginationParams, SyncPriority};
 use async_trait::async_trait;
@@ -11,7 +11,9 @@ use chrono::Utc;
 use sqlx::{query, query_as, query_scalar};
 use uuid::Uuid;
 use std::sync::Arc;
+use std::collections::HashMap;
 use serde_json;
+use chrono::DateTime;
 use crate::domains::sync::repository::ChangeLogRepository;
 use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
 use crate::domains::user::repository::MergeableEntityRepository;
@@ -70,6 +72,56 @@ pub trait ActivityRepository: DeleteServiceRepository<Activity> + MergeableEntit
         project_id: Uuid,
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Activity>>;
+
+    /// Get document references for an activity
+    async fn get_activity_document_references(
+        &self,
+        activity_id: Uuid,
+    ) -> DomainResult<Vec<ActivityDocumentReference>>;
+
+    /// Find activities by status ID
+    async fn find_by_status(
+        &self,
+        status_id: i64,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Activity>>;
+
+    /// Search activities by description, KPI, or other text fields
+    async fn search_activities(
+        &self,
+        query: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Activity>>;
+
+    /// Find activity IDs that match complex filter criteria
+    /// This is the key to enabling efficient UI-driven bulk selections and exports
+    async fn find_ids_by_filter(
+        &self,
+        filter: ActivityFilter,
+    ) -> DomainResult<Vec<Uuid>>;
+
+    /// Bulk update activity status for multiple activities
+    async fn bulk_update_status(
+        &self,
+        ids: &[Uuid],
+        status_id: i64,
+        auth: &AuthContext,
+    ) -> DomainResult<u64>;
+
+    /// Count activities by status
+    async fn count_by_status(&self) -> DomainResult<Vec<(Option<i64>, i64)>>;
+    
+    /// Count activities by project
+    async fn count_by_project(&self) -> DomainResult<Vec<(Option<Uuid>, i64)>>;
+    
+    /// Get comprehensive activity statistics
+    async fn get_activity_statistics(&self) -> DomainResult<ActivityStatistics>;
+    
+    /// Get activity status breakdown
+    async fn get_activity_status_breakdown(&self) -> DomainResult<Vec<ActivityStatusBreakdown>>;
+    
+    /// Get activity metadata counts
+    async fn get_activity_metadata_counts(&self) -> DomainResult<ActivityMetadataCounts>;
 }
 
 /// SQLite implementation for ActivityRepository
@@ -666,6 +718,567 @@ impl ActivityRepository for SqliteActivityRepository {
             total as u64,
             params,
         ))
+    }
+
+    async fn get_activity_document_references(
+        &self,
+        activity_id: Uuid,
+    ) -> DomainResult<Vec<ActivityDocumentReference>> {
+        let activity_id_str = activity_id.to_string();
+        
+        let mut references = Vec::new();
+        let doc_ref_fields: Vec<_> = Activity::field_metadata()
+            .into_iter()
+            .filter(|field| field.is_document_reference_only)
+            .collect();
+            
+        for field in doc_ref_fields {
+            let column_name = format!("{}_ref", field.field_name);
+            
+            // Query to fetch document details directly
+            let query_str = format!(
+                "SELECT a.{} as doc_id, m.original_filename, m.created_at, m.size_bytes as file_size 
+                 FROM activities a 
+                 LEFT JOIN media_documents m ON a.{} = m.id AND m.deleted_at IS NULL
+                 WHERE a.id = ? AND a.deleted_at IS NULL", 
+                column_name, column_name
+            );
+            
+            let row = query(&query_str)
+                .bind(&activity_id_str)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(DbError::from)?;
+                
+            if let Some(row) = row {
+                let doc_id_str: Option<String> = row.get("doc_id");
+                let doc_id = doc_id_str.map(|id_str| 
+                    Uuid::parse_str(&id_str)
+                        .map_err(|_| DomainError::Internal(format!("Invalid UUID: {}", id_str)))
+                ).transpose()?;
+                
+                let (filename, upload_date, file_size) = if doc_id.is_some() {
+                    (
+                        row.get("original_filename"),
+                        row.get::<Option<String>, _>("created_at").map(|dt_str| 
+                            DateTime::parse_from_rfc3339(&dt_str)
+                                .map_err(|_| DomainError::Internal(format!("Invalid datetime: {}", dt_str)))
+                                .map(|dt| dt.with_timezone(&Utc))
+                        ).transpose()?,
+                        row.get::<Option<i64>, _>("file_size").map(|fs| fs as u64),
+                    )
+                } else {
+                    (None, None, None)
+                };
+                
+                references.push(ActivityDocumentReference {
+                    field_name: field.field_name.to_string(),
+                    display_name: field.display_name.to_string(),
+                    document_id: doc_id,
+                    filename,
+                    upload_date,
+                    file_size,
+                });
+            }
+        }
+        
+        Ok(references)
+    }
+
+    async fn find_by_status(
+        &self,
+        status_id: i64,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Activity>> {
+        let offset = (params.page - 1) * params.per_page;
+
+        // Get total count
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM activities WHERE status_id = ? AND deleted_at IS NULL"
+        )
+        .bind(status_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, ActivityRow>(
+            "SELECT * FROM activities 
+             WHERE status_id = ? AND deleted_at IS NULL 
+             ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        .bind(status_id)
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Activity>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    async fn search_activities(
+        &self,
+        query: &str,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Activity>> {
+        let offset = (params.page - 1) * params.per_page;
+        let search_term = format!("%{}%", query);
+
+        // Get total count - search in description and kpi fields
+        let total: i64 = query_scalar(
+            "SELECT COUNT(*) FROM activities 
+             WHERE (description LIKE ? OR kpi LIKE ?) 
+             AND deleted_at IS NULL"
+        )
+        .bind(&search_term)
+        .bind(&search_term)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Fetch paginated rows
+        let rows = query_as::<_, ActivityRow>(
+            "SELECT * FROM activities 
+             WHERE (description LIKE ? OR kpi LIKE ?) 
+             AND deleted_at IS NULL 
+             ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        .bind(&search_term)
+        .bind(&search_term)
+        .bind(params.per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Activity>>>()?;
+
+        Ok(PaginatedResult::new(
+            entities,
+            total as u64,
+            params,
+        ))
+    }
+
+    async fn find_ids_by_filter(
+        &self,
+        filter: ActivityFilter,
+    ) -> DomainResult<Vec<Uuid>> {
+        use sqlx::QueryBuilder;
+        
+        let mut query_builder = QueryBuilder::new("SELECT a.id FROM activities a WHERE 1=1");
+        
+        if filter.exclude_deleted.unwrap_or(true) {
+            query_builder.push(" AND a.deleted_at IS NULL");
+        }
+        
+        if let Some(status_ids) = &filter.status_ids {
+            if !status_ids.is_empty() {
+                query_builder.push(" AND a.status_id IN (");
+                let mut separated = query_builder.separated(", ");
+                for status_id in status_ids {
+                    separated.push_bind(status_id);
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        if let Some(project_ids) = &filter.project_ids {
+            if !project_ids.is_empty() {
+                query_builder.push(" AND a.project_id IN (");
+                let mut separated = query_builder.separated(", ");
+                for project_id in project_ids {
+                    separated.push_bind(project_id.to_string());
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        if let Some(search_text) = &filter.search_text {
+            if !search_text.trim().is_empty() {
+                let search_pattern = format!("%{}%", search_text.trim());
+                query_builder.push(" AND (a.description LIKE ")
+                    .push_bind(search_pattern.clone())
+                    .push(" OR a.kpi LIKE ")
+                    .push_bind(search_pattern)
+                    .push(")");
+            }
+        }
+        
+        if let Some((start_date, end_date)) = &filter.date_range {
+            if let (Ok(start), Ok(end)) = (
+                DateTime::parse_from_rfc3339(start_date),
+                DateTime::parse_from_rfc3339(end_date)
+            ) {
+                let start_utc = start.with_timezone(&Utc);
+                let end_utc = end.with_timezone(&Utc);
+                
+                query_builder.push(" AND a.updated_at BETWEEN ")
+                    .push_bind(start_utc.to_rfc3339())
+                    .push(" AND ")
+                    .push_bind(end_utc.to_rfc3339());
+            }
+        }
+        
+        if let Some((min_target, max_target)) = &filter.target_value_range {
+            query_builder.push(" AND a.target_value BETWEEN ")
+                .push_bind(min_target)
+                .push(" AND ")
+                .push_bind(max_target);
+        }
+        
+        if let Some((min_actual, max_actual)) = &filter.actual_value_range {
+            query_builder.push(" AND a.actual_value BETWEEN ")
+                .push_bind(min_actual)
+                .push(" AND ")
+                .push_bind(max_actual);
+        }
+        
+        let query = query_builder.build_query_as::<(String,)>();
+        let rows = query.fetch_all(&self.pool).await.map_err(DbError::from)?;
+        
+        rows.into_iter()
+            .map(|(id_str,)| Uuid::parse_str(&id_str).map_err(|e| DomainError::InvalidUuid(e.to_string())))
+            .collect()
+    }
+
+    async fn bulk_update_status(
+        &self,
+        ids: &[Uuid],
+        status_id: i64,
+        auth: &AuthContext,
+    ) -> DomainResult<u64> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+
+        let now = Utc::now();
+        let now_str = now.to_rfc3339();
+        let user_id_str = auth.user_id.to_string();
+        let device_id_str = if auth.device_id.is_empty() {
+            None
+        } else {
+            Some(auth.device_id.clone())
+        };
+
+        // Build query using QueryBuilder pattern from project repository
+        let mut update_builder = QueryBuilder::new("UPDATE activities SET ");
+        update_builder.push("status_id = ").push_bind(status_id);
+        update_builder.push(", status_id_updated_at = ").push_bind(&now_str);
+        update_builder.push(", status_id_updated_by = ").push_bind(&user_id_str);
+        update_builder.push(", status_id_updated_by_device_id = ").push_bind(&device_id_str);
+        update_builder.push(", updated_at = ").push_bind(&now_str);
+        update_builder.push(", updated_by_user_id = ").push_bind(&user_id_str);
+        update_builder.push(", updated_by_device_id = ").push_bind(&device_id_str);
+        update_builder.push(" WHERE id IN (");
+        let mut id_separated = update_builder.separated(",");
+        for id in ids {
+            id_separated.push_bind(id.to_string());
+        }
+        update_builder.push(") AND deleted_at IS NULL");
+
+        let query = update_builder.build();
+        let result = query.execute(&mut *tx).await.map_err(DbError::from)?;
+
+        // Log changes for each updated activity
+        for id in ids {
+            let change = ChangeLogEntry {
+                operation_id: Uuid::new_v4(),
+                entity_table: "activities".to_string(),
+                entity_id: *id,
+                operation_type: ChangeOperationType::Update,
+                field_name: Some("status_id".to_string()),
+                old_value: None, // We'd need to fetch this beforehand if required
+                new_value: Some(status_id.to_string()),
+                document_metadata: None,
+                timestamp: now,
+                user_id: auth.user_id,
+                device_id: if auth.device_id.is_empty() { 
+                    None 
+                } else { 
+                    auth.device_id.parse().ok() 
+                },
+                sync_batch_id: None,
+                processed_at: None,
+                sync_error: None,
+            };
+
+            self.change_log_repo
+                .create_change_log_with_tx(&change, &mut tx)
+                .await
+                .map_err(DomainError::from)?;
+        }
+
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(result.rows_affected())
+    }
+
+    async fn count_by_status(&self) -> DomainResult<Vec<(Option<i64>, i64)>> {
+        let counts = query_as::<_, (Option<i64>, i64)>(
+            "SELECT status_id, COUNT(*) 
+             FROM activities 
+             WHERE deleted_at IS NULL 
+             GROUP BY status_id"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        Ok(counts)
+    }
+    
+    async fn count_by_project(&self) -> DomainResult<Vec<(Option<Uuid>, i64)>> {
+        let rows = query(
+            "SELECT project_id, COUNT(*) as count
+             FROM activities 
+             WHERE deleted_at IS NULL 
+             GROUP BY project_id"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        // Manual mapping to handle Option<Uuid>
+        let mut results = Vec::new();
+        for row in rows {
+            let project_id_str: Option<String> = row.get("project_id");
+            let count: i64 = row.get("count");
+            
+            let project_id = match project_id_str {
+                Some(id_str) => Some(Uuid::parse_str(&id_str).map_err(|_| 
+                    DomainError::Internal(format!("Invalid UUID in project_id: {}", id_str))
+                )?),
+                None => None,
+            };
+            
+            results.push((project_id, count));
+        }
+
+        Ok(results)
+    }
+    
+    async fn get_activity_statistics(&self) -> DomainResult<ActivityStatistics> {
+        // Get total activity count
+        let total_activities: i64 = query_scalar(
+            "SELECT COUNT(*) FROM activities WHERE deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Get document count
+        let document_count: i64 = query_scalar(
+            "SELECT COUNT(*) 
+             FROM media_documents 
+             WHERE related_table = 'activities'
+             AND deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Get status distribution
+        let status_counts = self.count_by_status().await?;
+        let mut by_status = HashMap::new();
+        for (status_id_opt, count) in status_counts {
+            let status_name = match status_id_opt {
+                Some(1) => "Not Started".to_string(),
+                Some(2) => "In Progress".to_string(),
+                Some(3) => "Completed".to_string(),
+                Some(4) => "On Hold".to_string(),
+                Some(id) => format!("Status {}", id),
+                None => "Unspecified".to_string(),
+            };
+            by_status.insert(status_name, count);
+        }
+        
+        // Get project distribution
+        let project_counts = self.count_by_project().await?;
+        let mut by_project = HashMap::new();
+        for (project_id_opt, count) in project_counts {
+            let project_name = match project_id_opt {
+                Some(id) => {
+                    match query_scalar::<_, String>(
+                        "SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL"
+                    )
+                    .bind(id.to_string())
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(DbError::from)? {
+                        Some(name) => name,
+                        None => format!("Project {}", id),
+                    }
+                },
+                None => "No Project".to_string(),
+            };
+            by_project.insert(project_name, count);
+        }
+        
+        // Calculate completion rate (activities with status_id = 3)
+        let completed_count = by_status.get("Completed").unwrap_or(&0);
+        let completion_rate = if total_activities > 0 {
+            (*completed_count as f64 / total_activities as f64) * 100.0
+        } else {
+            0.0
+        };
+        
+        // Calculate average progress (based on actual vs target values)
+        let avg_progress_opt: Option<f64> = query_scalar(
+            "SELECT AVG(CASE 
+                WHEN target_value > 0 THEN (actual_value / target_value) * 100.0 
+                ELSE NULL 
+             END) 
+             FROM activities 
+             WHERE deleted_at IS NULL 
+             AND target_value IS NOT NULL 
+             AND actual_value IS NOT NULL"
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(DbError::from)?
+        .flatten();
+        
+        let average_progress = avg_progress_opt.unwrap_or(0.0);
+        
+        Ok(ActivityStatistics {
+            total_activities,
+            by_status,
+            by_project,
+            completion_rate,
+            average_progress,
+            document_count,
+        })
+    }
+    
+    async fn get_activity_status_breakdown(&self) -> DomainResult<Vec<ActivityStatusBreakdown>> {
+        // Get status counts
+        let status_counts = self.count_by_status().await?;
+        
+        // Get total count for percentage calculation
+        let total: i64 = status_counts.iter().map(|(_, count)| count).sum();
+        
+        // Create breakdown objects
+        let mut breakdown = Vec::new();
+        for (status_id_opt, count) in status_counts {
+            let status_id = status_id_opt.unwrap_or(0);
+            let status_name = match status_id {
+                1 => "Not Started".to_string(),
+                2 => "In Progress".to_string(),
+                3 => "Completed".to_string(),
+                4 => "On Hold".to_string(),
+                _ => "Unknown".to_string(),
+            };
+            
+            let percentage = if total > 0 {
+                (count as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            };
+            
+            breakdown.push(ActivityStatusBreakdown {
+                status_id,
+                status_name,
+                count,
+                percentage,
+            });
+        }
+        
+        // Sort by status ID for consistent order
+        breakdown.sort_by_key(|b| b.status_id);
+        
+        Ok(breakdown)
+    }
+    
+    async fn get_activity_metadata_counts(&self) -> DomainResult<ActivityMetadataCounts> {
+        // Get project counts
+        let project_counts = self.count_by_project().await?;
+        let mut activities_by_project = HashMap::new();
+        for (project_id_opt, count) in project_counts {
+            let project_name = match project_id_opt {
+                Some(id) => {
+                    match query_scalar::<_, String>(
+                        "SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL"
+                    )
+                    .bind(id.to_string())
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(DbError::from)? {
+                        Some(name) => name,
+                        None => format!("Project {}", id),
+                    }
+                },
+                None => "No Project".to_string(),
+            };
+            activities_by_project.insert(project_name, count);
+        }
+        
+        // Get status counts
+        let status_counts = self.count_by_status().await?;
+        let mut activities_by_status = HashMap::new();
+        for (status_id_opt, count) in status_counts {
+            let status_name = match status_id_opt {
+                Some(1) => "Not Started".to_string(),
+                Some(2) => "In Progress".to_string(),
+                Some(3) => "Completed".to_string(),
+                Some(4) => "On Hold".to_string(),
+                Some(id) => format!("Status {}", id),
+                None => "Unspecified".to_string(),
+            };
+            activities_by_status.insert(status_name, count);
+        }
+        
+        // Count activities with targets
+        let activities_with_targets: i64 = query_scalar(
+            "SELECT COUNT(*) FROM activities WHERE target_value IS NOT NULL AND deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Count activities with actuals
+        let activities_with_actuals: i64 = query_scalar(
+            "SELECT COUNT(*) FROM activities WHERE actual_value IS NOT NULL AND deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        // Count activities with documents (activities that have at least one document reference)
+        let activities_with_documents: i64 = query_scalar(
+            "SELECT COUNT(*) FROM activities 
+             WHERE (photo_evidence_ref IS NOT NULL 
+                    OR receipts_ref IS NOT NULL 
+                    OR signed_report_ref IS NOT NULL 
+                    OR monitoring_data_ref IS NOT NULL 
+                    OR output_verification_ref IS NOT NULL)
+             AND deleted_at IS NULL"
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+        
+        Ok(ActivityMetadataCounts {
+            activities_by_project,
+            activities_by_status,
+            activities_with_targets,
+            activities_with_actuals,
+            activities_with_documents,
+        })
     }
 }
 

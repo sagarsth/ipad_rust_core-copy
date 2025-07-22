@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use crate::domains::document::types::MediaDocumentResponse;
@@ -419,7 +419,7 @@ pub struct StatusInfo {
 }
 
 /// ActivityResponse DTO - used for API responses
-/// Aligned with v1_schema.sql
+/// Aligned with v1_schema.sql and enhanced with enrichment fields
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActivityResponse {
     pub id: Uuid,
@@ -434,7 +434,9 @@ pub struct ActivityResponse {
     pub progress_percentage: Option<f64>, // Calculated field
     // Removed start/end date, is_active
     pub status_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<StatusInfo>,      // Populated when details are fetched
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectSummary>, // Populated when details are fetched
     pub created_at: String,
     pub updated_at: String,
@@ -443,7 +445,17 @@ pub struct ActivityResponse {
     pub deleted_at: Option<DateTime<Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
 
-    // Added for enrichment
+    // Enhanced enrichment fields following Project domain patterns
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_by_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_count: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Vec<MediaDocumentResponse>>,
 }
@@ -472,7 +484,13 @@ impl From<Activity> for ActivityResponse {
             updated_by_user_id: activity.updated_by_user_id,
             deleted_at: activity.deleted_at,
             deleted_by_user_id: activity.deleted_by_user_id,
-            documents: None, // Default to None, enrichment happens in service
+            // Initialize enrichment fields to None
+            created_by_username: None,
+            updated_by_username: None,
+            project_name: None,
+            status_name: None,
+            document_count: None,
+            documents: None,
         }
     }
 }
@@ -489,6 +507,125 @@ impl ActivityResponse {
         self.status = Some(status);
         self
     }
+
+    /// Set created by username
+    pub fn with_created_by_username(mut self, username: String) -> Self {
+        self.created_by_username = Some(username);
+        self
+    }
+
+    /// Set updated by username
+    pub fn with_updated_by_username(mut self, username: String) -> Self {
+        self.updated_by_username = Some(username);
+        self
+    }
+
+    /// Set project name
+    pub fn with_project_name(mut self, name: String) -> Self {
+        self.project_name = Some(name);
+        self
+    }
+
+    /// Set status name
+    pub fn with_status_name(mut self, name: String) -> Self {
+        self.status_name = Some(name);
+        self
+    }
+
+    /// Set document count
+    pub fn with_document_count(mut self, count: i64) -> Self {
+        self.document_count = Some(count);
+        self
+    }
+
+    /// Add documents to the response
+    pub fn with_documents(mut self, documents: Vec<MediaDocumentResponse>) -> Self {
+        self.documents = Some(documents);
+        self
+    }
+}
+
+/// Document reference summary for an activity
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityDocumentReference {
+    pub field_name: String,
+    pub display_name: String,
+    pub document_id: Option<Uuid>,
+    pub filename: Option<String>,
+    pub upload_date: Option<DateTime<Utc>>,
+    pub file_size: Option<u64>,
+}
+
+/// Comprehensive filter for searching activities with multiple criteria,
+/// allowing for intuitive, multi-faceted filtering from the UI.
+/// Follows the same pattern as ProjectFilter for consistency.
+#[derive(Debug, serde::Deserialize, serde::Serialize, Clone, Default)]
+pub struct ActivityFilter {
+    /// Filter by one or more statuses (e.g., "In Progress", "Completed").
+    /// Uses OR logic internally: status_id = 1 OR status_id = 2.
+    pub status_ids: Option<Vec<i64>>,
+    
+    /// Filter by one or more parent projects.
+    /// Uses OR logic internally.
+    pub project_ids: Option<Vec<Uuid>>,
+    
+    /// A free-text search term to apply to description, KPI, etc.
+    pub search_text: Option<String>,
+    
+    /// Filter for activities updated within a specific date range.
+    pub date_range: Option<(String, String)>, // (start_rfc3339, end_rfc3339)
+    
+    /// Filter by target value range (min, max)
+    pub target_value_range: Option<(f64, f64)>,
+    
+    /// Filter by actual value range (min, max)
+    pub actual_value_range: Option<(f64, f64)>,
+    
+    /// Whether to exclude soft-deleted records. Defaults to true.
+    pub exclude_deleted: Option<bool>,
+}
+
+/// Activity statistics for dashboard views
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityStatistics {
+    pub total_activities: i64,
+    pub by_status: HashMap<String, i64>,
+    pub by_project: HashMap<String, i64>,
+    pub completion_rate: f64,
+    pub average_progress: f64,
+    pub document_count: i64,
+}
+
+/// Activity status breakdown for reporting
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityStatusBreakdown {
+    pub status_id: i64,
+    pub status_name: String,
+    pub count: i64,
+    pub percentage: f64,
+}
+
+/// Activity metadata counts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityMetadataCounts {
+    pub activities_by_project: HashMap<String, i64>,
+    pub activities_by_status: HashMap<String, i64>,
+    pub activities_with_targets: i64,
+    pub activities_with_actuals: i64,
+    pub activities_with_documents: i64,
+}
+
+/// Activity progress analysis for dashboard widgets
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityProgressAnalysis {
+    pub activities_on_track: i64,        // Progress >= 80%
+    pub activities_behind: i64,          // Progress < 50%
+    pub activities_at_risk: i64,         // Progress 50-79%
+    pub activities_no_progress: i64,     // Progress = 0%
+    pub average_progress_percentage: f64,
+    pub completion_rate: f64,
+    pub activities_with_targets: i64,
+    pub activities_without_targets: i64,
 }
 
 /// Enum to specify which related entities to include in the response.

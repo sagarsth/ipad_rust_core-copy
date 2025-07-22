@@ -13,6 +13,216 @@ use crate::domains::sync::types::SyncPriority;
 use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetadata, FieldType};
 use std::collections::{HashSet, HashMap};
 
+/// Filter for complex participant queries - enables bulk filtering like project domain
+///
+/// # Disability Filtering Examples:
+/// 
+/// ```rust
+/// // Simple: Show all participants with ANY disability
+/// let filter = ParticipantFilter::new().with_any_disability();
+/// 
+/// // Simple: Show all participants with NO disability  
+/// let filter = ParticipantFilter::new().with_no_disability();
+/// 
+/// // Advanced: Show participants with specific disability types (after long-press)
+/// let disability_types = vec!["visual".to_string(), "hearing".to_string()];
+/// let filter = ParticipantFilter::new().with_specific_disability_types(disability_types);
+/// 
+/// // Combined filtering: Age group + specific disability types
+/// let filter = ParticipantFilter::new()
+///     .with_age_groups(vec!["adult".to_string()])
+///     .with_specific_disability_types(vec!["mobility".to_string()]);
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ParticipantFilter {
+    pub genders: Option<Vec<String>>,
+    pub age_groups: Option<Vec<String>>,
+    pub locations: Option<Vec<String>>,
+    /// Simple disability toggle: true = any disability, false = no disability
+    /// If disability_types is also specified, disability_types takes precedence
+    pub disability: Option<bool>,
+    /// Advanced disability filtering: filter by specific disability types (OR logic within types)
+    /// When specified, this takes precedence over the simple disability boolean
+    /// Automatically implies disability = true since you can't have a type without having a disability
+    pub disability_types: Option<Vec<String>>,
+    pub search_text: Option<String>,
+    pub date_range: Option<(String, String)>, // (start_date, end_date)
+    pub created_by_user_ids: Option<Vec<Uuid>>,
+    pub workshop_ids: Option<Vec<Uuid>>, // Filter by participants in specific workshops
+    pub has_documents: Option<bool>,
+    pub document_linked_fields: Option<Vec<String>>, // Filter by participants with documents in specific fields
+    #[serde(default = "default_true")]
+    pub exclude_deleted: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl ParticipantFilter {
+    /// Create a new empty filter
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Add gender filter
+    pub fn with_genders(mut self, genders: Vec<String>) -> Self {
+        self.genders = Some(genders);
+        self
+    }
+    
+    /// Add age group filter
+    pub fn with_age_groups(mut self, age_groups: Vec<String>) -> Self {
+        self.age_groups = Some(age_groups);
+        self
+    }
+    
+    /// Add location filter
+    pub fn with_locations(mut self, locations: Vec<String>) -> Self {
+        self.locations = Some(locations);
+        self
+    }
+    
+    /// Add disability filter
+    pub fn with_disability(mut self, has_disability: bool) -> Self {
+        self.disability = Some(has_disability);
+        self
+    }
+    
+    /// Add disability type filter
+    pub fn with_disability_types(mut self, disability_types: Vec<String>) -> Self {
+        self.disability_types = Some(disability_types);
+        self
+    }
+    
+    /// Simple method: filter for participants with ANY disability
+    pub fn with_any_disability(mut self) -> Self {
+        self.disability = Some(true);
+        // Clear disability_types to ensure the boolean filter is used
+        self.disability_types = None;
+        self
+    }
+    
+    /// Simple method: filter for participants with NO disability
+    pub fn with_no_disability(mut self) -> Self {
+        self.disability = Some(false);
+        // Clear disability_types to ensure the boolean filter is used
+        self.disability_types = None;
+        self
+    }
+    
+    /// Advanced method: filter for participants with specific disability types
+    /// This automatically implies disability = true and takes precedence over disability boolean
+    pub fn with_specific_disability_types(mut self, disability_types: Vec<String>) -> Self {
+        self.disability_types = Some(disability_types);
+        // Don't clear disability boolean - it might be used for validation but disability_types takes precedence
+        self
+    }
+    
+    /// Add search text filter
+    pub fn with_search_text(mut self, search_text: String) -> Self {
+        self.search_text = Some(search_text);
+        self
+    }
+    
+    /// Add date range filter
+    pub fn with_date_range(mut self, start_date: String, end_date: String) -> Self {
+        self.date_range = Some((start_date, end_date));
+        self
+    }
+    
+    /// Add created by user filter
+    pub fn with_created_by_users(mut self, user_ids: Vec<Uuid>) -> Self {
+        self.created_by_user_ids = Some(user_ids);
+        self
+    }
+    
+    /// Add workshop participation filter
+    pub fn with_workshops(mut self, workshop_ids: Vec<Uuid>) -> Self {
+        self.workshop_ids = Some(workshop_ids);
+        self
+    }
+    
+    /// Add document existence filter
+    pub fn with_has_documents(mut self, has_documents: bool) -> Self {
+        self.has_documents = Some(has_documents);
+        self
+    }
+    
+    /// Add document linked field filter
+    pub fn with_document_linked_fields(mut self, fields: Vec<String>) -> Self {
+        self.document_linked_fields = Some(fields);
+        self
+    }
+    
+    /// Include soft-deleted records
+    pub fn include_deleted(mut self) -> Self {
+        self.exclude_deleted = false;
+        self
+    }
+    
+    /// Check if filter is empty (no filtering criteria)
+    pub fn is_empty(&self) -> bool {
+        self.genders.is_none() 
+            && self.age_groups.is_none()
+            && self.locations.is_none()
+            && self.disability.is_none()
+            && self.disability_types.is_none()
+            && self.search_text.is_none()
+            && self.date_range.is_none()
+            && self.created_by_user_ids.is_none()
+            && self.workshop_ids.is_none()
+            && self.has_documents.is_none()
+            && self.document_linked_fields.is_none()
+    }
+}
+
+impl Validate for ParticipantFilter {
+    fn validate(&self) -> DomainResult<()> {
+        // Validate gender values
+        if let Some(genders) = &self.genders {
+            for gender in genders {
+                common::validate_gender(gender)?;
+            }
+        }
+        
+        // Validate age group values
+        if let Some(age_groups) = &self.age_groups {
+            for age_group in age_groups {
+                common::validate_age_group(age_group)?;
+            }
+        }
+        
+        // Validate date range format
+        if let Some((start_date, end_date)) = &self.date_range {
+            DateTime::parse_from_rfc3339(start_date)
+                .map_err(|_| DomainError::Validation(ValidationError::format("start_date", "Invalid RFC3339 format")))?;
+            DateTime::parse_from_rfc3339(end_date)
+                .map_err(|_| DomainError::Validation(ValidationError::format("end_date", "Invalid RFC3339 format")))?;
+        }
+        
+        // Validate document linked fields
+        if let Some(fields) = &self.document_linked_fields {
+            let valid_fields: HashSet<String> = Participant::field_metadata()
+                .into_iter()
+                .filter(|f| f.supports_documents)
+                .map(|f| f.field_name.to_string())
+                .collect();
+                
+            for field in fields {
+                if !valid_fields.contains(field) {
+                    return Err(DomainError::Validation(ValidationError::format(
+                        "document_linked_fields",
+                        &format!("Invalid field '{}'. Valid fields: {:?}", field, valid_fields)
+                    )));
+                }
+            }
+        }
+        
+        Ok(())
+    }
+}
+
 /// Gender enum with string representation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Gender {

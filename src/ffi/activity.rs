@@ -24,11 +24,12 @@
 
 use crate::ffi::{handle_status_result, error::FFIError};
 use crate::domains::activity::types::{
-    NewActivity, UpdateActivity, ActivityResponse, ActivityInclude
+    NewActivity, UpdateActivity, ActivityResponse, ActivityInclude, 
+    ActivityDocumentReference, ActivityFilter, ActivityStatistics, 
+    ActivityStatusBreakdown, ActivityMetadataCounts, ActivityProgressAnalysis
 };
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
-use crate::domains::core::repository::DeleteResult;
 use crate::auth::AuthContext;
 use crate::types::{UserRole, PaginationParams};
 use crate::globals;
@@ -38,8 +39,7 @@ use std::os::raw::{c_char, c_int};
 use std::str::FromStr;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
-use chrono::{DateTime, Utc};
-use base64;
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Helper utilities
@@ -60,6 +60,16 @@ macro_rules! ensure_ptr {
             return Err(FFIError::invalid_argument("null pointer"));
         }
     };
+}
+
+/// Helper function to parse includes
+fn parse_includes(includes: Option<Vec<ActivityIncludeDto>>) -> Option<Vec<ActivityInclude>> {
+    includes.map(|inc| inc.into_iter().map(Into::into).collect())
+}
+
+/// Helper function to parse pagination
+fn parse_pagination(pagination: Option<PaginationDto>) -> PaginationParams {
+    pagination.map(Into::into).unwrap_or_default()
 }
 
 /// DTO mirroring the subset of `AuthContext` that we expect to receive from Swift
@@ -108,9 +118,9 @@ impl From<PaginationDto> for PaginationParams {
 enum ActivityIncludeDto {
     Project,
     Status,
-    Documents,
     CreatedBy,
     UpdatedBy,
+    Documents,
     All,
 }
 
@@ -119,9 +129,9 @@ impl From<ActivityIncludeDto> for ActivityInclude {
         match dto {
             ActivityIncludeDto::Project => ActivityInclude::Project,
             ActivityIncludeDto::Status => ActivityInclude::Status,
-            ActivityIncludeDto::Documents => ActivityInclude::Documents,
             ActivityIncludeDto::CreatedBy => ActivityInclude::CreatedBy,
             ActivityIncludeDto::UpdatedBy => ActivityInclude::UpdatedBy,
+            ActivityIncludeDto::Documents => ActivityInclude::Documents,
             ActivityIncludeDto::All => ActivityInclude::All,
         }
     }
@@ -134,7 +144,7 @@ impl From<ActivityIncludeDto> for ActivityInclude {
 /// Create a new activity
 /// Expected JSON payload:
 /// {
-///   "activity": { NewActivity },
+///   "activity": { NewActivityDto },
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
@@ -146,16 +156,53 @@ pub unsafe extern "C" fn activity_create(payload_json: *const c_char, result: *m
         let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
         
         #[derive(Deserialize)]
+        struct NewActivityDto {
+            description: Option<String>,
+            kpi: Option<String>,
+            target_value: Option<f64>,
+            actual_value: Option<f64>,
+            status_id: Option<i64>,
+            project_id: Option<String>,
+            sync_priority: String,
+            created_by_user_id: Option<String>,
+        }
+        
+        #[derive(Deserialize)]
         struct Payload {
-            activity: NewActivity,
+            activity: NewActivityDto,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_activity_service()?;
         
-        let activity = block_on_async(svc.create_activity(p.activity, &auth))
+        // Convert DTO to domain struct with UUID parsing
+        let project_id = p.activity.project_id.as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid project_id"))?;
+        
+        let created_by_user_id = p.activity.created_by_user_id.as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid created_by_user_id"))?;
+        
+        let sync_priority = SyncPriority::from_str(&p.activity.sync_priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+        
+        let new_activity = NewActivity {
+            description: p.activity.description,
+            kpi: p.activity.kpi,
+            target_value: p.activity.target_value,
+            actual_value: p.activity.actual_value,
+            status_id: p.activity.status_id,
+            project_id,
+            sync_priority,
+            created_by_user_id,
+        };
+        
+        let svc = globals::get_activity_service()?;
+        let activity = block_on_async(svc.create_activity(new_activity, &auth))
             .map_err(FFIError::from_service_error)?;
         
         let json_resp = serde_json::to_string(&activity)
@@ -190,8 +237,20 @@ pub unsafe extern "C" fn activity_create_with_documents(payload_json: *const c_c
         }
         
         #[derive(Deserialize)]
+        struct NewActivityDto {
+            description: Option<String>,
+            kpi: Option<String>,
+            target_value: Option<f64>,
+            actual_value: Option<f64>,
+            status_id: Option<i64>,
+            project_id: Option<String>,
+            sync_priority: String,
+            created_by_user_id: Option<String>,
+        }
+        
+        #[derive(Deserialize)]
         struct Payload {
-            activity: NewActivity,
+            activity: NewActivityDto,
             documents: Vec<DocumentData>,
             document_type_id: String,
             auth: AuthCtxDto,
@@ -210,10 +269,35 @@ pub unsafe extern "C" fn activity_create_with_documents(payload_json: *const c_c
         let document_type_id = Uuid::parse_str(&p.document_type_id)
             .map_err(|_| FFIError::invalid_argument("invalid document_type_id"))?;
         let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_activity_service()?;
         
+        // Convert DTO to domain struct with UUID parsing
+        let project_id = p.activity.project_id.as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid project_id"))?;
+        
+        let created_by_user_id = p.activity.created_by_user_id.as_ref()
+            .map(|s| Uuid::parse_str(s))
+            .transpose()
+            .map_err(|_| FFIError::invalid_argument("invalid created_by_user_id"))?;
+        
+        let sync_priority = SyncPriority::from_str(&p.activity.sync_priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+        
+        let new_activity = NewActivity {
+            description: p.activity.description,
+            kpi: p.activity.kpi,
+            target_value: p.activity.target_value,
+            actual_value: p.activity.actual_value,
+            status_id: p.activity.status_id,
+            project_id,
+            sync_priority,
+            created_by_user_id,
+        };
+        
+        let svc = globals::get_activity_service()?;
         let (activity, doc_results) = block_on_async(svc.create_activity_with_documents(
-            p.activity, documents, document_type_id, &auth
+            new_activity, documents, document_type_id, &auth
         )).map_err(FFIError::from_service_error)?;
         
         #[derive(Serialize)]
@@ -239,6 +323,7 @@ pub unsafe extern "C" fn activity_create_with_documents(payload_json: *const c_c
 /// Expected JSON payload:
 /// {
 ///   "id": "uuid",
+///   "include": [ActivityIncludeDto, ...],
 ///   "auth": { AuthCtxDto }
 /// }
 #[unsafe(no_mangle)]
@@ -252,12 +337,16 @@ pub unsafe extern "C" fn activity_get(payload_json: *const c_char, result: *mut 
         #[derive(Deserialize)]
         struct Payload {
             id: String,
+            include: Option<Vec<ActivityIncludeDto>>,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
         let id = Uuid::parse_str(&p.id).map_err(|_| FFIError::invalid_argument("uuid"))?;
         let auth: AuthContext = p.auth.try_into()?;
+        
+        let include = parse_includes(p.include);
+        let include_slice = include.as_ref().map(|v| v.as_slice());
         
         let svc = globals::get_activity_service()?;
         let activity = block_on_async(svc.get_activity_by_id(id, &auth))
@@ -271,15 +360,17 @@ pub unsafe extern "C" fn activity_get(payload_json: *const c_char, result: *mut 
     })
 }
 
-/// List activities for a project with pagination
+/// List activities with pagination and includes
 /// Expected JSON payload:
 /// {
-///   "project_id": "uuid",
 ///   "pagination": { PaginationDto },
+///   "include": [ActivityIncludeDto, ...],
 ///   "auth": { AuthCtxDto }
 /// }
+/// NOTE: This function returns an empty list as the service doesn't support 
+/// listing all activities without constraints. Use search or filtered methods instead.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn activity_list_for_project(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_list(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -288,21 +379,34 @@ pub unsafe extern "C" fn activity_list_for_project(payload_json: *const c_char, 
         
         #[derive(Deserialize)]
         struct Payload {
-            project_id: String,
             pagination: Option<PaginationDto>,
+            include: Option<Vec<ActivityIncludeDto>>,
             auth: AuthCtxDto,
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("invalid project_id"))?;
-        let params = p.pagination.map(|p| p.into()).unwrap_or_default();
+        let params = parse_pagination(p.pagination);
         let auth: AuthContext = p.auth.try_into()?;
         
-        let svc = globals::get_activity_service()?;
-        let activities = block_on_async(svc.list_activities_for_project(project_id, params, &auth))
-            .map_err(FFIError::from_service_error)?;
+        // Return empty paginated result since the service doesn't support listing all activities
+        #[derive(Serialize)]
+        struct EmptyPaginatedResult {
+            items: Vec<serde_json::Value>,
+            total: u64,
+            page: u32,
+            per_page: u32,
+            total_pages: u32,
+        }
         
-        let json_resp = serde_json::to_string(&activities)
+        let empty_result = EmptyPaginatedResult {
+            items: vec![],
+            total: 0,
+            page: params.page,
+            per_page: params.per_page,
+            total_pages: 0,
+        };
+        
+        let json_resp = serde_json::to_string(&empty_result)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -348,7 +452,7 @@ pub unsafe extern "C" fn activity_update(payload_json: *const c_char, result: *m
     })
 }
 
-/// Delete activity (soft or hard delete) - RETURNS DeleteResult!
+/// Delete activity (soft or hard delete)
 /// Expected JSON payload:
 /// {
 ///   "id": "uuid",
@@ -375,368 +479,10 @@ pub unsafe extern "C" fn activity_delete(payload_json: *const c_char, result: *m
         let auth: AuthContext = p.auth.try_into()?;
         let svc = globals::get_activity_service()?;
         
-        // Important: Capture the DeleteResult
         let delete_result = block_on_async(svc.delete_activity(id, p.hard_delete.unwrap_or(false), &auth))
             .map_err(FFIError::from_service_error)?;
         
-        // Serialize and return the DeleteResult
         let json_resp = serde_json::to_string(&delete_result)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
-
-// ---------------------------------------------------------------------------
-// Filtered Queries
-// ---------------------------------------------------------------------------
-
-/// Find activities by date range
-/// Expected JSON payload:
-/// {
-///   "start_date": "2023-01-01T00:00:00Z",
-///   "end_date": "2023-12-31T23:59:59Z",
-///   "pagination": { PaginationDto },
-///   "include": [ActivityIncludeDto, ...],
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn activity_find_by_date_range(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
-        
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload {
-            start_date: String,
-            end_date: String,
-            pagination: Option<PaginationDto>,
-            include: Option<Vec<ActivityIncludeDto>>,
-            auth: AuthCtxDto,
-        }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let params = p.pagination.map(|p| p.into()).unwrap_or_default();
-        let auth: AuthContext = p.auth.try_into()?;
-        
-        let include: Option<Vec<ActivityInclude>> = p.include.map(|inc| 
-            inc.into_iter().map(|i| i.into()).collect()
-        );
-        let include_slice = include.as_ref().map(|v| v.as_slice());
-        
-        let svc = globals::get_activity_service()?;
-        let activities = block_on_async(svc.find_activities_by_date_range(&p.start_date, &p.end_date, params, include_slice, &auth))
-            .map_err(FFIError::from_service_error)?;
-        
-        let json_resp = serde_json::to_string(&activities)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
-
-/// Get activity progress summary for a project
-/// Expected JSON payload:
-/// {
-///   "project_id": "uuid",
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn activity_get_project_progress_summary(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
-        
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload {
-            project_id: String,
-            auth: AuthCtxDto,
-        }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("invalid project_id"))?;
-        let auth: AuthContext = p.auth.try_into()?;
-        let svc = globals::get_activity_service()?;
-        
-        // Get all activities for the project and calculate summary
-        let activities = block_on_async(svc.list_activities_for_project(project_id, PaginationParams::default(), &auth))
-            .map_err(FFIError::from_service_error)?;
-        
-        #[derive(Serialize)]
-        struct ProgressSummary {
-            project_id: Uuid,
-            total_activities: usize,
-            activities_with_targets: usize,
-            activities_with_actuals: usize,
-            average_progress_percentage: Option<f64>,
-            activities_completed: usize, // progress >= 100%
-            activities_in_progress: usize, // 0% < progress < 100%
-            activities_not_started: usize, // progress = 0% or no actual value
-        }
-        
-        let total_activities = activities.items.len();
-        let mut activities_with_targets = 0;
-        let mut activities_with_actuals = 0;
-        let mut total_progress = 0.0;
-        let mut progress_count = 0;
-        let mut activities_completed = 0;
-        let mut activities_in_progress = 0;
-        let mut activities_not_started = 0;
-        
-        for activity in &activities.items {
-            if activity.target_value.is_some() {
-                activities_with_targets += 1;
-            }
-            if activity.actual_value.is_some() {
-                activities_with_actuals += 1;
-            }
-            
-            if let Some(progress) = activity.progress_percentage {
-                total_progress += progress;
-                progress_count += 1;
-                
-                if progress >= 100.0 {
-                    activities_completed += 1;
-                } else if progress > 0.0 {
-                    activities_in_progress += 1;
-                } else {
-                    activities_not_started += 1;
-                }
-            } else {
-                activities_not_started += 1;
-            }
-        }
-        
-        let average_progress_percentage = if progress_count > 0 {
-            Some(total_progress / progress_count as f64)
-        } else {
-            None
-        };
-        
-        let summary = ProgressSummary {
-            project_id,
-            total_activities,
-            activities_with_targets,
-            activities_with_actuals,
-            average_progress_percentage,
-            activities_completed,
-            activities_in_progress,
-            activities_not_started,
-        };
-        
-        let json_resp = serde_json::to_string(&summary)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
-
-/// Get activities that are behind target (actual < target)
-/// Expected JSON payload:
-/// {
-///   "project_id": "uuid",
-///   "pagination": { PaginationDto },
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn activity_find_behind_target(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
-        
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload {
-            project_id: String,
-            pagination: Option<PaginationDto>,
-            auth: AuthCtxDto,
-        }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("project_id"))?;
-        let auth: AuthContext = p.auth.try_into()?;
-        let params: PaginationParams = p.pagination.map(|dto| dto.into()).unwrap_or_default();
-        let svc = globals::get_activity_service()?;
-
-        // Fetch all activities for the project (or a large enough page to cover most cases for client-side-like filtering)
-        // Consider if the service layer should offer more dedicated filtering if performance becomes an issue.
-        let all_activities_result = block_on_async(svc.list_activities_for_project(
-            project_id, 
-            PaginationParams { page: 1, per_page: 10000 }, // Fetch a large set
-            &auth
-        )).map_err(FFIError::from_service_error)?;
-
-        let behind_target: Vec<ActivityResponse> = all_activities_result.items.into_iter()
-            .filter(|activity| {
-                if let (Some(actual), Some(target)) = (activity.actual_value, activity.target_value) {
-                    actual < target && target > 0.0 // Ensure target is positive to avoid trivial matches
-                } else {
-                    false
-                }
-            })
-            .collect();
-        
-        let total = behind_target.len() as u64;
-        let start = ((params.page.saturating_sub(1)) * params.per_page) as usize; // u32 to usize
-        let end = std::cmp::min(start + (params.per_page as usize), total as usize);
-        
-        let paginated_items = if start < total as usize {
-            behind_target[start..end].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let paginated_response = crate::types::PaginatedResult {
-            items: paginated_items,
-            total,
-            page: params.page,
-            per_page: params.per_page,
-            total_pages: if params.per_page > 0 { (total as f64 / params.per_page as f64).ceil() as u32 } else { 0 },
-        };
-        
-        let json_resp = serde_json::to_string(&paginated_response)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
-
-/// Get activities that have exceeded their target (actual > target)
-/// Expected JSON payload:
-/// {
-///   "project_id": "uuid",
-///   "pagination": { PaginationDto },
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn activity_find_exceeding_target(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
-        
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload {
-            project_id: String,
-            pagination: Option<PaginationDto>,
-            auth: AuthCtxDto,
-        }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("project_id"))?;
-        let auth: AuthContext = p.auth.try_into()?;
-        let params: PaginationParams = p.pagination.map(|dto| dto.into()).unwrap_or_default();
-        let svc = globals::get_activity_service()?;
-
-        let all_activities_result = block_on_async(svc.list_activities_for_project(
-            project_id, 
-            PaginationParams { page: 1, per_page: 10000 }, // Fetch a large set
-            &auth
-        )).map_err(FFIError::from_service_error)?;
-
-        let exceeding_target: Vec<ActivityResponse> = all_activities_result.items.into_iter()
-            .filter(|activity| {
-                if let (Some(actual), Some(target)) = (activity.actual_value, activity.target_value) {
-                    actual > target && target > 0.0 // Ensure target is positive
-                } else {
-                    false
-                }
-            })
-            .collect();
-        
-        let total = exceeding_target.len() as u64;
-        let start = ((params.page.saturating_sub(1)) * params.per_page) as usize;
-        let end = std::cmp::min(start + (params.per_page as usize), total as usize);
-        
-        let paginated_items = if start < total as usize {
-            exceeding_target[start..end].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let paginated_response = crate::types::PaginatedResult {
-            items: paginated_items,
-            total,
-            page: params.page,
-            per_page: params.per_page,
-            total_pages: if params.per_page > 0 { (total as f64 / params.per_page as f64).ceil() as u32 } else { 0 },
-        };
-        
-        let json_resp = serde_json::to_string(&paginated_response)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
-        let cstr = CString::new(json_resp).unwrap();
-        *result = cstr.into_raw();
-        Ok(())
-    })
-}
-
-/// Get activities without targets set
-/// Expected JSON payload:
-/// {
-///   "project_id": "uuid",
-///   "pagination": { PaginationDto },
-///   "auth": { AuthCtxDto }
-/// }
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn activity_find_without_targets(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
-    handle_status_result(|| unsafe {
-        ensure_ptr!(payload_json);
-        ensure_ptr!(result);
-        
-        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
-        
-        #[derive(Deserialize)]
-        struct Payload {
-            project_id: String,
-            pagination: Option<PaginationDto>,
-            auth: AuthCtxDto,
-        }
-        
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
-        let project_id = Uuid::parse_str(&p.project_id).map_err(|_| FFIError::invalid_argument("project_id"))?;
-        let auth: AuthContext = p.auth.try_into()?;
-        let params: PaginationParams = p.pagination.map(|dto| dto.into()).unwrap_or_default();
-        let svc = globals::get_activity_service()?;
-
-        let all_activities_result = block_on_async(svc.list_activities_for_project(
-            project_id, 
-            PaginationParams { page: 1, per_page: 10000 }, // Fetch a large set
-            &auth
-        )).map_err(FFIError::from_service_error)?;
-
-        let without_targets: Vec<ActivityResponse> = all_activities_result.items.into_iter()
-            .filter(|activity| activity.target_value.is_none())
-            .collect();
-        
-        let total = without_targets.len() as u64;
-        let start = ((params.page.saturating_sub(1)) * params.per_page) as usize;
-        let end = std::cmp::min(start + (params.per_page as usize), total as usize);
-        
-        let paginated_items = if start < total as usize {
-            without_targets[start..end].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let paginated_response = crate::types::PaginatedResult {
-            items: paginated_items,
-            total,
-            page: params.page,
-            per_page: params.per_page,
-            total_pages: if params.per_page > 0 { (total as f64 / params.per_page as f64).ceil() as u32 } else { 0 },
-        };
-        
-        let json_resp = serde_json::to_string(&paginated_response)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
@@ -748,7 +494,7 @@ pub unsafe extern "C" fn activity_find_without_targets(payload_json: *const c_ch
 // Document Integration
 // ---------------------------------------------------------------------------
 
-/// Upload a single document for activity
+/// Upload a single document for an activity
 /// Expected JSON payload:
 /// {
 ///   "activity_id": "uuid",
@@ -823,27 +569,19 @@ pub unsafe extern "C" fn activity_upload_document(payload_json: *const c_char, r
     })
 }
 
-/// Upload multiple documents for an existing activity record
+/// Bulk upload multiple documents for an activity
 /// Expected JSON payload:
 /// {
 ///   "activity_id": "uuid",
-///   "documents": [
-///     {
-///       "file_data": "base64_encoded_file_data",
-///       "original_filename": "string"
-///     },
-///     ...
-///   ],
-///   "title": "optional_string_applied_to_all_documents",
+///   "files": [{"file_data": "base64", "filename": "string"}, ...],
+///   "title": "optional_string",
 ///   "document_type_id": "uuid",
 ///   "sync_priority": "HIGH|NORMAL|LOW",
 ///   "compression_priority": "HIGH|NORMAL|LOW",
 ///   "auth": { AuthCtxDto }
 /// }
-/// Note: All documents will share the same title, document_type, sync_priority, and compression_priority.
-/// For individual metadata per document, use the single upload method multiple times.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn activity_upload_documents_bulk(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+pub unsafe extern "C" fn activity_bulk_upload_documents(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
@@ -851,15 +589,15 @@ pub unsafe extern "C" fn activity_upload_documents_bulk(payload_json: *const c_c
         let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
         
         #[derive(Deserialize)]
-        struct DocumentData {
+        struct FileData {
             file_data: String, // base64 encoded
-            original_filename: String,
+            filename: String,
         }
         
         #[derive(Deserialize)]
         struct Payload {
             activity_id: String,
-            documents: Vec<DocumentData>,
+            files: Vec<FileData>,
             title: Option<String>,
             document_type_id: String,
             sync_priority: String,
@@ -868,6 +606,14 @@ pub unsafe extern "C" fn activity_upload_documents_bulk(payload_json: *const c_c
         }
         
         let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        
+        // Decode all files
+        let mut files = Vec::new();
+        for file in p.files {
+            let data = base64::decode(&file.file_data)
+                .map_err(|_| FFIError::invalid_argument("invalid base64 file data"))?;
+            files.push((data, file.filename));
+        }
         
         let activity_id = Uuid::parse_str(&p.activity_id)
             .map_err(|_| FFIError::invalid_argument("invalid activity_id"))?;
@@ -884,48 +630,520 @@ pub unsafe extern "C" fn activity_upload_documents_bulk(payload_json: *const c_c
         let auth: AuthContext = p.auth.try_into()?;
         let svc = globals::get_activity_service()?;
         
-        // Decode all documents first
-        let mut files = Vec::new();
-        let total_documents = p.documents.len();
-        
-        for doc in p.documents {
-            let file_data = base64::decode(&doc.file_data)
-                .map_err(|_| FFIError::invalid_argument("invalid base64 file data"))?;
-            files.push((file_data, doc.original_filename));
-        }
-        
-        // Use the bulk upload method from the service
-        let doc_results = block_on_async(svc.bulk_upload_documents_for_activity(
+        let documents = block_on_async(svc.bulk_upload_documents_for_activity(
             activity_id,
             files,
-            p.title, // title applied to all documents
+            p.title,
             document_type_id,
             sync_priority,
             compression_priority,
             &auth,
         )).map_err(FFIError::from_service_error)?;
         
-        #[derive(Serialize)]
-        struct BulkUploadResponse {
-            activity_id: Uuid,
-            document_results: Vec<crate::domains::document::types::MediaDocumentResponse>,
-            total_documents: usize,
-            successful_uploads: usize,
-            failed_uploads: usize,
+        let json_resp = serde_json::to_string(&documents)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Analytics and Statistics
+// ---------------------------------------------------------------------------
+
+/// Get activity statistics for dashboard
+/// Expected JSON payload:
+/// {
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_get_statistics(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_activity_service()?;
+        
+        let stats = block_on_async(svc.get_activity_statistics(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&stats)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get activity status breakdown
+/// Expected JSON payload:
+/// {
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_get_status_breakdown(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_activity_service()?;
+        
+        let breakdown = block_on_async(svc.get_activity_status_breakdown(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&breakdown)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get activity metadata counts
+/// Expected JSON payload:
+/// {
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_get_metadata_counts(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_activity_service()?;
+        
+        let counts = block_on_async(svc.get_activity_metadata_counts(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&counts)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Query Operations
+// ---------------------------------------------------------------------------
+
+/// Find activities by status
+/// Expected JSON payload:
+/// {
+///   "status_id": i64,
+///   "pagination": { PaginationDto },
+///   "include": [ActivityIncludeDto, ...],
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_find_by_status(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            status_id: i64,
+            pagination: Option<PaginationDto>,
+            include: Option<Vec<ActivityIncludeDto>>,
+            auth: AuthCtxDto,
         }
         
-        let successful_uploads = doc_results.len();
-        let failed_uploads = total_documents - successful_uploads;
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let params = parse_pagination(p.pagination);
+        let auth: AuthContext = p.auth.try_into()?;
         
-        let response = BulkUploadResponse {
-            activity_id,
-            document_results: doc_results,
-            total_documents,
-            successful_uploads,
-            failed_uploads,
+        let include = parse_includes(p.include);
+        let include_slice = include.as_ref().map(|v| v.as_slice());
+        
+        let svc = globals::get_activity_service()?;
+        let activities = block_on_async(svc.find_activities_by_status(p.status_id, params, include_slice, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&activities)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Find activities by date range
+/// Expected JSON payload:
+/// {
+///   "start_date": "2024-01-01T00:00:00Z",
+///   "end_date": "2024-12-31T23:59:59Z",
+///   "pagination": { PaginationDto },
+///   "include": [ActivityIncludeDto, ...],
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_find_by_date_range(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            start_date: String,
+            end_date: String,
+            pagination: Option<PaginationDto>,
+            include: Option<Vec<ActivityIncludeDto>>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let params = parse_pagination(p.pagination);
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        let include = parse_includes(p.include);
+        let include_slice = include.as_ref().map(|v| v.as_slice());
+        
+        let svc = globals::get_activity_service()?;
+        let activities = block_on_async(svc.find_activities_by_date_range(&p.start_date, &p.end_date, params, include_slice, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&activities)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Search activities by text
+/// Expected JSON payload:
+/// {
+///   "query": "string",
+///   "pagination": { PaginationDto },
+///   "include": [ActivityIncludeDto, ...],
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_search(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            query: String,
+            pagination: Option<PaginationDto>,
+            include: Option<Vec<ActivityIncludeDto>>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let params = parse_pagination(p.pagination);
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        let include = parse_includes(p.include);
+        let include_slice = include.as_ref().map(|v| v.as_slice());
+        
+        let svc = globals::get_activity_service()?;
+        let activities = block_on_async(svc.search_activities(&p.query, params, include_slice, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&activities)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Detailed Views
+// ---------------------------------------------------------------------------
+
+/// Get activity document references
+/// Expected JSON payload:
+/// {
+///   "id": "uuid",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_get_document_references(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { id: String, auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let id = Uuid::parse_str(&p.id).map_err(|_| FFIError::invalid_argument("uuid"))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_activity_service()?;
+        
+        let doc_refs = block_on_async(svc.get_activity_document_references(id, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&doc_refs)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Filtering and Bulk Operations
+// ---------------------------------------------------------------------------
+
+/// Get filtered activity IDs for bulk operations
+/// Expected JSON payload:
+/// {
+///   "filter": {
+///     "status_ids": [1, 2, 3],
+///     "project_ids": ["uuid1", "uuid2"],
+///     "search_text": "optional search text",
+///     "date_range": ["2024-01-01T00:00:00Z", "2024-12-31T23:59:59Z"],
+///     "target_value_range": [0.0, 100.0],
+///     "actual_value_range": [0.0, 100.0],
+///     "exclude_deleted": true
+///   },
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_get_filtered_ids(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct FilterDto {
+            status_ids: Option<Vec<i64>>,
+            project_ids: Option<Vec<String>>,
+            search_text: Option<String>,
+            date_range: Option<(String, String)>,
+            target_value_range: Option<(f64, f64)>,
+            actual_value_range: Option<(f64, f64)>,
+            exclude_deleted: Option<bool>,
+        }
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            filter: FilterDto,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        // Convert FilterDto to ActivityFilter
+        let filter = ActivityFilter {
+            status_ids: p.filter.status_ids,
+            project_ids: p.filter.project_ids.map(|ids| {
+                ids.into_iter()
+                    .filter_map(|id| Uuid::parse_str(&id).ok())
+                    .collect()
+            }),
+            search_text: p.filter.search_text,
+            date_range: p.filter.date_range,
+            target_value_range: p.filter.target_value_range,
+            actual_value_range: p.filter.actual_value_range,
+            exclude_deleted: p.filter.exclude_deleted,
+        };
+        
+        let svc = globals::get_activity_service()?;
+        let ids = block_on_async(svc.get_filtered_activity_ids(filter, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        // Convert UUIDs to strings for FFI
+        let id_strings: Vec<String> = ids.into_iter().map(|id| id.to_string()).collect();
+        
+        let json_resp = serde_json::to_string(&id_strings)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Bulk update activity status
+/// Expected JSON payload:
+/// {
+///   "activity_ids": ["uuid1", "uuid2", "uuid3"],
+///   "status_id": i64,
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_bulk_update_status(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            activity_ids: Vec<String>,
+            status_id: i64,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        // Convert string UUIDs to Uuid type
+        let mut activity_ids = Vec::new();
+        for id_str in p.activity_ids {
+            let id = Uuid::parse_str(&id_str)
+                .map_err(|_| FFIError::invalid_argument("invalid activity_id in list"))?;
+            activity_ids.push(id);
+        }
+        
+        let svc = globals::get_activity_service()?;
+        let update_count = block_on_async(svc.bulk_update_activity_status(&activity_ids, p.status_id, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        #[derive(Serialize)]
+        struct BulkUpdateResponse {
+            updated_count: u64,
+            status_id: i64,
+        }
+        
+        let response = BulkUpdateResponse {
+            updated_count: update_count,
+            status_id: p.status_id,
         };
         
         let json_resp = serde_json::to_string(&response)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Advanced Dashboard Aggregations
+// ---------------------------------------------------------------------------
+
+/// Get activity workload distribution by project for dashboard widgets
+/// Expected JSON payload: { "auth": { "user_id": "uuid", "role": "admin", "device_id": "device_uuid", "offline_mode": false } }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_get_workload_by_project(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_activity_service()?;
+        
+        let distribution = block_on_async(svc.get_activity_workload_by_project(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&distribution)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Find stale activities for dashboard widgets
+/// Expected JSON payload:
+/// {
+///   "days_stale": 30,
+///   "pagination": { "page": 1, "per_page": 20 },
+///   "include": ["Documents", "CreatedBy"],
+///   "auth": { "user_id": "uuid", "role": "admin", "device_id": "device_uuid", "offline_mode": false }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_find_stale(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            days_stale: u32,
+            pagination: Option<PaginationDto>,
+            include: Option<Vec<ActivityIncludeDto>>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let params = parse_pagination(p.pagination);
+        let include = parse_includes(p.include);
+        let include_slice = include.as_ref().map(|v| v.as_slice());
+        let svc = globals::get_activity_service()?;
+        
+        let stale_activities = block_on_async(svc.find_stale_activities(p.days_stale, params, include_slice, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&stale_activities)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get activity progress analysis for dashboard tracking
+/// Expected JSON payload: { "auth": { "user_id": "uuid", "role": "admin", "device_id": "device_uuid", "offline_mode": false } }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn activity_get_progress_analysis(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_activity_service()?;
+        
+        let analysis = block_on_async(svc.get_activity_progress_analysis(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&analysis)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();

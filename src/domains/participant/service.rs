@@ -9,7 +9,7 @@ use crate::domains::participant::repository::ParticipantRepository;
 use crate::domains::participant::types::{
     NewParticipant, Participant, ParticipantResponse, UpdateParticipant, ParticipantInclude,
     ParticipantDemographics, WorkshopSummary, LivelihoodSummary, ParticipantWithWorkshops,
-    ParticipantWithLivelihoods, ParticipantWithDocumentTimeline
+    ParticipantWithLivelihoods, ParticipantWithDocumentTimeline, ParticipantFilter
 };
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
 use crate::domains::document::service::DocumentService;
@@ -61,6 +61,30 @@ pub trait ParticipantService: DeleteService<Participant> + Send + Sync {
         hard_delete: bool,
         auth: &AuthContext,
     ) -> ServiceResult<DeleteResult>;
+    
+    /// Find participant IDs by complex filter criteria - enables bulk operations like project domain
+    async fn find_participant_ids_by_filter(
+        &self,
+        filter: ParticipantFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>>;
+    
+    /// Find participants by complex filter criteria with pagination
+    async fn find_participants_by_filter(
+        &self,
+        filter: ParticipantFilter,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>>;
+    
+    /// Bulk update sync priority for participants matching filter criteria
+    async fn bulk_update_sync_priority_by_filter(
+        &self,
+        filter: ParticipantFilter,
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<u64>;
     
     async fn upload_document_for_participant(
         &self,
@@ -123,6 +147,12 @@ pub trait ParticipantService: DeleteService<Participant> + Send + Sync {
         &self,
         auth: &AuthContext,
     ) -> ServiceResult<HashMap<String, i64>>;
+    
+    /// Get all available disability types for UI dropdown - called on long-press of disability filter
+    async fn get_available_disability_types(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<String>>;
 
     /// Find participants by gender
     async fn find_participants_by_gender(
@@ -506,6 +536,53 @@ impl ParticipantService for ParticipantServiceImpl {
         Ok(result)
     }
     
+    async fn find_participant_ids_by_filter(
+        &self,
+        filter: ParticipantFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>> {
+        auth.authorize(Permission::ViewParticipants)?;
+        filter.validate().map_err(ServiceError::Domain)?;
+        self.repo.find_ids_by_filter(&filter).await.map_err(ServiceError::Domain)
+    }
+    
+    async fn find_participants_by_filter(
+        &self,
+        filter: ParticipantFilter,
+        params: PaginationParams,
+        include: Option<&[ParticipantInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<ParticipantResponse>> {
+        auth.authorize(Permission::ViewParticipants)?;
+        filter.validate().map_err(ServiceError::Domain)?;
+        
+        let paginated_result = self.repo.find_by_filter(&filter, params).await.map_err(ServiceError::Domain)?;
+        let mut enriched_items = Vec::with_capacity(paginated_result.items.len());
+        
+        for item in paginated_result.items {
+            let response = ParticipantResponse::from(item);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+        
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+    
+    async fn bulk_update_sync_priority_by_filter(
+        &self,
+        filter: ParticipantFilter,
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<u64> {
+        auth.authorize(Permission::EditParticipants)?;
+        filter.validate().map_err(ServiceError::Domain)?;
+        self.repo.bulk_update_sync_priority_by_filter(&filter, priority, auth).await.map_err(ServiceError::Domain)
+    }
+
     async fn upload_document_for_participant(
         &self,
         participant_id: Uuid,
@@ -759,6 +836,19 @@ impl ParticipantService for ParticipantServiceImpl {
         }
 
         Ok(distribution)
+    }
+
+    async fn get_available_disability_types(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<String>> {
+        // 1. Check permissions
+        auth.authorize(Permission::ViewParticipants)?;
+
+        // 2. Get available disability types from repository
+        let available_types = self.repo.get_available_disability_types().await?;
+
+        Ok(available_types)
     }
 
     async fn find_participants_by_gender(

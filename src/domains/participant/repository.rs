@@ -5,7 +5,7 @@ use crate::domains::core::repository::{FindById, HardDeletable, SoftDeletable};
 use crate::domains::core::document_linking::DocumentLinkable;
 use crate::domains::participant::types::{
     NewParticipant, Participant, ParticipantRow, UpdateParticipant, ParticipantDemographics, 
-    WorkshopSummary, LivelihoodSummary
+    WorkshopSummary, LivelihoodSummary, ParticipantFilter
 };
 use crate::domains::sync::repository::ChangeLogRepository;
 use crate::domains::sync::types::{ChangeLogEntry, ChangeOperationType, MergeOutcome};
@@ -62,6 +62,27 @@ pub trait ParticipantRepository: DeleteServiceRepository<Participant> + Mergeabl
         params: PaginationParams,
     ) -> DomainResult<PaginatedResult<Participant>>;
     
+    /// Find participant IDs by complex filter criteria - enables bulk operations
+    async fn find_ids_by_filter(
+        &self,
+        filter: &ParticipantFilter,
+    ) -> DomainResult<Vec<Uuid>>;
+    
+    /// Find participants by complex filter criteria with pagination
+    async fn find_by_filter(
+        &self,
+        filter: &ParticipantFilter,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Participant>>;
+    
+    /// Bulk update sync priority for participants matching filter criteria
+    async fn bulk_update_sync_priority_by_filter(
+        &self,
+        filter: &ParticipantFilter,
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> DomainResult<u64>;
+    
     async fn update_sync_priority(
         &self,
         ids: &[Uuid],
@@ -83,6 +104,9 @@ pub trait ParticipantRepository: DeleteServiceRepository<Participant> + Mergeabl
     
     /// Count participants by disability type
     async fn count_by_disability_type(&self) -> DomainResult<Vec<(Option<String>, i64)>>;
+    
+    /// Get all available disability types in the database - for UI dropdown population
+    async fn get_available_disability_types(&self) -> DomainResult<Vec<String>>;
     
     /// Get comprehensive participant demographics
     async fn get_participant_demographics(&self) -> DomainResult<ParticipantDemographics>;
@@ -826,6 +850,17 @@ impl ParticipantRepository for SqliteParticipantRepository {
         Ok(counts)
     }
     
+    async fn get_available_disability_types(&self) -> DomainResult<Vec<String>> {
+        let rows = query_as::<_, (String,)>(
+            "SELECT DISTINCT disability_type FROM participants WHERE disability_type IS NOT NULL AND disability_type != '' AND deleted_at IS NULL ORDER BY disability_type ASC"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::from)?;
+
+        Ok(rows.into_iter().map(|(type_,)| type_).collect())
+    }
+    
     async fn get_participant_demographics(&self) -> DomainResult<ParticipantDemographics> {
         // Get total participant count
         let total_participants: i64 = query_scalar(
@@ -1085,6 +1120,225 @@ impl ParticipantRepository for SqliteParticipantRepository {
             params,
         ))
     }
+    
+    async fn find_ids_by_filter(
+        &self,
+        filter: &ParticipantFilter,
+    ) -> DomainResult<Vec<Uuid>> {
+        let mut query_builder = QueryBuilder::new("SELECT id FROM participants");
+        let mut has_conditions = false;
+        
+        // Base condition for deletion status
+        if filter.exclude_deleted {
+            query_builder.push(" WHERE deleted_at IS NULL");
+            has_conditions = true;
+        }
+        
+        // Gender filter (multiple values)
+        if let Some(genders) = &filter.genders {
+            if !genders.is_empty() {
+                if has_conditions {
+                    query_builder.push(" AND ");
+                } else {
+                    query_builder.push(" WHERE ");
+                    has_conditions = true;
+                }
+                query_builder.push("gender IN (");
+                let mut separated = query_builder.separated(",");
+                for gender in genders {
+                    separated.push_bind(gender);
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        // Age groups filter (multiple values)
+        if let Some(age_groups) = &filter.age_groups {
+            if !age_groups.is_empty() {
+                if has_conditions {
+                    query_builder.push(" AND ");
+                } else {
+                    query_builder.push(" WHERE ");
+                    has_conditions = true;
+                }
+                query_builder.push("age_group IN (");
+                let mut separated = query_builder.separated(",");
+                for age_group in age_groups {
+                    separated.push_bind(age_group);
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        // Locations filter (multiple values)
+        if let Some(locations) = &filter.locations {
+            if !locations.is_empty() {
+                if has_conditions {
+                    query_builder.push(" AND ");
+                } else {
+                    query_builder.push(" WHERE ");
+                    has_conditions = true;
+                }
+                query_builder.push("location IN (");
+                let mut separated = query_builder.separated(",");
+                for location in locations {
+                    separated.push_bind(location);
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        // Disability filter - this is the simple boolean toggle
+        if let Some(has_disability) = filter.disability {
+            // Only apply the boolean filter if disability_types is not specified
+            // The disability_types filter takes precedence as it's more specific
+            if filter.disability_types.is_none() {
+                if has_conditions {
+                    query_builder.push(" AND ");
+                } else {
+                    query_builder.push(" WHERE ");
+                    has_conditions = true;
+                }
+                query_builder.push("disability = ");
+                query_builder.push_bind(has_disability);
+            }
+        }
+        
+        // Disability types filter (multiple values) - this takes precedence over boolean disability
+        if let Some(disability_types) = &filter.disability_types {
+            if !disability_types.is_empty() {
+                if has_conditions {
+                    query_builder.push(" AND ");
+                } else {
+                    query_builder.push(" WHERE ");
+                    has_conditions = true;
+                }
+                // When filtering by specific disability types, we implicitly filter for disability = true
+                // since you can't have a disability type without having a disability
+                query_builder.push("(disability = 1 AND disability_type IN (");
+                let mut separated = query_builder.separated(",");
+                for disability_type in disability_types {
+                    separated.push_bind(disability_type);
+                }
+                separated.push_unseparated("))");
+            }
+        }
+        
+        // Search text filter (searches name, disability_type, location)
+        if let Some(search_text) = &filter.search_text {
+            if !search_text.trim().is_empty() {
+                if has_conditions {
+                    query_builder.push(" AND ");
+                } else {
+                    query_builder.push(" WHERE ");
+                    has_conditions = true;
+                }
+                let search_pattern = format!("%{}%", search_text.trim());
+                query_builder.push("(name LIKE ");
+                query_builder.push_bind(search_pattern.clone());
+                query_builder.push(" OR disability_type LIKE ");
+                query_builder.push_bind(search_pattern.clone());
+                query_builder.push(" OR location LIKE ");
+                query_builder.push_bind(search_pattern);
+                query_builder.push(")");
+            }
+        }
+        
+        // Date range filter
+        if let Some((start_date, end_date)) = &filter.date_range {
+            if has_conditions {
+                query_builder.push(" AND ");
+            } else {
+                query_builder.push(" WHERE ");
+                has_conditions = true;
+            }
+            query_builder.push("created_at BETWEEN ");
+            query_builder.push_bind(start_date);
+            query_builder.push(" AND ");
+            query_builder.push_bind(end_date);
+        }
+        
+        // Created by user filter
+        if let Some(user_ids) = &filter.created_by_user_ids {
+            if !user_ids.is_empty() {
+                if has_conditions {
+                    query_builder.push(" AND ");
+                } else {
+                    query_builder.push(" WHERE ");
+                    has_conditions = true;
+                }
+                query_builder.push("created_by_user_id IN (");
+                let mut separated = query_builder.separated(",");
+                for user_id in user_ids {
+                    separated.push_bind(user_id.to_string());
+                }
+                separated.push_unseparated(")");
+            }
+        }
+        
+        // Workshop participation filter
+        if let Some(workshop_ids) = &filter.workshop_ids {
+            if !workshop_ids.is_empty() {
+                if has_conditions {
+                    query_builder.push(" AND ");
+                } else {
+                    query_builder.push(" WHERE ");
+                    has_conditions = true;
+                }
+                query_builder.push("id IN (SELECT DISTINCT participant_id FROM workshop_participants WHERE workshop_id IN (");
+                let mut separated = query_builder.separated(",");
+                for workshop_id in workshop_ids {
+                    separated.push_bind(workshop_id.to_string());
+                }
+                separated.push_unseparated(") AND deleted_at IS NULL)");
+            }
+        }
+        
+        // Document existence filter
+        if let Some(has_documents) = filter.has_documents {
+            if has_conditions {
+                query_builder.push(" AND ");
+            } else {
+                query_builder.push(" WHERE ");
+                has_conditions = true;
+            }
+            if has_documents {
+                query_builder.push("id IN (SELECT DISTINCT entity_id FROM media_documents WHERE entity_table = 'participants' AND deleted_at IS NULL)");
+            } else {
+                query_builder.push("id NOT IN (SELECT DISTINCT entity_id FROM media_documents WHERE entity_table = 'participants' AND deleted_at IS NULL)");
+            }
+        }
+        
+        // Document linked fields filter
+        if let Some(linked_fields) = &filter.document_linked_fields {
+            if !linked_fields.is_empty() {
+                if has_conditions {
+                    query_builder.push(" AND ");
+                } else {
+                    query_builder.push(" WHERE ");
+                    has_conditions = true;
+                }
+                query_builder.push("id IN (SELECT DISTINCT entity_id FROM media_documents WHERE entity_table = 'participants' AND linked_field IN (");
+                let mut separated = query_builder.separated(",");
+                for field in linked_fields {
+                    separated.push_bind(field);
+                }
+                separated.push_unseparated(") AND deleted_at IS NULL)");
+            }
+        }
+
+        let query = query_builder.build_query_as::<(String,)>();
+        let rows = query.fetch_all(&self.pool).await.map_err(DbError::from)?;
+        
+        rows.into_iter()
+            .map(|(id_str,)| {
+                Uuid::parse_str(&id_str)
+                    .map_err(|_| DomainError::Internal("Failed to parse UUID from row".to_string()))
+            })
+            .collect::<DomainResult<Vec<Uuid>>>()
+    }
+
+
     
     async fn find_workshop_participants(
         &self,
@@ -1360,6 +1614,69 @@ impl ParticipantRepository for SqliteParticipantRepository {
             total as u64,
             params,
         ))
+    }
+    
+    async fn find_by_filter(
+        &self,
+        filter: &ParticipantFilter,
+        params: PaginationParams,
+    ) -> DomainResult<PaginatedResult<Participant>> {
+        // Get the IDs first using our existing filter logic
+        let filtered_ids = self.find_ids_by_filter(filter).await?;
+        
+        if filtered_ids.is_empty() {
+            return Ok(PaginatedResult::new(Vec::new(), 0, params));
+        }
+        
+        // Apply pagination to the filtered IDs
+        let offset = (params.page - 1) * params.per_page;
+        let total = filtered_ids.len() as u64;
+        
+        // Get the IDs for this page
+        let page_ids: Vec<Uuid> = filtered_ids
+            .into_iter()
+            .skip(offset as usize)
+            .take(params.per_page as usize)
+            .collect();
+            
+        if page_ids.is_empty() {
+            return Ok(PaginatedResult::new(Vec::new(), total, params));
+        }
+        
+        // Fetch the actual entities for this page
+        let mut query_builder = QueryBuilder::new("SELECT * FROM participants WHERE id IN (");
+        let mut separated = query_builder.separated(",");
+        for id in &page_ids {
+            separated.push_bind(id.to_string());
+        }
+        separated.push_unseparated(") ORDER BY name ASC");
+        
+        let query = query_builder.build_query_as::<ParticipantRow>();
+        let rows = query.fetch_all(&self.pool).await.map_err(DbError::from)?;
+        
+        let entities = rows
+            .into_iter()
+            .map(Self::map_row_to_entity)
+            .collect::<DomainResult<Vec<Participant>>>()?;
+            
+        Ok(PaginatedResult::new(entities, total, params))
+    }
+    
+    async fn bulk_update_sync_priority_by_filter(
+        &self,
+        filter: &ParticipantFilter,
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> DomainResult<u64> {
+        // Get IDs matching the filter
+        let filtered_ids = self.find_ids_by_filter(filter).await?;
+        
+        if filtered_ids.is_empty() {
+            return Ok(0);
+        }
+        
+        // Update sync priority for these IDs
+        self.update_sync_priority(&filtered_ids, priority, auth).await
     }
 }
 

@@ -1064,6 +1064,7 @@ async fn initialize_internal(
         dependency_checker.clone(),
         document_service.clone(),
         deletion_manager.clone(),
+        user_repo.clone(),
     ));
 
     // Donor Service
