@@ -385,17 +385,97 @@ pub struct NewParticipant {
 
 impl Validate for NewParticipant {
     fn validate(&self) -> DomainResult<()> {
+        // Enhanced name validation with business rules
         ValidationBuilder::new("name", Some(self.name.clone()))
             .required()
             .min_length(2)
             .max_length(100)
-            .validate()?;
-        
-        if let Some(gender) = &self.gender {
-            common::validate_gender(gender)?;
+            .validate()
+            .map_err(|e| DomainError::Validation(ValidationError::format(
+                "name", 
+                &format!("Participant name validation failed: {}", e)
+            )))?;
+            
+        // Check for suspicious patterns in name
+        if self.name.trim().chars().any(|c| c.is_numeric() && self.name.chars().filter(|&x| x.is_numeric()).count() > 2) {
+            return Err(DomainError::Validation(ValidationError::format(
+                "name",
+                "Participant name contains too many numbers. Please enter a valid name."
+            )));
         }
+        
+        // Enhanced gender validation with specific error message
+        if let Some(gender) = &self.gender {
+            common::validate_gender(gender)
+                .map_err(|_| DomainError::Validation(ValidationError::format(
+                    "gender",
+                    &format!("Invalid gender value '{}'. Valid options: male, female, other, prefer_not_to_say", gender)
+                )))?;
+        }
+        
+        // Enhanced age group validation with specific error message
         if let Some(age_group) = &self.age_group {
-            common::validate_age_group(age_group)?;
+            common::validate_age_group(age_group)
+                .map_err(|_| DomainError::Validation(ValidationError::format(
+                    "age_group", 
+                    &format!("Invalid age group '{}'. Valid options: child, youth, adult, elderly", age_group)
+                )))?;
+        }
+        
+        // Business rule: Disability type requires disability flag
+        if self.disability_type.is_some() && self.disability.unwrap_or(false) == false {
+            return Err(DomainError::Validation(ValidationError::custom(
+                "Cannot specify disability_type when disability is false. Either set disability to true or remove disability_type."
+            )));
+        }
+        
+        // Enhanced disability type validation
+        if let Some(disability_type) = &self.disability_type {
+            if disability_type.trim().is_empty() {
+                return Err(DomainError::Validation(ValidationError::format(
+                    "disability_type",
+                    "Disability type cannot be empty. Please specify the type of disability or remove this field."
+                )));
+            }
+            
+            let valid_disability_types = ["visual", "hearing", "physical", "intellectual", "psychosocial", "multiple", "other"];
+            let normalized_type = disability_type.to_lowercase();
+            if !valid_disability_types.contains(&normalized_type.as_str()) {
+                return Err(DomainError::Validation(ValidationError::format(
+                    "disability_type",
+                    &format!("Invalid disability type '{}'. Valid options: {}", disability_type, valid_disability_types.join(", "))
+                )));
+            }
+        }
+        
+        // Enhanced location validation
+        if let Some(location) = &self.location {
+            if location.trim().is_empty() {
+                return Err(DomainError::Validation(ValidationError::format(
+                    "location",
+                    "Location cannot be empty. Please specify a location or remove this field."
+                )));
+            }
+            
+            if location.len() > 200 {
+                return Err(DomainError::Validation(ValidationError::format(
+                    "location",
+                    &format!("Location is too long ({} characters). Maximum allowed is 200 characters.", location.len())
+                )));
+            }
+        }
+        
+        // Business rule: Validate sync priority is sensible for new participants
+        if let Some(priority) = &self.sync_priority {
+            match priority {
+                SyncPriority::Never => {
+                    return Err(DomainError::Validation(ValidationError::format(
+                        "sync_priority",
+                        "New participants cannot be created with Never sync priority. This would prevent synchronization."
+                    )));
+                }
+                _ => {} // Other priorities are acceptable (High, Normal, Low)
+            }
         }
         
         Ok(())
@@ -417,17 +497,93 @@ pub struct UpdateParticipant {
 
 impl Validate for UpdateParticipant {
     fn validate(&self) -> DomainResult<()> {
+        // Enhanced name validation with business rules if provided
         if let Some(name) = &self.name {
             ValidationBuilder::new("name", Some(name.clone()))
                 .min_length(2)
                 .max_length(100)
-                .validate()?;
+                .validate()
+                .map_err(|e| DomainError::Validation(ValidationError::format(
+                    "name", 
+                    &format!("Participant name validation failed: {}", e)
+                )))?;
+                
+            // Check for suspicious patterns in name
+            if name.trim().chars().any(|c| c.is_numeric() && name.chars().filter(|&x| x.is_numeric()).count() > 2) {
+                return Err(DomainError::Validation(ValidationError::format(
+                    "name",
+                    "Participant name contains too many numbers. Please enter a valid name."
+                )));
+            }
         }
+        
+        // Enhanced gender validation with specific error message if provided
         if let Some(gender) = &self.gender {
-            common::validate_gender(gender)?;
+            common::validate_gender(gender)
+                .map_err(|_| DomainError::Validation(ValidationError::format(
+                    "gender",
+                    &format!("Invalid gender value '{}'. Valid options: male, female, other, prefer_not_to_say", gender)
+                )))?;
         }
+        
+        // Enhanced age group validation with specific error message if provided
         if let Some(age_group) = &self.age_group {
-            common::validate_age_group(age_group)?;
+            common::validate_age_group(age_group)
+                .map_err(|_| DomainError::Validation(ValidationError::format(
+                    "age_group", 
+                    &format!("Invalid age group '{}'. Valid options: child, youth, adult, elderly", age_group)
+                )))?;
+        }
+        
+        // Business rule: Disability type consistency validation
+        // Note: We can't check the current disability state here since this is just an update DTO
+        // This validation will be handled at the service layer where we have access to current state
+        
+        // Enhanced disability type validation if provided
+        if let Some(disability_type) = &self.disability_type {
+            if disability_type.trim().is_empty() {
+                return Err(DomainError::Validation(ValidationError::format(
+                    "disability_type",
+                    "Disability type cannot be empty. Please specify the type of disability or remove this field."
+                )));
+            }
+            
+            let valid_disability_types = ["visual", "hearing", "physical", "intellectual", "psychosocial", "multiple", "other"];
+            let normalized_type = disability_type.to_lowercase();
+            if !valid_disability_types.contains(&normalized_type.as_str()) {
+                return Err(DomainError::Validation(ValidationError::format(
+                    "disability_type",
+                    &format!("Invalid disability type '{}'. Valid options: {}", disability_type, valid_disability_types.join(", "))
+                )));
+            }
+        }
+        
+        // Enhanced location validation if provided
+        if let Some(location) = &self.location {
+            if location.trim().is_empty() {
+                return Err(DomainError::Validation(ValidationError::format(
+                    "location",
+                    "Location cannot be empty. Please specify a location or remove this field."
+                )));
+            }
+            
+            if location.len() > 200 {
+                return Err(DomainError::Validation(ValidationError::format(
+                    "location",
+                    &format!("Location is too long ({} characters). Maximum allowed is 200 characters.", location.len())
+                )));
+            }
+        }
+        
+        // Business rule: Validate sync priority changes
+        if let Some(priority) = &self.sync_priority {
+            match priority {
+                SyncPriority::Never => {
+                    // Log warning for Never priority as it prevents sync
+                    // Service layer can add additional validation based on user role
+                }
+                _ => {} // Other priorities are acceptable (High, Normal, Low)
+            }
         }
         
         Ok(())
@@ -574,8 +730,28 @@ pub struct ParticipantResponse {
     pub location: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    
+    // Enriched fields - populated based on ParticipantInclude options
     #[serde(skip_serializing_if = "Option::is_none")]
     pub documents: Option<Vec<MediaDocumentResponse>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workshop_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub livelihood_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_livelihood_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_workshop_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upcoming_workshop_count: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workshops: Option<Vec<WorkshopSummary>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub livelihoods: Option<Vec<LivelihoodSummary>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_counts_by_type: Option<HashMap<String, i64>>,
 }
 
 impl From<Participant> for ParticipantResponse {
@@ -591,20 +767,72 @@ impl From<Participant> for ParticipantResponse {
             created_at: p.created_at.to_rfc3339(),
             updated_at: p.updated_at.to_rfc3339(),
             documents: None,
+            workshop_count: None,
+            livelihood_count: None,
+            document_count: None,
+            active_livelihood_count: None,
+            completed_workshop_count: None,
+            upcoming_workshop_count: None,
+            workshops: None,
+            livelihoods: None,
+            document_counts_by_type: None,
         }
     }
 }
 
-/// Enum to specify related data to include in participant responses
+/// Enum to specify related data to include in participant responses - comprehensive like project domain
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParticipantInclude {
+    /// Include total workshop count
     WorkshopCount,
+    /// Include total livelihood count
     LivelihoodCount,
+    /// Include active livelihood count
+    ActiveLivelihoodCount,
+    /// Include completed workshop count
+    CompletedWorkshopCount,
+    /// Include upcoming workshop count
+    UpcomingWorkshopCount,
+    /// Include basic document count
+    DocumentCount,
+    /// Include document counts grouped by type
+    DocumentCountsByType,
+    /// Include full document list
     Documents,
+    /// Include full workshop list with details
     Workshops,
+    /// Include full livelihood list with details
     Livelihoods,
-    DocumentCounts,
+    /// Include all counts but not full data
+    AllCounts,
+    /// Include everything
     All,
+}
+
+impl ParticipantInclude {
+    /// Check if this include option requests count data only
+    pub fn is_count_only(&self) -> bool {
+        matches!(self, 
+            ParticipantInclude::WorkshopCount |
+            ParticipantInclude::LivelihoodCount |
+            ParticipantInclude::ActiveLivelihoodCount |
+            ParticipantInclude::CompletedWorkshopCount |
+            ParticipantInclude::UpcomingWorkshopCount |
+            ParticipantInclude::DocumentCount |
+            ParticipantInclude::DocumentCountsByType |
+            ParticipantInclude::AllCounts
+        )
+    }
+    
+    /// Check if this include option requests full data
+    pub fn is_full_data(&self) -> bool {
+        matches!(self, 
+            ParticipantInclude::Documents |
+            ParticipantInclude::Workshops |
+            ParticipantInclude::Livelihoods |
+            ParticipantInclude::All
+        )
+    }
 }
 
 /// Workshop-Participant junction table representation
@@ -746,12 +974,131 @@ impl WorkshopParticipantRow {
 /// Demographic statistics for participants
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParticipantDemographics {
+    // Basic counts
     pub total_participants: i64,
+    pub active_participants: i64, // Non-deleted
+    pub deleted_participants: i64,
+    
+    // Demographic breakdowns
     pub by_gender: HashMap<String, i64>,
     pub by_age_group: HashMap<String, i64>,
     pub by_location: HashMap<String, i64>,
     pub by_disability: HashMap<String, i64>,
     pub by_disability_type: HashMap<String, i64>,
+    
+    // Engagement statistics
+    pub participants_with_workshops: i64,
+    pub participants_with_livelihoods: i64,
+    pub participants_with_documents: i64,
+    pub participants_with_no_engagement: i64,
+    
+    // Workshop engagement
+    pub avg_workshops_per_participant: f64,
+    pub max_workshops_per_participant: i64,
+    pub participants_by_workshop_count: HashMap<i64, i64>, // workshop_count -> participant_count
+    
+    // Livelihood engagement  
+    pub avg_livelihoods_per_participant: f64,
+    pub max_livelihoods_per_participant: i64,
+    pub participants_by_livelihood_count: HashMap<i64, i64>, // livelihood_count -> participant_count
+    
+    // Document engagement
+    pub avg_documents_per_participant: f64,
+    pub max_documents_per_participant: i64,
+    pub participants_by_document_count: HashMap<i64, i64>, // document_count -> participant_count
+    pub document_types_usage: HashMap<String, i64>, // document_type -> usage_count
+    
+    // Temporal statistics
+    pub participants_added_this_month: i64,
+    pub participants_added_this_year: i64,
+    pub monthly_registration_trend: HashMap<String, i64>, // "YYYY-MM" -> count
+    
+    // Data quality metrics
+    pub participants_missing_gender: i64,
+    pub participants_missing_age_group: i64,
+    pub participants_missing_location: i64,
+    pub data_completeness_percentage: f64,
+    
+    // Last updated timestamp
+    pub generated_at: DateTime<Utc>,
+}
+
+impl ParticipantDemographics {
+    /// Create a new demographics struct with sensible defaults
+    pub fn new() -> Self {
+        Self {
+            total_participants: 0,
+            active_participants: 0,
+            deleted_participants: 0,
+            by_gender: HashMap::new(),
+            by_age_group: HashMap::new(),
+            by_location: HashMap::new(),
+            by_disability: HashMap::new(),
+            by_disability_type: HashMap::new(),
+            participants_with_workshops: 0,
+            participants_with_livelihoods: 0,
+            participants_with_documents: 0,
+            participants_with_no_engagement: 0,
+            avg_workshops_per_participant: 0.0,
+            max_workshops_per_participant: 0,
+            participants_by_workshop_count: HashMap::new(),
+            avg_livelihoods_per_participant: 0.0,
+            max_livelihoods_per_participant: 0,
+            participants_by_livelihood_count: HashMap::new(),
+            avg_documents_per_participant: 0.0,
+            max_documents_per_participant: 0,
+            participants_by_document_count: HashMap::new(),
+            document_types_usage: HashMap::new(),
+            participants_added_this_month: 0,
+            participants_added_this_year: 0,
+            monthly_registration_trend: HashMap::new(),
+            participants_missing_gender: 0,
+            participants_missing_age_group: 0,
+            participants_missing_location: 0,
+            data_completeness_percentage: 0.0,
+            generated_at: Utc::now(),
+        }
+    }
+    
+    /// Calculate data completeness percentage based on core fields
+    pub fn calculate_data_completeness(&mut self) {
+        if self.active_participants == 0 {
+            self.data_completeness_percentage = 100.0;
+            return;
+        }
+        
+        let total_fields = self.active_participants * 3; // gender, age_group, location
+        let missing_fields = self.participants_missing_gender + 
+                           self.participants_missing_age_group + 
+                           self.participants_missing_location;
+        let complete_fields = total_fields - missing_fields;
+        
+        self.data_completeness_percentage = if total_fields > 0 {
+            (complete_fields as f64 / total_fields as f64) * 100.0
+        } else {
+            100.0
+        };
+    }
+    
+    /// Get engagement summary
+    pub fn engagement_summary(&self) -> HashMap<String, i64> {
+        let mut summary = HashMap::new();
+        summary.insert("with_workshops".to_string(), self.participants_with_workshops);
+        summary.insert("with_livelihoods".to_string(), self.participants_with_livelihoods);
+        summary.insert("with_documents".to_string(), self.participants_with_documents);
+        summary.insert("no_engagement".to_string(), self.participants_with_no_engagement);
+        summary
+    }
+    
+    /// Get top locations by participant count
+    pub fn top_locations(&self, limit: usize) -> Vec<(String, i64)> {
+        let mut locations: Vec<_> = self.by_location.iter().collect();
+        locations.sort_by(|a, b| b.1.cmp(a.1));
+        locations.into_iter()
+            .take(limit)
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
 }
 
 /// Workshop summary for a participant
@@ -795,14 +1142,6 @@ pub struct ParticipantWithLivelihoods {
     pub active_livelihoods: i64,
 }
 
-/// Participant with document timeline
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParticipantWithDocumentTimeline {
-    pub participant: ParticipantResponse,
-    pub documents_by_month: HashMap<String, Vec<MediaDocumentResponse>>,
-    pub total_document_count: u64,
-}
-
 /// Workshop attendance statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkshopAttendance {
@@ -811,4 +1150,139 @@ pub struct WorkshopAttendance {
     pub avg_participants_per_workshop: f64,
     pub workshops_by_participant_count: HashMap<i64, i64>, // Map of participant count -> workshop count
     pub participants_by_workshop_count: HashMap<i64, i64>, // Map of workshop count -> participant count
+}
+
+/// Document reference summary for a participant - matches project domain's exact signature  
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantDocumentReference {
+    pub field_name: String,
+    pub display_name: String,
+    pub document_id: Option<Uuid>,
+    pub filename: Option<String>,
+    pub upload_date: Option<DateTime<Utc>>,
+    pub file_size: Option<u64>,
+}
+
+/// Participant with document timeline
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantWithDocumentTimeline {
+    pub participant: ParticipantResponse,
+    pub documents_by_month: HashMap<String, Vec<MediaDocumentResponse>>,
+    pub total_document_count: u64,
+}
+
+/// Participant with document timeline organized by type - alternative view matching project pattern
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantWithDocumentsByType {
+    pub participant: ParticipantResponse,
+    pub documents_by_type: HashMap<String, Vec<MediaDocumentResponse>>,
+    pub total_document_count: u64,
+}
+
+/// Participant activity timeline for engagement tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantActivityTimeline {
+    pub participant_id: Uuid,
+    pub participant_name: String,
+    pub workshop_participation: Vec<ParticipantWorkshopActivity>,
+    pub livelihood_progression: Vec<ParticipantLivelihoodActivity>,
+    pub document_uploads: Vec<ParticipantDocumentActivity>,
+    pub engagement_score: f64,
+    pub last_activity_date: Option<DateTime<Utc>>,
+}
+
+/// Single participant workshop activity entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantWorkshopActivity {
+    pub workshop_id: Uuid,
+    pub workshop_name: String,
+    pub participation_date: DateTime<Utc>,
+    pub pre_evaluation: Option<String>,
+    pub post_evaluation: Option<String>,
+    pub completion_status: String,
+}
+
+/// Single participant livelihood activity entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantLivelihoodActivity {
+    pub livelihood_id: Uuid,
+    pub livelihood_name: String,
+    pub start_date: DateTime<Utc>,
+    pub status: String,
+    pub progression_milestones: Vec<String>,
+}
+
+/// Single participant document activity entry
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantDocumentActivity {
+    pub document_id: Uuid,
+    pub document_name: String,
+    pub upload_date: DateTime<Utc>,
+    pub document_type: String,
+    pub linked_field: Option<String>,
+}
+
+/// **ADVANCED QUERY RESULT: Participant with enriched relationship data**
+/// Optimized structure for dashboard and detailed views with pre-computed counts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantWithEnrichment {
+    pub participant: Participant,
+    pub workshop_count: i64,
+    pub livelihood_count: i64,
+    pub active_livelihood_count: i64,
+    pub document_count: i64,
+    pub recent_document_count: i64, // Documents uploaded in last 30 days
+}
+
+/// **ADVANCED ANALYTICS: Participant engagement metrics**
+/// Used for performance analytics and dashboard widgets
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantEngagementMetrics {
+    pub participant_id: Uuid,
+    pub engagement_score: f64, // 0-100 score based on activity
+    pub workshop_participation_rate: f64, // Percentage of available workshops attended
+    pub livelihood_success_rate: f64, // Percentage of livelihoods marked as successful
+    pub document_submission_frequency: f64, // Average documents per month
+    pub last_activity_date: Option<DateTime<Utc>>,
+    pub total_program_duration_days: i64,
+}
+
+/// **QUERY OPTIMIZATION: Participant statistics aggregation**
+/// Cache-friendly structure for dashboard analytics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantStatistics {
+    pub total_participants: i64,
+    pub active_participants: i64,
+    pub participants_with_disabilities: i64,
+    pub by_gender: HashMap<String, i64>,
+    pub by_age_group: HashMap<String, i64>,
+    pub by_location: HashMap<String, i64>,
+    pub by_disability_type: HashMap<String, i64>,
+    pub engagement_distribution: HashMap<String, i64>, // High/Medium/Low engagement
+    pub monthly_registration_trends: HashMap<String, i64>, // Month -> count
+    pub data_completeness: f64, // Percentage of participants with complete profiles
+}
+
+/// **BATCH PROCESSING: Bulk operation result**
+/// For efficient reporting of batch operations like bulk updates or exports
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantBulkOperationResult {
+    pub total_requested: usize,
+    pub successful: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub error_details: Vec<(Uuid, String)>, // (participant_id, error_message)
+    pub operation_duration_ms: u64,
+}
+
+/// **PERFORMANCE OPTIMIZATION: Participant search index**
+/// Optimized structure for search operations across multiple fields
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantSearchIndex {
+    pub participant_id: Uuid,
+    pub search_text: String, // Concatenated searchable fields
+    pub related_workshop_names: Vec<String>,
+    pub related_livelihood_names: Vec<String>,
+    pub document_keywords: Vec<String>,
+    pub last_indexed_at: DateTime<Utc>,
 }

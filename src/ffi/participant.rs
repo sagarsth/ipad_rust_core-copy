@@ -26,7 +26,9 @@ use crate::ffi::{handle_status_result, error::FFIError};
 use crate::domains::participant::types::{
     NewParticipant, UpdateParticipant, ParticipantResponse, ParticipantInclude,
     ParticipantDemographics, ParticipantWithWorkshops, ParticipantWithLivelihoods, 
-    ParticipantWithDocumentTimeline
+    ParticipantWithDocumentTimeline, ParticipantFilter, ParticipantWithEnrichment,
+    ParticipantEngagementMetrics, ParticipantStatistics, ParticipantBulkOperationResult,
+    ParticipantSearchIndex, ParticipantDocumentReference
 };
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
@@ -41,6 +43,9 @@ use std::str::FromStr;
 use uuid::Uuid;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+// Note: Using base64 crate for decoding file data in document upload functions
+extern crate base64;
 
 // ---------------------------------------------------------------------------
 // Helper utilities
@@ -389,6 +394,403 @@ pub unsafe extern "C" fn participant_delete(payload_json: *const c_char, result:
         
         // Serialize and return the DeleteResult
         let json_resp = serde_json::to_string(&delete_result)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// ENTERPRISE ADVANCED FILTERING OPERATIONS
+// ---------------------------------------------------------------------------
+
+/// Find participant IDs by complex filter criteria
+/// Expected JSON payload:
+/// {
+///   "filter": { ParticipantFilter },
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_find_ids_by_filter(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            filter: ParticipantFilter,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_participant_service()?;
+        
+        let ids = block_on_async(svc.find_participant_ids_by_filter(p.filter, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&ids)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Find participants by complex filter criteria with pagination
+/// Expected JSON payload:
+/// {
+///   "filter": { ParticipantFilter },
+///   "pagination": { PaginationDto },
+///   "include": [ParticipantIncludeDto, ...],
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_find_by_filter(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            filter: ParticipantFilter,
+            pagination: Option<PaginationDto>,
+            include: Option<Vec<ParticipantIncludeDto>>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let params = p.pagination.map(|p| p.into()).unwrap_or_default();
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        let include: Option<Vec<ParticipantInclude>> = p.include.map(|inc| 
+            inc.into_iter().map(|i| i.into()).collect()
+        );
+        let include_slice = include.as_ref().map(|v| v.as_slice());
+        
+        let svc = globals::get_participant_service()?;
+        let participants = block_on_async(svc.find_participants_by_filter(p.filter, params, include_slice, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&participants)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Bulk update sync priority for participants matching filter criteria
+/// Expected JSON payload:
+/// {
+///   "filter": { ParticipantFilter },
+///   "sync_priority": "HIGH|NORMAL|LOW",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_bulk_update_sync_priority_by_filter(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            filter: ParticipantFilter,
+            sync_priority: String,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let sync_priority = SyncPriority::from_str(&p.sync_priority)
+            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_participant_service()?;
+        
+        let updated_count = block_on_async(svc.bulk_update_sync_priority_by_filter(p.filter, sync_priority, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        #[derive(Serialize)]
+        struct BulkUpdateResponse {
+            updated_count: usize,
+        }
+        
+        let response = BulkUpdateResponse { updated_count: updated_count as usize };
+        let json_resp = serde_json::to_string(&response)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Search participants with relationship data (workshops and livelihoods)
+/// Expected JSON payload:
+/// {
+///   "search_text": "string",
+///   "pagination": { PaginationDto },
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_search_with_relationships(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            search_text: String,
+            pagination: Option<PaginationDto>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let params = p.pagination.map(|p| p.into()).unwrap_or_default();
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_participant_service()?;
+        
+        let participants = block_on_async(svc.search_participants_with_relationships(&p.search_text, params, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&participants)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// ENTERPRISE ENRICHMENT & ANALYTICS
+// ---------------------------------------------------------------------------
+
+/// Get participant with comprehensive enrichment data
+/// Expected JSON payload:
+/// {
+///   "id": "uuid",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_get_with_enrichment(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { 
+            id: String, 
+            auth: AuthCtxDto 
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let id = Uuid::parse_str(&p.id).map_err(|_| FFIError::invalid_argument("uuid"))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_participant_service()?;
+        
+        let enriched_participant = block_on_async(svc.get_participant_with_enrichment(id, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&enriched_participant)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get comprehensive participant statistics for dashboards
+/// Expected JSON payload:
+/// {
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_get_comprehensive_statistics(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_participant_service()?;
+        
+        let statistics = block_on_async(svc.get_comprehensive_statistics(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&statistics)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get participant document references metadata
+/// Expected JSON payload:
+/// {
+///   "participant_id": "uuid",
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_get_document_references(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { 
+            participant_id: String, 
+            auth: AuthCtxDto 
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let participant_id = Uuid::parse_str(&p.participant_id).map_err(|_| FFIError::invalid_argument("invalid participant_id"))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_participant_service()?;
+        
+        let document_refs = block_on_async(svc.get_participant_document_references(participant_id, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&document_refs)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------------------
+// ENTERPRISE BULK OPERATIONS & PERFORMANCE
+// ---------------------------------------------------------------------------
+
+/// Bulk update participants with streaming processing
+/// Expected JSON payload:
+/// {
+///   "updates": [{"participant_id": "uuid", "update": { UpdateParticipant }}, ...],
+///   "chunk_size": 100,
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_bulk_update_streaming(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct ParticipantUpdate {
+            participant_id: String,
+            update: UpdateParticipant,
+        }
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            updates: Vec<ParticipantUpdate>,
+            chunk_size: Option<usize>,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        
+        // Convert string IDs to UUIDs
+        let mut updates = Vec::new();
+        for update_data in p.updates {
+            let participant_id = Uuid::parse_str(&update_data.participant_id)
+                .map_err(|_| FFIError::invalid_argument("invalid participant_id"))?;
+            updates.push((participant_id, update_data.update));
+        }
+        
+        let chunk_size = p.chunk_size.unwrap_or(100);
+        let svc = globals::get_participant_service()?;
+        
+        let bulk_result = block_on_async(svc.bulk_update_participants_streaming(updates, chunk_size, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&bulk_result)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Get database index optimization suggestions
+/// Expected JSON payload:
+/// {
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_get_index_optimization_suggestions(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload { auth: AuthCtxDto }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_participant_service()?;
+        
+        let suggestions = block_on_async(svc.get_index_optimization_suggestions(&auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&suggestions)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Find participant IDs by filter with query optimization
+/// Expected JSON payload:
+/// {
+///   "filter": { ParticipantFilter },
+///   "auth": { AuthCtxDto }
+/// }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_find_ids_by_filter_optimized(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            filter: ParticipantFilter,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_participant_service()?;
+        
+        let ids = block_on_async(svc.find_participant_ids_by_filter_optimized(p.filter, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&ids)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
