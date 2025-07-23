@@ -50,6 +50,40 @@ struct DeleteConfiguration {
         )
     }
     
+    static func participant(isPlural: Bool = false) -> DeleteConfiguration {
+        DeleteConfiguration(
+            entityName: "Participant",
+            entityNamePlural: "Participants",
+            showForceDelete: true,
+            archiveDescription: isPlural ?
+                "Move the participants to archive. They can be restored later. Associated documents will be preserved. Workshop and livelihood connections will remain." :
+                "Move the participant to archive. They can be restored later. Associated documents will be preserved. Workshop and livelihood connections will remain.",
+            deleteDescription: isPlural ?
+                "Permanently delete participants if no dependencies exist. Participants with workshops or livelihoods will be archived instead." :
+                "Permanently delete participant if no dependencies exist. Participants with workshops or livelihoods will be archived instead.",
+            forceDeleteDescription: isPlural ?
+                "⚠️ DANGER: Force delete all participants regardless of dependencies. Workshop and livelihood connections will be lost. This cannot be undone." :
+                "⚠️ DANGER: Force delete participant regardless of dependencies. Workshop and livelihood connections will be lost. This cannot be undone."
+        )
+    }
+    
+    static func activity(isPlural: Bool = false) -> DeleteConfiguration {
+        DeleteConfiguration(
+            entityName: "Activity",
+            entityNamePlural: "Activities",
+            showForceDelete: true,
+            archiveDescription: isPlural ?
+                "Move the activities to archive. They can be restored later. Associated documents will be preserved. Project connections will remain." :
+                "Move the activity to archive. It can be restored later. Associated documents will be preserved. Project connection will remain.",
+            deleteDescription: isPlural ?
+                "Permanently delete activities if no dependencies exist. Activities with documents may be archived instead." :
+                "Permanently delete activity if no dependencies exist. Activities with documents may be archived instead.",
+            forceDeleteDescription: isPlural ?
+                "⚠️ DANGER: Force delete all activities regardless of dependencies. This cannot be undone." :
+                "⚠️ DANGER: Force delete activity regardless of dependencies. This cannot be undone."
+        )
+    }
+    
     static func user(isPlural: Bool = false) -> DeleteConfiguration {
         DeleteConfiguration(
             entityName: "User",

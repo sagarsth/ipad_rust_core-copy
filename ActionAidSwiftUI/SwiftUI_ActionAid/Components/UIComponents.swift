@@ -101,21 +101,30 @@ struct SectionHeader: View {
     let subtitle: String?
     let actionTitle: String?
     let action: (() -> Void)?
+    let icon: String?
     
     init(
         title: String,
         subtitle: String? = nil,
         actionTitle: String? = nil,
-        action: (() -> Void)? = nil
+        action: (() -> Void)? = nil,
+        icon: String? = nil
     ) {
         self.title = title
         self.subtitle = subtitle
         self.actionTitle = actionTitle
         self.action = action
+        self.icon = icon
     }
     
     var body: some View {
         HStack(alignment: .center) {
+            if let icon = icon {
+                Image(systemName: icon)
+                    .foregroundColor(.accentColor)
+                    .font(.subheadline)
+            }
+            
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.headline)

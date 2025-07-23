@@ -206,6 +206,12 @@ pub trait ParticipantRepository: DeleteServiceRepository<Participant> + Mergeabl
         name: &str,
     ) -> DomainResult<Participant>;
 
+    /// Find all participants by name (case insensitive) - used for duplicate detection
+    async fn find_all_by_name_case_insensitive(
+        &self,
+        name: &str,
+    ) -> DomainResult<Vec<Participant>>;
+
     /// **ADVANCED QUERY: Get participant document references with JOIN optimization**
     /// Matches project domain's get_project_document_references pattern exactly
     async fn get_participant_document_references(
@@ -437,18 +443,48 @@ impl ParticipantRepository for SqliteParticipantRepository {
         new_participant: &NewParticipant,
         auth: &AuthContext,
     ) -> DomainResult<Participant> {
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
-        let result = self.create_with_tx(new_participant, auth, &mut tx).await;
-        match result {
-            Ok(participant) => {
-                tx.commit().await.map_err(DbError::from)?;
-                Ok(participant)
-            }
-            Err(e) => {
-                // Log the error before rollback for debugging
-                println!("🚨 [PARTICIPANT_REPO] Creation failed for '{}': {}", new_participant.name, e);
-                let _ = tx.rollback().await; // Best effort rollback
-                Err(e)
+        let max_retries = 3;
+        let mut retry_count = 0;
+        
+        loop {
+            let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+            let result = self.create_with_tx(new_participant, auth, &mut tx).await;
+            
+            match result {
+                Ok(participant) => {
+                    match tx.commit().await {
+                        Ok(_) => return Ok(participant),
+                        Err(commit_err) => {
+                            let error_str = commit_err.to_string();
+                            if error_str.contains("database is locked") && retry_count < max_retries {
+                                retry_count += 1;
+                                println!("⚠️ [PARTICIPANT_REPO] Database locked during commit for '{}', retrying ({}/{})", 
+                                         new_participant.name, retry_count, max_retries);
+                                tokio::time::sleep(tokio::time::Duration::from_millis(100 * retry_count)).await;
+                                continue;
+                            } else {
+                                return Err(DbError::from(commit_err).into());
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.rollback().await; // Best effort rollback
+                    
+                    // Check if it's a database lock error and we can retry
+                    let error_str = e.to_string();
+                    if error_str.contains("database is locked") && retry_count < max_retries {
+                        retry_count += 1;
+                        println!("⚠️ [PARTICIPANT_REPO] Database locked during creation for '{}', retrying ({}/{})", 
+                                 new_participant.name, retry_count, max_retries);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100 * retry_count)).await;
+                        continue;
+                    } else {
+                        // Log the error before returning
+                        println!("🚨 [PARTICIPANT_REPO] Creation failed for '{}': {}", new_participant.name, e);
+                        return Err(e);
+                    }
+                }
             }
         }
     }
@@ -500,25 +536,25 @@ impl ParticipantRepository for SqliteParticipantRepository {
                 sync_priority,
                 created_at, updated_at, created_by_user_id, updated_by_user_id,
                 created_by_device_id, updated_by_device_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#
         )
         .bind(&id_str)
         .bind(&new_participant.name)
-        .bind(&now_str).bind(&user_id_str).bind(&device_id_str) // Name LWW
+        .bind(&now_str).bind(&user_id_str).bind(device_id_str.as_ref()) // Name LWW
         .bind(&new_participant.gender)
-        .bind(new_participant.gender.as_ref().map(|_| &now_str)).bind(new_participant.gender.as_ref().map(|_| &user_id_str)).bind(new_participant.gender.as_ref().map(|_| &device_id_str)) // Gender LWW
+        .bind(new_participant.gender.as_ref().map(|_| &now_str)).bind(new_participant.gender.as_ref().map(|_| &user_id_str)).bind(new_participant.gender.as_ref().map(|_| device_id_str.as_ref())) // Gender LWW
         .bind(new_participant.disability.unwrap_or(false))
-        .bind(new_participant.disability.map(|_| &now_str)).bind(new_participant.disability.map(|_| &user_id_str)).bind(new_participant.disability.map(|_| &device_id_str)) // Disability LWW
+        .bind(new_participant.disability.map(|_| &now_str)).bind(new_participant.disability.map(|_| &user_id_str)).bind(new_participant.disability.map(|_| device_id_str.as_ref())) // Disability LWW
         .bind(&new_participant.disability_type)
-        .bind(new_participant.disability_type.as_ref().map(|_| &now_str)).bind(new_participant.disability_type.as_ref().map(|_| &user_id_str)).bind(new_participant.disability_type.as_ref().map(|_| &device_id_str)) // Disability Type LWW
+        .bind(new_participant.disability_type.as_ref().map(|_| &now_str)).bind(new_participant.disability_type.as_ref().map(|_| &user_id_str)).bind(new_participant.disability_type.as_ref().map(|_| device_id_str.as_ref())) // Disability Type LWW
         .bind(&new_participant.age_group)
-        .bind(new_participant.age_group.as_ref().map(|_| &now_str)).bind(new_participant.age_group.as_ref().map(|_| &user_id_str)).bind(new_participant.age_group.as_ref().map(|_| &device_id_str)) // Age Group LWW
+        .bind(new_participant.age_group.as_ref().map(|_| &now_str)).bind(new_participant.age_group.as_ref().map(|_| &user_id_str)).bind(new_participant.age_group.as_ref().map(|_| device_id_str.as_ref())) // Age Group LWW
         .bind(&new_participant.location)
-        .bind(new_participant.location.as_ref().map(|_| &now_str)).bind(new_participant.location.as_ref().map(|_| &user_id_str)).bind(new_participant.location.as_ref().map(|_| &device_id_str)) // Location LWW
+        .bind(new_participant.location.as_ref().map(|_| &now_str)).bind(new_participant.location.as_ref().map(|_| &user_id_str)).bind(new_participant.location.as_ref().map(|_| device_id_str.as_ref())) // Location LWW
         .bind(new_participant.sync_priority.unwrap_or_default().as_str()) // sync_priority as TEXT
         .bind(&now_str).bind(&now_str) // created_at, updated_at
         .bind(&created_by_id_str).bind(&user_id_str) // created_by, updated_by
-        .bind(&device_id_str).bind(&device_id_str) // created_by_device_id, updated_by_device_id
+        .bind(device_id_str.as_ref()).bind(device_id_str.as_ref()) // created_by_device_id, updated_by_device_id
         .execute(&mut **tx)
         .await;
 
@@ -679,7 +715,18 @@ impl ParticipantRepository for SqliteParticipantRepository {
         // **OPTIMIZATION: Apply updates using LWW macro for consistent handling**
         add_lww!(name, "name", &update_data.name.as_ref());
         add_lww!(gender, "gender", &update_data.gender.as_ref());
-        add_lww!(disability_type, "disability_type", &update_data.disability_type.as_ref());
+        // **SPECIAL HANDLING: disability_type can be explicitly cleared**
+        if let Some(disability_type_opt) = &update_data.disability_type {
+            separated.push("disability_type = ");
+            separated.push_bind_unseparated(disability_type_opt.clone());
+            separated.push(" disability_type_updated_at = ");
+            separated.push_bind_unseparated(now_str.clone());
+            separated.push(" disability_type_updated_by = ");
+            separated.push_bind_unseparated(user_id_str.clone());
+            separated.push(" disability_type_updated_by_device_id = ");
+            separated.push_bind_unseparated(device_id_str.clone());
+            fields_updated = true;
+        }
         add_lww!(age_group, "age_group", &update_data.age_group.as_ref());
         add_lww!(location, "location", &update_data.location.as_ref());
         
@@ -1134,10 +1181,10 @@ impl ParticipantRepository for SqliteParticipantRepository {
         .map_err(DbError::from)?;
         
         demographics.participants_with_documents = query_scalar(
-            "SELECT COUNT(DISTINCT md.entity_id) 
+            "SELECT COUNT(DISTINCT md.related_id) 
              FROM media_documents md 
-             JOIN participants p ON md.entity_id = p.id 
-             WHERE md.entity_table = 'participants' AND md.deleted_at IS NULL AND p.deleted_at IS NULL"
+             JOIN participants p ON md.related_id = p.id 
+             WHERE md.related_table = 'participants' AND md.deleted_at IS NULL AND p.deleted_at IS NULL"
         )
         .fetch_one(&self.pool)
         .await
@@ -1192,8 +1239,8 @@ impl ParticipantRepository for SqliteParticipantRepository {
         let doc_type_rows = query("
             SELECT dt.name, COUNT(md.id) as usage_count
             FROM document_types dt
-            LEFT JOIN media_documents md ON dt.id = md.document_type_id 
-                AND md.entity_table = 'participants' 
+            LEFT JOIN media_documents md ON dt.id = md.type_id 
+                AND md.related_table = 'participants' 
                 AND md.deleted_at IS NULL
             WHERE dt.deleted_at IS NULL
             GROUP BY dt.id, dt.name
@@ -1545,40 +1592,20 @@ impl ParticipantRepository for SqliteParticipantRepository {
             }
         }
         
-        // Disability filter - this is the simple boolean toggle
-        if let Some(has_disability) = filter.disability {
-            // Only apply the boolean filter if disability_types is not specified
-            // The disability_types filter takes precedence as it's more specific
-            if filter.disability_types.is_none() {
-                if has_conditions {
-                    query_builder.push(" AND ");
-                } else {
-                    query_builder.push(" WHERE ");
-                    has_conditions = true;
-                }
-                query_builder.push("disability = ");
-                query_builder.push_bind(has_disability);
-            }
-        }
-        
-        // Disability types filter (multiple values) - this takes precedence over boolean disability
+        // Disability filtering - enhanced logic for grouped UI approach
         if let Some(disability_types) = &filter.disability_types {
-            if !disability_types.is_empty() {
-                if has_conditions {
-                    query_builder.push(" AND ");
-                } else {
-                    query_builder.push(" WHERE ");
-                    has_conditions = true;
-                }
-                // When filtering by specific disability types, we implicitly filter for disability = true
-                // since you can't have a disability type without having a disability
-                query_builder.push("(disability = 1 AND disability_type IN (");
-                let mut separated = query_builder.separated(",");
+            if !disability_types.is_empty() && disability_types.len() < 10 {
+                // Specific disability types selected - this implies disability = true
+                query_builder.push(" AND (disability = 1 AND disability_type IN (");
+                let mut separated = query_builder.separated(", ");
                 for disability_type in disability_types {
                     separated.push_bind(disability_type);
                 }
                 separated.push_unseparated("))");
             }
+        } else if let Some(disability) = filter.disability {
+            // General disability filter (only applied if no specific types selected)
+            query_builder.push(" AND disability = ").push_bind(disability);
         }
         
         // Search text filter (searches name, disability_type, location)
@@ -1940,9 +1967,9 @@ impl ParticipantRepository for SqliteParticipantRepository {
         let rows = query_as::<_, (String, i64)>(
             "SELECT dt.name, COUNT(md.id) as count
              FROM document_types dt
-             LEFT JOIN media_documents md ON dt.id = md.document_type_id 
-                AND md.entity_table = 'participants' 
-                AND md.entity_id = ?
+             LEFT JOIN media_documents md ON dt.id = md.type_id 
+                AND md.related_table = 'participants' 
+                AND md.related_id = ?
                 AND md.deleted_at IS NULL
              WHERE dt.deleted_at IS NULL
              GROUP BY dt.id, dt.name
@@ -2143,6 +2170,34 @@ impl ParticipantRepository for SqliteParticipantRepository {
         Ok(participant)
     }
 
+    /// Find all participants by name (case insensitive) - used for duplicate detection
+    async fn find_all_by_name_case_insensitive(
+        &self,
+        name: &str,
+    ) -> DomainResult<Vec<Participant>> {
+        println!("🔍 [PARTICIPANT_REPO] Finding all participants with name: '{}'", name);
+        
+        let rows = query_as::<_, ParticipantRow>(
+            "SELECT * FROM participants WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL ORDER BY created_at DESC"
+        )
+        .bind(name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| {
+            println!("🚨 [PARTICIPANT_REPO] Database error finding participants by name '{}': {}", name, e);
+            DbError::from(e)
+        })?;
+
+        let mut participants = Vec::with_capacity(rows.len());
+        for row in rows {
+            let participant = Self::map_row_to_entity(row)?;
+            participants.push(participant);
+        }
+        
+        println!("✅ [PARTICIPANT_REPO] Found {} participants with name '{}'", participants.len(), name);
+        Ok(participants)
+    }
+
     /// **ADVANCED QUERY: Get participant document references with JOIN optimization**
     /// Matches project domain's get_project_document_references pattern exactly
     async fn get_participant_document_references(
@@ -2165,7 +2220,7 @@ impl ParticipantRepository for SqliteParticipantRepository {
             let query_str = format!(
                 "SELECT md.id as doc_id, md.original_filename, md.created_at, md.size_bytes as file_size 
                  FROM participants p 
-                 LEFT JOIN media_documents md ON md.related_entity_id = p.id 
+                 LEFT JOIN media_documents md ON md.related_id = p.id 
                    AND md.related_table = 'participants' 
                    AND md.field_identifier = ? 
                    AND md.deleted_at IS NULL
@@ -2249,7 +2304,7 @@ impl ParticipantRepository for SqliteParticipantRepository {
             LEFT JOIN workshop_participants wp ON wp.participant_id = p.id
             LEFT JOIN workshops w ON w.id = wp.workshop_id AND w.deleted_at IS NULL
             LEFT JOIN livelihoods l ON l.participant_id = p.id AND l.deleted_at IS NULL
-            LEFT JOIN media_documents md ON md.related_entity_id = p.id 
+            LEFT JOIN media_documents md ON md.related_id = p.id 
                 AND md.related_table = 'participants' AND md.deleted_at IS NULL
             WHERE p.id = ? AND p.deleted_at IS NULL
             GROUP BY p.id
@@ -2506,7 +2561,7 @@ impl ParticipantRepository for SqliteParticipantRepository {
                 FROM participants p
                 LEFT JOIN workshop_participants wp ON wp.participant_id = p.id
                 LEFT JOIN livelihoods l ON l.participant_id = p.id AND l.deleted_at IS NULL
-                LEFT JOIN media_documents md ON md.related_entity_id = p.id AND md.related_table = 'participants' AND md.deleted_at IS NULL
+                LEFT JOIN media_documents md ON md.related_id = p.id AND md.related_table = 'participants' AND md.deleted_at IS NULL
                 WHERE p.deleted_at IS NULL
                 GROUP BY p.id
             )
@@ -2749,8 +2804,19 @@ impl ParticipantRepository for SqliteParticipantRepository {
             query_builder.push(" AND deleted_at IS NULL");
         }
         
-        // 2. High selectivity: disability filter (boolean, fast)
-        if let Some(disability) = filter.disability {
+        // 2. High selectivity: disability filter - enhanced logic for grouped UI approach
+        if let Some(disability_types) = &filter.disability_types {
+            if !disability_types.is_empty() && disability_types.len() < 10 {
+                // Specific disability types selected - this implies disability = true
+                query_builder.push(" AND (disability = 1 AND disability_type IN (");
+                let mut separated = query_builder.separated(", ");
+                for disability_type in disability_types {
+                    separated.push_bind(disability_type);
+                }
+                separated.push_unseparated("))");
+            }
+        } else if let Some(disability) = filter.disability {
+            // General disability filter (only applied if no specific types selected)
             query_builder.push(" AND disability = ").push_bind(disability);
         }
         

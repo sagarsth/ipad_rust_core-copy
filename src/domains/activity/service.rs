@@ -474,18 +474,45 @@ impl ActivityService for ActivityServiceImpl {
         new_activity: NewActivity,
         auth: &AuthContext,
     ) -> ServiceResult<ActivityResponse> {
+        println!("⚙️ [ACTIVITY_SERVICE] create_activity called");
+        println!("⚙️ [ACTIVITY_SERVICE] new_activity: {:?}", new_activity);
+        println!("⚙️ [ACTIVITY_SERVICE] auth user_id: {}", auth.user_id);
+        
+        println!("⚙️ [ACTIVITY_SERVICE] Checking permissions...");
         if !auth.has_permission(Permission::CreateActivities) {
+            println!("❌ [ACTIVITY_SERVICE] Permission denied for user {}", auth.user_id);
             return Err(ServiceError::PermissionDenied(
                 "User does not have permission to create activities".to_string(),
             ));
         }
+        println!("✅ [ACTIVITY_SERVICE] Permission check passed");
 
-        new_activity.validate()?;
+        println!("⚙️ [ACTIVITY_SERVICE] Validating new_activity...");
+        new_activity.validate().map_err(|e| {
+            println!("❌ [ACTIVITY_SERVICE] Validation failed: {:?}", e);
+            ServiceError::from(e)
+        })?;
+        println!("✅ [ACTIVITY_SERVICE] Validation passed");
+        
         // Validate project exists ONLY if an ID was provided
-        self.validate_project_exists_if_provided(new_activity.project_id).await?;
+        println!("⚙️ [ACTIVITY_SERVICE] Validating project existence...");
+        self.validate_project_exists_if_provided(new_activity.project_id).await.map_err(|e| {
+            println!("❌ [ACTIVITY_SERVICE] Project validation failed: {:?}", e);
+            e
+        })?;
+        println!("✅ [ACTIVITY_SERVICE] Project validation passed");
 
-        let created_activity = self.repo.create(&new_activity, auth).await?;
-        Ok(ActivityResponse::from(created_activity))
+        println!("⚙️ [ACTIVITY_SERVICE] Calling repository create...");
+        let created_activity = self.repo.create(&new_activity, auth).await.map_err(|e| {
+            println!("❌ [ACTIVITY_SERVICE] Repository create failed: {:?}", e);
+            ServiceError::from(e)
+        })?;
+        println!("✅ [ACTIVITY_SERVICE] Repository create successful! Activity ID: {}", created_activity.id);
+        
+        let response = ActivityResponse::from(created_activity);
+        println!("✅ [ACTIVITY_SERVICE] ActivityResponse created: {:?}", response);
+        
+        Ok(response)
     }
 
     async fn get_activity_by_id(

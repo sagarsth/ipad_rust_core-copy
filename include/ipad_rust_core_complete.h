@@ -16,22 +16,29 @@ extern "C" {
 
 
 // ============================================================================
-// ACTIVITY FUNCTIONS (14 functions)
+// ACTIVITY FUNCTIONS (21 functions)
 // ============================================================================
 
 int32_t activity_create(const char*, char**);
 int32_t activity_create_with_documents(const char*, char**);
 int32_t activity_get(const char*, char**);
-int32_t activity_list_for_project(const char*, char**);
+int32_t activity_list(const char*, char**);
 int32_t activity_update(const char*, char**);
 int32_t activity_delete(const char*, char**);
-int32_t activity_find_by_date_range(const char*, char**);
-int32_t activity_get_project_progress_summary(const char*, char**);
-int32_t activity_find_behind_target(const char*, char**);
-int32_t activity_find_exceeding_target(const char*, char**);
-int32_t activity_find_without_targets(const char*, char**);
 int32_t activity_upload_document(const char*, char**);
-int32_t activity_upload_documents_bulk(const char*, char**);
+int32_t activity_bulk_upload_documents(const char*, char**);
+int32_t activity_get_statistics(const char*, char**);
+int32_t activity_get_status_breakdown(const char*, char**);
+int32_t activity_get_metadata_counts(const char*, char**);
+int32_t activity_find_by_status(const char*, char**);
+int32_t activity_find_by_date_range(const char*, char**);
+int32_t activity_search(const char*, char**);
+int32_t activity_get_document_references(const char*, char**);
+int32_t activity_get_filtered_ids(const char*, char**);
+int32_t activity_bulk_update_status(const char*, char**);
+int32_t activity_get_workload_by_project(const char*, char**);
+int32_t activity_find_stale(const char*, char**);
+int32_t activity_get_progress_analysis(const char*, char**);
 void activity_free(char*);
 
 // ============================================================================
@@ -252,7 +259,7 @@ int32_t livelihood_upload_documents_bulk(const char*, char**);
 void livelihood_free(char*);
 
 // ============================================================================
-// PARTICIPANT FUNCTIONS (22 functions)
+// PARTICIPANT FUNCTIONS (33 functions)
 // ============================================================================
 
 int32_t participant_create(const char*, char**);
@@ -261,6 +268,16 @@ int32_t participant_get(const char*, char**);
 int32_t participant_list(const char*, char**);
 int32_t participant_update(const char*, char**);
 int32_t participant_delete(const char*, char**);
+int32_t participant_find_ids_by_filter(const char*, char**);
+int32_t participant_find_by_filter(const char*, char**);
+int32_t participant_bulk_update_sync_priority_by_filter(const char*, char**);
+int32_t participant_search_with_relationships(const char*, char**);
+int32_t participant_get_with_enrichment(const char*, char**);
+int32_t participant_get_comprehensive_statistics(const char*, char**);
+int32_t participant_get_document_references(const char*, char**);
+int32_t participant_bulk_update_streaming(const char*, char**);
+int32_t participant_get_index_optimization_suggestions(const char*, char**);
+int32_t participant_find_ids_by_filter_optimized(const char*, char**);
 int32_t participant_upload_document(const char*, char**);
 int32_t participant_bulk_upload_documents(const char*, char**);
 int32_t participant_get_demographics(const char*, char**);
@@ -276,6 +293,7 @@ int32_t participant_get_workshop_participants(const char*, char**);
 int32_t participant_get_with_workshops(const char*, char**);
 int32_t participant_get_with_livelihoods(const char*, char**);
 int32_t participant_get_with_document_timeline(const char*, char**);
+int32_t participant_check_duplicates(const char*, char**);
 void participant_free(char*);
 
 // ============================================================================

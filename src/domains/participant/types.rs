@@ -14,21 +14,36 @@ use crate::domains::core::document_linking::{DocumentLinkable, EntityFieldMetada
 use std::collections::{HashSet, HashMap};
 
 /// Filter for complex participant queries - enables bulk filtering like project domain
-///
-/// # Disability Filtering Examples:
 /// 
+/// # Enhanced Grouped Filtering Logic:
+/// 
+/// The filter supports both general disability filtering and specific disability type filtering:
+/// 
+/// ## Simple Disability Filtering:
 /// ```rust
-/// // Simple: Show all participants with ANY disability
+/// // Show all participants with ANY disability
 /// let filter = ParticipantFilter::new().with_any_disability();
 /// 
-/// // Simple: Show all participants with NO disability  
+/// // Show all participants with NO disability  
 /// let filter = ParticipantFilter::new().with_no_disability();
+/// ```
 /// 
-/// // Advanced: Show participants with specific disability types (after long-press)
+/// ## Advanced Disability Type Filtering:
+/// ```rust
+/// // Show participants with specific disability types (takes precedence over general filter)
 /// let disability_types = vec!["visual".to_string(), "hearing".to_string()];
 /// let filter = ParticipantFilter::new().with_specific_disability_types(disability_types);
+/// ```
 /// 
-/// // Combined filtering: Age group + specific disability types
+/// ## Grouped UI Integration:
+/// When used with the grouped filter UI:
+/// - If `disability_types` is specified, it takes precedence and implies `disability = true`
+/// - If only `disability` boolean is set, use that for general filtering
+/// - The UI automatically handles the interaction between general and specific filters
+/// 
+/// ## Combined Filtering:
+/// ```rust
+/// // Age group + specific disability types (AND logic between categories, OR within)
 /// let filter = ParticipantFilter::new()
 ///     .with_age_groups(vec!["adult".to_string()])
 ///     .with_specific_disability_types(vec!["mobility".to_string()]);
@@ -488,7 +503,7 @@ pub struct UpdateParticipant {
     pub name: Option<String>,
     pub gender: Option<String>,
     pub disability: Option<bool>,
-    pub disability_type: Option<String>,
+    pub disability_type: Option<Option<String>>,
     pub age_group: Option<String>,
     pub location: Option<String>,
     pub updated_by_user_id: Uuid,
@@ -540,7 +555,7 @@ impl Validate for UpdateParticipant {
         // This validation will be handled at the service layer where we have access to current state
         
         // Enhanced disability type validation if provided
-        if let Some(disability_type) = &self.disability_type {
+        if let Some(Some(disability_type)) = &self.disability_type {
             if disability_type.trim().is_empty() {
                 return Err(DomainError::Validation(ValidationError::format(
                     "disability_type",
@@ -1285,4 +1300,39 @@ pub struct ParticipantSearchIndex {
     pub related_livelihood_names: Vec<String>,
     pub document_keywords: Vec<String>,
     pub last_indexed_at: DateTime<Utc>,
+}
+
+/// Information about a potential duplicate participant for UI duplicate detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParticipantDuplicateInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub gender: Option<String>,
+    pub age_group: Option<String>,
+    pub location: Option<String>,
+    pub disability: bool,
+    pub disability_type: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    
+    // Document information for duplicate detection
+    pub profile_photo_url: Option<String>,
+    pub identification_documents: Vec<DuplicateDocumentInfo>,
+    pub other_documents: Vec<DuplicateDocumentInfo>,
+    pub total_document_count: i64,
+    
+    // Activity summary
+    pub workshop_count: i64,
+    pub livelihood_count: i64,
+}
+
+/// Document information for duplicate detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DuplicateDocumentInfo {
+    pub id: Uuid,
+    pub original_filename: String,
+    pub file_path: String,
+    pub linked_field: Option<String>,
+    pub document_type_name: Option<String>,
+    pub uploaded_at: DateTime<Utc>,
 }

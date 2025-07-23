@@ -28,6 +28,7 @@ use crate::domains::participant::types::{
     ParticipantDemographics, ParticipantWithWorkshops, ParticipantWithLivelihoods, 
     ParticipantWithDocumentTimeline, ParticipantFilter, ParticipantWithEnrichment,
     ParticipantEngagementMetrics, ParticipantStatistics, ParticipantBulkOperationResult,
+    ParticipantDuplicateInfo,
     ParticipantSearchIndex, ParticipantDocumentReference
 };
 use crate::domains::sync::types::SyncPriority;
@@ -1441,6 +1442,42 @@ pub unsafe extern "C" fn participant_get_with_document_timeline(payload_json: *c
             .map_err(FFIError::from_service_error)?;
         
         let json_resp = serde_json::to_string(&participant_timeline)
+            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+        let cstr = CString::new(json_resp).unwrap();
+        *result = cstr.into_raw();
+        Ok(())
+    })
+}
+
+/// Check for potential duplicate participants by name
+/// Expected JSON payload:
+/// {
+///   "name": "string",
+///   "auth": { AuthCtxDto }
+/// }
+/// Returns: [ParticipantDuplicateInfo, ...]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn participant_check_duplicates(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
+    handle_status_result(|| unsafe {
+        ensure_ptr!(payload_json);
+        ensure_ptr!(result);
+        
+        let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        
+        #[derive(Deserialize)]
+        struct Payload {
+            name: String,
+            auth: AuthCtxDto,
+        }
+        
+        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        let auth: AuthContext = p.auth.try_into()?;
+        let svc = globals::get_participant_service()?;
+        
+        let duplicates = block_on_async(svc.check_potential_duplicates(&p.name, &auth))
+            .map_err(FFIError::from_service_error)?;
+        
+        let json_resp = serde_json::to_string(&duplicates)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();

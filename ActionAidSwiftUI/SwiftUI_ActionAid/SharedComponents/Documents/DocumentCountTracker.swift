@@ -70,6 +70,22 @@ struct DocumentCountConfig {
         enableCompressionTracking: false,
         debugLogging: false
     )
+    
+    static let participants = DocumentCountConfig(
+        tableName: "participants",
+        refreshInterval: 30.0,
+        cacheTimeout: 30.0,
+        enableCompressionTracking: true,
+        debugLogging: false
+    )
+    
+    static let activities = DocumentCountConfig(
+        tableName: "activities",
+        refreshInterval: 30.0,
+        cacheTimeout: 30.0,
+        enableCompressionTracking: true,
+        debugLogging: false
+    )
 }
 
 // MARK: - Document Count Tracker

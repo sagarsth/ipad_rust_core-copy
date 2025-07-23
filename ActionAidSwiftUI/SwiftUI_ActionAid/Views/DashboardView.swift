@@ -489,6 +489,16 @@ struct DomainCard: View {
             EntityViewWrapper(entityName: "Projects") {
                 ProjectsView()
             }
+        case .activities:
+            EntityViewWrapper(entityName: "Activities") {
+                ActivitiesView()
+            }
+        case .participants:
+            EntityViewWrapper(entityName: "Participants") {
+                ParticipantsView()
+            }
+        case .workshops, .donors, .funding:
+            ComingSoonView(domainName: domain.name)
         default:
             ComingSoonView(domainName: domain.name)
         }

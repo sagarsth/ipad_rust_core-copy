@@ -13,6 +13,7 @@ use crate::domains::participant::types::{
     ParticipantWithDocumentsByType, ParticipantActivityTimeline, ParticipantWorkshopActivity,
     ParticipantLivelihoodActivity, ParticipantDocumentActivity, ParticipantWithEnrichment,
     ParticipantEngagementMetrics, ParticipantStatistics, ParticipantBulkOperationResult,
+    ParticipantDuplicateInfo, DuplicateDocumentInfo,
     ParticipantSearchIndex
 };
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
@@ -68,6 +69,14 @@ pub trait ParticipantService: DeleteService<Participant> + Send + Sync {
         hard_delete: bool,
         auth: &AuthContext,
     ) -> ServiceResult<DeleteResult>;
+
+    /// Check for potential duplicate participants by name and return their details
+    /// This is used for smart duplicate detection in the UI
+    async fn check_potential_duplicates(
+        &self,
+        name: &str,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<ParticipantDuplicateInfo>>;
     
     /// Find participant IDs by complex filter criteria - enables bulk operations like project domain
     async fn find_participant_ids_by_filter(
@@ -580,12 +589,10 @@ impl ParticipantServiceImpl {
         new_participant: &NewParticipant,
         _current_state: Option<&Participant>,
     ) -> ServiceResult<()> {
-        // 1. Check for duplicate names (business rule)
+        // 1. Log potential duplicates for information (but don't block creation)
         if let Some(existing_participant) = self.repo.find_by_name_case_insensitive(&new_participant.name).await.ok() {
-            return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
-                "name",
-                &format!("A participant with the name '{}' already exists. Please use a different name or check if this is a duplicate entry.", new_participant.name)
-            ))));
+            println!("ℹ️ [PARTICIPANT_SERVICE] Found existing participant with same name '{}' (ID: {}). Allowing creation but logging for potential duplicate detection.", 
+                     new_participant.name, existing_participant.id);
         }
         
         // 2. Validate disability consistency
@@ -623,15 +630,13 @@ impl ParticipantServiceImpl {
         update_data: &UpdateParticipant,
         current_participant: &Participant,
     ) -> ServiceResult<()> {
-        // 1. Check for duplicate names if name is being changed
+        // 1. Log potential name duplicates if name is being changed (but don't block)
         if let Some(new_name) = &update_data.name {
             if new_name != &current_participant.name {
                 if let Some(existing_participant) = self.repo.find_by_name_case_insensitive(new_name).await.ok() {
                     if existing_participant.id != current_participant.id {
-                        return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
-                            "name",
-                            &format!("A participant with the name '{}' already exists. Please use a different name.", new_name)
-                        ))));
+                        println!("ℹ️ [PARTICIPANT_SERVICE] Updating participant {} name to '{}' which matches existing participant (ID: {}). Allowing update but logging for potential duplicate detection.", 
+                                 current_participant.id, new_name, existing_participant.id);
                     }
                 }
             }
@@ -639,8 +644,13 @@ impl ParticipantServiceImpl {
         
         // 2. Validate disability consistency with current and new state
         let final_disability = update_data.disability.unwrap_or(current_participant.disability);
-        let final_disability_type = update_data.disability_type.as_ref()
-            .or(current_participant.disability_type.as_ref());
+        
+        // Handle disability_type field: if update explicitly sets it to None, use that, otherwise use current
+        let final_disability_type = match &update_data.disability_type {
+            Some(Some(dt)) => Some(dt), // Explicitly setting a disability type
+            Some(None) => None,         // Explicitly clearing disability type
+            None => current_participant.disability_type.as_ref(), // No change to disability type
+        };
             
         if final_disability_type.is_some() && !final_disability {
             return Err(ServiceError::Domain(DomainError::Validation(ValidationError::custom(
@@ -908,6 +918,12 @@ impl ParticipantService for ParticipantServiceImpl {
         
         // 2. Set updated_by_user_id
         update_data.updated_by_user_id = auth.user_id;
+        
+        // 2.5. Auto-clear disability_type when disability is set to false
+        if update_data.disability == Some(false) {
+            update_data.disability_type = Some(None); // This sets the field to be explicitly cleared
+            println!("INFO: Auto-clearing disability_type for participant {} because disability was set to false", id);
+        }
         
         // 3. Enhanced input validation
         update_data.validate().map_err(ServiceError::Domain)?;
@@ -1904,6 +1920,103 @@ impl ParticipantService for ParticipantServiceImpl {
         
         let ids = self.repo.find_ids_by_filter_optimized(&filter).await?;
         Ok(ids)
+    }
+
+    async fn check_potential_duplicates(
+        &self,
+        name: &str,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<ParticipantDuplicateInfo>> {
+        auth.authorize(Permission::ViewParticipants)?;
+        
+        // Find all participants with matching name (case-insensitive)
+        let matching_participants = self.repo.find_all_by_name_case_insensitive(name).await
+            .map_err(ServiceError::Domain)?;
+        
+        let mut duplicate_infos = Vec::new();
+        
+        for participant in matching_participants {
+            // Get document information with priority: profile photo > identification > others
+            let documents = match self.document_service.list_media_documents_by_related_entity(
+                auth,
+                "participants",
+                participant.id,
+                crate::types::PaginationParams { page: 1, per_page: 100 },
+                None,
+            ).await {
+                Ok(docs) => docs,
+                Err(_) => crate::types::PaginatedResult::new(Vec::new(), 0, crate::types::PaginationParams { page: 1, per_page: 100 }),
+            };
+            
+            let mut profile_photo_url = None;
+            let mut identification_documents = Vec::new();
+            let mut other_documents = Vec::new();
+            
+            for doc in documents.items {
+                // Check priority before creating the struct to avoid ownership issues
+                let mut is_profile_photo = false;
+                let mut is_identification = false;
+                
+                // Priority 1: Profile photo
+                if let Some(field) = &doc.field_identifier {
+                    if field.contains("profile") || field.contains("photo") {
+                        if profile_photo_url.is_none() {
+                            profile_photo_url = Some(doc.file_path.clone());
+                        }
+                        is_profile_photo = true;
+                    } else if field.contains("identification") || field.contains("id") || field.contains("identity") {
+                        is_identification = true;
+                    }
+                }
+                
+                // Create doc_info only if we need to store it
+                if !is_profile_photo {
+                    let doc_info = DuplicateDocumentInfo {
+                        id: doc.id,
+                        original_filename: doc.original_filename,
+                        file_path: doc.file_path,
+                        linked_field: doc.field_identifier,
+                        document_type_name: doc.type_name,
+                        uploaded_at: chrono::DateTime::parse_from_rfc3339(&doc.created_at)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .unwrap_or_else(|_| chrono::Utc::now()),
+                    };
+                    
+                    if is_identification {
+                        identification_documents.push(doc_info);
+                    } else {
+                        other_documents.push(doc_info);
+                    }
+                }
+            }
+            
+            // Get activity counts (workshops and livelihoods)
+            // For now, use placeholder values - these can be enhanced later
+            let workshop_count = 0; // TODO: Implement workshop count query
+            let livelihood_count = 0; // TODO: Implement livelihood count query
+            
+            let duplicate_info = ParticipantDuplicateInfo {
+                id: participant.id,
+                name: participant.name,
+                gender: participant.gender,
+                age_group: participant.age_group,
+                location: participant.location,
+                disability: participant.disability,
+                disability_type: participant.disability_type,
+                created_at: participant.created_at,
+                updated_at: participant.updated_at,
+                profile_photo_url,
+                identification_documents,
+                other_documents,
+                total_document_count: documents.total as i64,
+                workshop_count,
+                livelihood_count,
+            };
+            
+            duplicate_infos.push(duplicate_info);
+        }
+        
+        Ok(duplicate_infos)
     }
 
 }

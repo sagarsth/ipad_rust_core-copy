@@ -31,7 +31,7 @@ use crate::domains::activity::types::{
 use crate::domains::sync::types::SyncPriority;
 use crate::domains::compression::types::CompressionPriority;
 use crate::auth::AuthContext;
-use crate::types::{UserRole, PaginationParams};
+use crate::types::{UserRole, PaginationParams, PaginatedResult};
 use crate::globals;
 
 use std::ffi::{CStr, CString};
@@ -150,10 +150,13 @@ impl From<ActivityIncludeDto> for ActivityInclude {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn activity_create(payload_json: *const c_char, result: *mut *mut c_char) -> c_int {
     handle_status_result(|| unsafe {
+        println!("🦀 [ACTIVITY_FFI] activity_create called");
+        
         ensure_ptr!(payload_json);
         ensure_ptr!(result);
         
         let json = CStr::from_ptr(payload_json).to_str().map_err(|_| FFIError::invalid_argument("utf8"))?;
+        println!("🦀 [ACTIVITY_FFI] Received JSON payload: {}", json);
         
         #[derive(Deserialize)]
         struct NewActivityDto {
@@ -173,22 +176,50 @@ pub unsafe extern "C" fn activity_create(payload_json: *const c_char, result: *m
             auth: AuthCtxDto,
         }
         
-        let p: Payload = serde_json::from_str(json).map_err(|e| FFIError::invalid_argument(&format!("json {e}")))?;
+        println!("🦀 [ACTIVITY_FFI] Parsing JSON...");
+        let p: Payload = serde_json::from_str(json).map_err(|e| {
+            println!("❌ [ACTIVITY_FFI] JSON parsing failed: {}", e);
+            FFIError::invalid_argument(&format!("json {e}"))
+        })?;
+        
+        println!("🦀 [ACTIVITY_FFI] JSON parsed successfully");
+        println!("🦀 [ACTIVITY_FFI] Activity data: description={:?}, kpi={:?}, target_value={:?}, actual_value={:?}, status_id={:?}", 
+                 p.activity.description, p.activity.kpi, p.activity.target_value, p.activity.actual_value, p.activity.status_id);
+        println!("🦀 [ACTIVITY_FFI] Auth user_id: {}", p.auth.user_id);
+        
         let auth: AuthContext = p.auth.try_into()?;
+        println!("🦀 [ACTIVITY_FFI] AuthContext created successfully");
         
         // Convert DTO to domain struct with UUID parsing
+        println!("🦀 [ACTIVITY_FFI] Converting DTO to domain struct...");
+        
         let project_id = p.activity.project_id.as_ref()
-            .map(|s| Uuid::parse_str(s))
+            .map(|s| {
+                println!("🦀 [ACTIVITY_FFI] Parsing project_id: {}", s);
+                Uuid::parse_str(s)
+            })
             .transpose()
-            .map_err(|_| FFIError::invalid_argument("invalid project_id"))?;
+            .map_err(|e| {
+                println!("❌ [ACTIVITY_FFI] Invalid project_id: {}", e);
+                FFIError::invalid_argument("invalid project_id")
+            })?;
         
         let created_by_user_id = p.activity.created_by_user_id.as_ref()
-            .map(|s| Uuid::parse_str(s))
+            .map(|s| {
+                println!("🦀 [ACTIVITY_FFI] Parsing created_by_user_id: {}", s);
+                Uuid::parse_str(s)
+            })
             .transpose()
-            .map_err(|_| FFIError::invalid_argument("invalid created_by_user_id"))?;
+            .map_err(|e| {
+                println!("❌ [ACTIVITY_FFI] Invalid created_by_user_id: {}", e);
+                FFIError::invalid_argument("invalid created_by_user_id")
+            })?;
         
         let sync_priority = SyncPriority::from_str(&p.activity.sync_priority)
-            .map_err(|_| FFIError::invalid_argument("invalid sync_priority"))?;
+            .map_err(|e| {
+                println!("❌ [ACTIVITY_FFI] Invalid sync_priority '{}': {}", p.activity.sync_priority, e);
+                FFIError::invalid_argument("invalid sync_priority")
+            })?;
         
         let new_activity = NewActivity {
             description: p.activity.description,
@@ -201,14 +232,33 @@ pub unsafe extern "C" fn activity_create(payload_json: *const c_char, result: *m
             created_by_user_id,
         };
         
-        let svc = globals::get_activity_service()?;
-        let activity = block_on_async(svc.create_activity(new_activity, &auth))
-            .map_err(FFIError::from_service_error)?;
+        println!("🦀 [ACTIVITY_FFI] NewActivity struct created: {:?}", new_activity);
         
+        println!("🦀 [ACTIVITY_FFI] Getting activity service...");
+        let svc = globals::get_activity_service()?;
+        
+        println!("🦀 [ACTIVITY_FFI] Calling service.create_activity...");
+        let activity = block_on_async(svc.create_activity(new_activity, &auth))
+            .map_err(|e| {
+                println!("❌ [ACTIVITY_FFI] Service create_activity failed: {:?}", e);
+                FFIError::from_service_error(e)
+            })?;
+        
+        println!("✅ [ACTIVITY_FFI] Activity created successfully! ID: {}", activity.id);
+        
+        println!("🦀 [ACTIVITY_FFI] Serializing response to JSON...");
         let json_resp = serde_json::to_string(&activity)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+            .map_err(|e| {
+                println!("❌ [ACTIVITY_FFI] JSON serialization failed: {}", e);
+                FFIError::internal(format!("ser {e}"))
+            })?;
+        
+        println!("🦀 [ACTIVITY_FFI] Response JSON: {}", json_resp);
+        
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
+        
+        println!("✅ [ACTIVITY_FFI] activity_create completed successfully!");
         Ok(())
     })
 }
@@ -388,25 +438,33 @@ pub unsafe extern "C" fn activity_list(payload_json: *const c_char, result: *mut
         let params = parse_pagination(p.pagination);
         let auth: AuthContext = p.auth.try_into()?;
         
-        // Return empty paginated result since the service doesn't support listing all activities
-        #[derive(Serialize)]
-        struct EmptyPaginatedResult {
-            items: Vec<serde_json::Value>,
-            total: u64,
-            page: u32,
-            per_page: u32,
-            total_pages: u32,
-        }
+        // Convert include options
+        let include_options: Option<Vec<ActivityInclude>> = p.include.map(|includes| 
+            includes.into_iter().map(|inc| inc.into()).collect()
+        );
         
-        let empty_result = EmptyPaginatedResult {
-            items: vec![],
-            total: 0,
-            page: params.page,
-            per_page: params.per_page,
-            total_pages: 0,
-        };
+        println!("🦀 [ACTIVITY_LIST] Calling service to list activities...");
+        println!("🦀 [ACTIVITY_LIST] Pagination: page={}, per_page={}", params.page, params.per_page);
+        println!("🦀 [ACTIVITY_LIST] Include options: {:?}", include_options);
         
-        let json_resp = serde_json::to_string(&empty_result)
+        let svc = globals::get_activity_service()?;
+        
+        // For now, we'll implement a basic list all activities - we can enhance this later
+        // to support filtering, search, etc.
+        let repo = globals::get_activity_repo()?;
+        let activities_result = block_on_async(repo.find_all(params))
+            .map_err(|e| FFIError::from_service_error(crate::errors::ServiceError::from(e)))?;
+        
+        println!("✅ [ACTIVITY_LIST] Found {} activities", activities_result.items.len());
+        
+        // Convert to response DTOs
+        let response_items: Vec<ActivityResponse> = activities_result.items.into_iter()
+            .map(ActivityResponse::from)
+            .collect();
+            
+        let paginated_response = PaginatedResult::new(response_items, activities_result.total, params);
+        
+        let json_resp = serde_json::to_string(&paginated_response)
             .map_err(|e| FFIError::internal(format!("ser {e}")))?;
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();

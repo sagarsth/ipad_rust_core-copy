@@ -43,6 +43,15 @@ struct CRUDSheetConfig {
     static let user = CRUDSheetConfig(
         entityName: "User"
     )
+
+    static let activity = CRUDSheetConfig(
+        entityName: "Activity",
+        entityNamePlural: "Activities"
+    )
+    
+    static let participant = CRUDSheetConfig(
+        entityName: "Participant"
+    )
     
     static let document = CRUDSheetConfig(
         entityName: "Document"

@@ -284,13 +284,29 @@ impl ActivityRepository for SqliteActivityRepository {
         new_activity: &NewActivity,
         auth: &AuthContext,
     ) -> DomainResult<Activity> {
-        let mut tx = self.pool.begin().await.map_err(DbError::from)?;
+        println!("🗃️ [ACTIVITY_REPO] create called");
+        println!("🗃️ [ACTIVITY_REPO] new_activity: {:?}", new_activity);
+        println!("🗃️ [ACTIVITY_REPO] auth.user_id: {}", auth.user_id);
+        
+        println!("🗃️ [ACTIVITY_REPO] Starting database transaction...");
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            println!("❌ [ACTIVITY_REPO] Failed to begin transaction: {:?}", e);
+            DbError::from(e)
+        })?;
+        
         match self.create_with_tx(new_activity, auth, &mut tx).await {
             Ok(activity) => {
-                tx.commit().await.map_err(DbError::from)?;
+                println!("✅ [ACTIVITY_REPO] create_with_tx successful, committing transaction...");
+                tx.commit().await.map_err(|e| {
+                    println!("❌ [ACTIVITY_REPO] Failed to commit transaction: {:?}", e);
+                    DbError::from(e)
+                })?;
+                println!("✅ [ACTIVITY_REPO] Transaction committed successfully! Activity ID: {}", activity.id);
                 Ok(activity)
             }
             Err(e) => {
+                println!("❌ [ACTIVITY_REPO] create_with_tx failed: {:?}", e);
+                println!("🗃️ [ACTIVITY_REPO] Rolling back transaction...");
                 let _ = tx.rollback().await;
                 Err(e)
             }
@@ -303,7 +319,11 @@ impl ActivityRepository for SqliteActivityRepository {
         auth: &AuthContext,
         tx: &mut Transaction<'t, Sqlite>,
     ) -> DomainResult<Activity> {
+        println!("🗃️ [ACTIVITY_REPO] create_with_tx called");
+        
         let id = Uuid::new_v4();
+        println!("🗃️ [ACTIVITY_REPO] Generated new activity ID: {}", id);
+        
         let now = Utc::now();
         let now_str = now.to_rfc3339();
         let user_id = auth.user_id; // Get Uuid directly
@@ -311,6 +331,11 @@ impl ActivityRepository for SqliteActivityRepository {
         let device_uuid: Option<Uuid> = auth.device_id.parse::<Uuid>().ok();
         let device_id_str = device_uuid.map(|u| u.to_string());
         let project_id_str = new_activity.project_id.map(|id| id.to_string());
+        
+        println!("🗃️ [ACTIVITY_REPO] Prepared data: project_id={:?}, user_id={}, device_id={:?}", 
+                 project_id_str, user_id_str, device_id_str);
+        println!("🗃️ [ACTIVITY_REPO] Activity fields: description={:?}, kpi={:?}, target_value={:?}, actual_value={:?}, status_id={:?}",
+                 new_activity.description, new_activity.kpi, new_activity.target_value, new_activity.actual_value, new_activity.status_id);
 
         query(
             r#"
@@ -355,7 +380,12 @@ impl ActivityRepository for SqliteActivityRepository {
         .bind(&device_id_str).bind(&device_id_str) // created_by_device_id, updated_by_device_id
         .execute(&mut **tx)
         .await
-        .map_err(DbError::from)?;
+        .map_err(|e| {
+            println!("❌ [ACTIVITY_REPO] INSERT query failed: {:?}", e);
+            DbError::from(e)
+        })?;
+        
+        println!("✅ [ACTIVITY_REPO] INSERT query successful!");
 
         // Log Create Operation
         let entry = ChangeLogEntry {
@@ -374,9 +404,23 @@ impl ActivityRepository for SqliteActivityRepository {
             processed_at: None,
             sync_error: None,
         };
-        self.log_change_entry(entry, tx).await?; // Add log call here
+        println!("🗃️ [ACTIVITY_REPO] Logging change entry...");
+        self.log_change_entry(entry, tx).await.map_err(|e| {
+            println!("❌ [ACTIVITY_REPO] Failed to log change entry: {:?}", e);
+            e
+        })?; // Add log call here
 
-        self.find_by_id_with_tx(id, tx).await
+        println!("🗃️ [ACTIVITY_REPO] Finding created activity by ID...");
+        let result = self.find_by_id_with_tx(id, tx).await;
+        match &result {
+            Ok(activity) => {
+                println!("✅ [ACTIVITY_REPO] create_with_tx completed successfully! Activity: {:?}", activity);
+            }
+            Err(e) => {
+                println!("❌ [ACTIVITY_REPO] Failed to find created activity: {:?}", e);
+            }
+        }
+        result
     }
 
     async fn update(

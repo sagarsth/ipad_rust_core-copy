@@ -16,6 +16,7 @@ struct FilterBarConfig {
     let compactMode: Bool
     let showActiveFilterSummary: Bool
     let adaptiveWidth: Bool  // New property for adaptive width
+    let useGroupedFilters: Bool  // NEW: Whether to use grouped filters
     
     init(
         placeholder: String = "Search...",
@@ -24,7 +25,8 @@ struct FilterBarConfig {
         maxVisibleFilters: Int = 4,
         compactMode: Bool = false,
         showActiveFilterSummary: Bool = false,  // Default to false as it's redundant
-        adaptiveWidth: Bool = true  // Default to true for smart behavior
+        adaptiveWidth: Bool = true,  // Default to true for smart behavior
+        useGroupedFilters: Bool = false  // Default to false for backward compatibility
     ) {
         self.placeholder = placeholder
         self.showSearchBar = showSearchBar
@@ -33,6 +35,7 @@ struct FilterBarConfig {
         self.compactMode = compactMode
         self.showActiveFilterSummary = showActiveFilterSummary
         self.adaptiveWidth = adaptiveWidth
+        self.useGroupedFilters = useGroupedFilters
     }
     
     static let `default` = FilterBarConfig()
@@ -75,6 +78,18 @@ struct FilterBarConfig {
         compactMode: true,
         showActiveFilterSummary: false,
         adaptiveWidth: true
+    )
+    
+    // NEW: Participants config with grouped filters
+    static let participants = FilterBarConfig(
+        placeholder: "Search participants...",
+        showSearchBar: true,
+        allowMultipleSelection: true,
+        maxVisibleFilters: 4,
+        compactMode: false,
+        showActiveFilterSummary: false,
+        adaptiveWidth: true,
+        useGroupedFilters: true
     )
 }
 
@@ -125,6 +140,142 @@ struct FilterOption: Identifiable {
         FilterOption(id: "manager", displayName: "Manager", icon: "person.badge.key", color: .blue),
         FilterOption(id: "staff", displayName: "Staff", icon: "person", color: .green)
     ]
+    
+    // MARK: - Activities Filters
+    static let activityFilters: [FilterOption] = [
+        FilterOption(id: "all", displayName: "All", icon: "square.grid.2x2", color: .gray, isDefault: true),
+        FilterOption(id: "completed", displayName: "Completed", icon: "checkmark.circle.fill", color: .green),
+        FilterOption(id: "in_progress", displayName: "In Progress", icon: "arrow.clockwise", color: .blue),
+        FilterOption(id: "pending", displayName: "Pending", icon: "hourglass", color: .orange),
+        FilterOption(id: "blocked", displayName: "Blocked", icon: "xmark.octagon", color: .red)
+    ]
+}
+
+// MARK: - Grouped Filter Option Model
+struct GroupedFilterOption: Identifiable {
+    let id: String
+    let displayName: String
+    let icon: String?
+    let color: Color?
+    let isDefault: Bool
+    let subOptions: [FilterSubOption]
+    
+    init(
+        id: String,
+        displayName: String,
+        icon: String? = nil,
+        color: Color? = nil,
+        isDefault: Bool = false,
+        subOptions: [FilterSubOption] = []
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.icon = icon
+        self.color = color
+        self.isDefault = isDefault
+        self.subOptions = subOptions
+    }
+}
+
+// MARK: - Filter Sub Option Model
+struct FilterSubOption: Identifiable {
+    let id: String
+    let displayName: String
+    let icon: String?
+    let color: Color?
+    
+    init(
+        id: String,
+        displayName: String,
+        icon: String? = nil,
+        color: Color? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.icon = icon
+        self.color = color
+    }
+}
+
+// MARK: - Participants Grouped Filters (New Clean Structure)
+extension FilterOption {
+    // MARK: - Participants Filters (matches backend ParticipantFilter exactly)
+    static let participantFilters: [FilterOption] = [
+        FilterOption(id: "all", displayName: "All", icon: "person.2", color: .gray, isDefault: true),
+        // Gender filters (exact backend values)
+        FilterOption(id: "male", displayName: "Male", icon: "person", color: .blue),
+        FilterOption(id: "female", displayName: "Female", icon: "person", color: .pink),
+        FilterOption(id: "other", displayName: "Other", icon: "person.badge.key", color: .mint),
+        FilterOption(id: "prefer_not_to_say", displayName: "Prefer Not to Say", icon: "person.badge.shield.checkmark", color: .cyan),
+        // Age group filters (exact backend values)
+        FilterOption(id: "child", displayName: "Child", icon: "figure.2.arms.open", color: .green),
+        FilterOption(id: "youth", displayName: "Youth", icon: "figure.walk", color: .orange),
+        FilterOption(id: "adult", displayName: "Adult", icon: "person.fill", color: .purple),
+        FilterOption(id: "elderly", displayName: "Elderly", icon: "figure.walk.motion", color: .brown),
+        // Disability filters (boolean logic from backend)
+        FilterOption(id: "disability", displayName: "With Disability", icon: "figure.roll", color: .indigo),
+        FilterOption(id: "no_disability", displayName: "No Disability", icon: "figure.walk", color: .teal)
+    ]
+    
+    // NEW: Clean grouped filters for participants
+    static let participantGroupedFilters: [GroupedFilterOption] = [
+        GroupedFilterOption(
+            id: "all",
+            displayName: "All",
+            icon: "person.2",
+            color: .gray,
+            isDefault: true
+        ),
+        GroupedFilterOption(
+            id: "gender",
+            displayName: "Gender",
+            icon: "person.2",
+            color: .blue,
+            subOptions: [
+                FilterSubOption(id: "male", displayName: "Male", icon: "person", color: .blue),
+                FilterSubOption(id: "female", displayName: "Female", icon: "person", color: .pink),
+                FilterSubOption(id: "other", displayName: "Other", icon: "person.badge.key", color: .mint),
+                FilterSubOption(id: "prefer_not_to_say", displayName: "Prefer Not to Say", icon: "person.badge.shield.checkmark", color: .cyan)
+            ]
+        ),
+        GroupedFilterOption(
+            id: "age_group",
+            displayName: "Age Group",
+            icon: "calendar",
+            color: .orange,
+            subOptions: [
+                FilterSubOption(id: "child", displayName: "Child", icon: "figure.2.arms.open", color: .green),
+                FilterSubOption(id: "youth", displayName: "Youth", icon: "figure.walk", color: .orange),
+                FilterSubOption(id: "adult", displayName: "Adult", icon: "person.fill", color: .purple),
+                FilterSubOption(id: "elderly", displayName: "Elderly", icon: "figure.walk.motion", color: .brown)
+            ]
+        ),
+        GroupedFilterOption(
+            id: "disability",
+            displayName: "Disability",
+            icon: "figure.roll",
+            color: .purple,
+            subOptions: [
+                FilterSubOption(id: "with_disability", displayName: "With Disability", icon: "figure.roll", color: .indigo),
+                FilterSubOption(id: "no_disability", displayName: "No Disability", icon: "figure.walk", color: .teal)
+            ]
+        ),
+        GroupedFilterOption(
+            id: "disability_type",
+            displayName: "Disability Type",
+            icon: "medical.thermometer",
+            color: .red,
+            subOptions: [
+                FilterSubOption(id: "visual", displayName: "Visual", icon: "eye.slash", color: .blue),
+                FilterSubOption(id: "hearing", displayName: "Hearing", icon: "ear.badge.slash", color: .green),
+                FilterSubOption(id: "physical", displayName: "Physical", icon: "figure.roll", color: .orange),
+                FilterSubOption(id: "intellectual", displayName: "Intellectual", icon: "brain.head.profile", color: .purple),
+                FilterSubOption(id: "psychosocial", displayName: "Psychosocial", icon: "heart.text.square", color: .pink),
+                FilterSubOption(id: "multiple", displayName: "Multiple", icon: "person.2.gobackward", color: .red),
+                FilterSubOption(id: "other", displayName: "Other", icon: "questionmark.circle", color: .gray)
+            ]
+        )
+    ]
 }
 
 // MARK: - Filter Bar Component
@@ -133,12 +284,28 @@ struct FilterBarComponent: View {
     @Binding var selectedFilters: Set<String>
     let config: FilterBarConfig
     let filterOptions: [FilterOption]
+    let groupedFilterOptions: [GroupedFilterOption]  // NEW: Support for grouped filters
     
     // Internal state
     @State private var showAllFilters = false
     @State private var isSearchFocused = false
     @State private var availableWidth: CGFloat = 0
     @FocusState private var searchFieldFocused: Bool
+    
+    // NEW: Initializer that supports both regular and grouped filters
+    init(
+        searchText: Binding<String>,
+        selectedFilters: Binding<Set<String>>,
+        config: FilterBarConfig,
+        filterOptions: [FilterOption] = [],
+        groupedFilterOptions: [GroupedFilterOption] = []
+    ) {
+        self._searchText = searchText
+        self._selectedFilters = selectedFilters
+        self.config = config
+        self.filterOptions = filterOptions
+        self.groupedFilterOptions = groupedFilterOptions
+    }
     
     // Computed properties
     private var hasActiveFilters: Bool {
@@ -161,8 +328,10 @@ struct FilterBarComponent: View {
         var usedWidth: CGFloat = horizontalPadding
         var visibleCount = 0
         
-        for (index, option) in filterOptions.enumerated() {
-            let estimatedChipWidth = estimateChipWidth(for: option.displayName)
+        let optionsToCheck = config.useGroupedFilters ? groupedFilterOptions.map(\.displayName) : filterOptions.map(\.displayName)
+        
+        for (index, displayName) in optionsToCheck.enumerated() {
+            let estimatedChipWidth = estimateChipWidth(for: displayName)
             
             // Check if we can fit this chip
             if usedWidth + estimatedChipWidth <= availableWidth {
@@ -170,7 +339,7 @@ struct FilterBarComponent: View {
                 visibleCount += 1
             } else {
                 // If there are more filters, reserve space for "More" button
-                if index < filterOptions.count - 1 {
+                if index < optionsToCheck.count - 1 {
                     if usedWidth + moreButtonWidth <= availableWidth {
                         break
                     } else if visibleCount > 0 {
@@ -186,6 +355,10 @@ struct FilterBarComponent: View {
     }
     
     private var visibleFilterOptions: [FilterOption] {
+        if config.useGroupedFilters {
+            return [] // Not used when grouped filters are enabled
+        }
+        
         if showAllFilters || config.compactMode {
             return filterOptions
         } else {
@@ -193,9 +366,26 @@ struct FilterBarComponent: View {
         }
     }
     
+    private var visibleGroupedFilterOptions: [GroupedFilterOption] {
+        if !config.useGroupedFilters {
+            return [] // Not used when regular filters are enabled
+        }
+        
+        if showAllFilters || config.compactMode {
+            return groupedFilterOptions
+        } else {
+            return Array(groupedFilterOptions.prefix(adaptiveMaxVisibleFilters))
+        }
+    }
+    
     private var hasMoreFilters: Bool {
         let maxVisible = config.adaptiveWidth ? adaptiveMaxVisibleFilters : config.maxVisibleFilters
-        return filterOptions.count > maxVisible && !config.compactMode
+        
+        if config.useGroupedFilters {
+            return groupedFilterOptions.count > maxVisible && !config.compactMode
+        } else {
+            return filterOptions.count > maxVisible && !config.compactMode
+        }
     }
     
     // Helper method to estimate chip width based on text content
@@ -217,13 +407,24 @@ struct FilterBarComponent: View {
             GeometryReader { geometry in
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
-                        ForEach(visibleFilterOptions, id: \.id) { option in
-                            MultiSelectFilterChip(
-                                title: option.displayName,
-                                value: option.id,
-                                selections: $selectedFilters,
-                                color: option.color ?? .blue
-                            )
+                        if config.useGroupedFilters {
+                            // Render grouped filter chips
+                            ForEach(visibleGroupedFilterOptions, id: \.id) { group in
+                                GroupedFilterChip(
+                                    group: group,
+                                    selectedSubOptions: $selectedFilters
+                                )
+                            }
+                        } else {
+                            // Render regular filter chips
+                            ForEach(visibleFilterOptions, id: \.id) { option in
+                                MultiSelectFilterChip(
+                                    title: option.displayName,
+                                    value: option.id,
+                                    selections: $selectedFilters,
+                                    color: option.color ?? .blue
+                                )
+                            }
                         }
                         
                         // Show more/less button
@@ -363,14 +564,16 @@ extension View {
         searchText: Binding<String>,
         selectedFilters: Binding<Set<String>>,
         config: FilterBarConfig = .default,
-        filterOptions: [FilterOption] = []
+        filterOptions: [FilterOption] = [],
+        groupedFilterOptions: [GroupedFilterOption] = []
     ) -> some View {
         VStack(spacing: 0) {
             FilterBarComponent(
                 searchText: searchText,
                 selectedFilters: selectedFilters,
                 config: config,
-                filterOptions: filterOptions
+                filterOptions: filterOptions,
+                groupedFilterOptions: groupedFilterOptions
             )
             
             self
@@ -390,7 +593,8 @@ struct FilterBarComponent_Previews: PreviewProvider {
                 searchText: $searchText,
                 selectedFilters: $selectedFilters,
                 config: .strategicGoals,
-                filterOptions: FilterOption.strategicGoalFilters
+                filterOptions: FilterOption.strategicGoalFilters,
+                groupedFilterOptions: FilterOption.participantGroupedFilters
             )
             
             Spacer()

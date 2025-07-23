@@ -56,6 +56,20 @@ struct EmptyStateConfig {
         subtitle: "Upload your first document to get started",
         actionTitle: "Upload Document"
     )
+    
+    static let participants = EmptyStateConfig(
+        icon: "person.2",
+        title: "No Participants",
+        subtitle: "Add your first participant to get started",
+        actionTitle: "Add Participant"
+    )
+    
+    static let activities = EmptyStateConfig(
+        icon: "list.bullet",
+        title: "No Activities",
+        subtitle: "Create your first activity to track progress",
+        actionTitle: "Create Activity"
+    )
 }
 
 // MARK: - Entity List View
@@ -69,6 +83,7 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
     @Binding var searchText: String
     @Binding var selectedFilters: Set<String>
     let filterOptions: [FilterOption]
+    let groupedFilterOptions: [GroupedFilterOption] // NEW: Support for grouped filters
     
     // MARK: - View Configuration
     @Binding var currentViewStyle: ListViewStyle
@@ -120,7 +135,8 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
         emptyStateConfig: EmptyStateConfig,
         searchText: Binding<String>,
         selectedFilters: Binding<Set<String>>,
-        filterOptions: [FilterOption],
+        filterOptions: [FilterOption] = [],
+        groupedFilterOptions: [GroupedFilterOption] = [], // NEW: Support for grouped filters
         currentViewStyle: Binding<ListViewStyle>,
         onViewStyleChange: @escaping (ListViewStyle) -> Void,
         selectionManager: SelectionManager,
@@ -139,6 +155,7 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
         self._searchText = searchText
         self._selectedFilters = selectedFilters
         self.filterOptions = filterOptions
+        self.groupedFilterOptions = groupedFilterOptions
         self._currentViewStyle = currentViewStyle
         self.onViewStyleChange = onViewStyleChange
         self.selectionManager = selectionManager
@@ -160,7 +177,8 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
                 searchText: $searchText,
                 selectedFilters: $selectedFilters,
                 config: filterBarConfig,
-                filterOptions: filterOptions
+                filterOptions: filterOptions,
+                groupedFilterOptions: groupedFilterOptions
             )
             
             // Content
@@ -229,6 +247,8 @@ struct EntityListView<Entity: Identifiable & MonthGroupable & Equatable, CardCon
             return .projects
         case "users":
             return .users
+        case "participants":
+            return .participants
         default:
             return .default
         }

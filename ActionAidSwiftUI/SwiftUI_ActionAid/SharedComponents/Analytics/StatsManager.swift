@@ -433,6 +433,357 @@ extension StatsManager where Entity == UserResponse {
     }
 }
 
+
+// MARK: - Activities Stats Configuration
+extension StatsManager where Entity == ActivityResponse {
+    static func activitiesManager() -> StatsManager<ActivityResponse> {
+        let configs = [
+            StatConfig(
+                key: "total",
+                title: "Total Activities",
+                icon: "list.bullet",
+                color: .blue,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "completed",
+                title: "Completed",
+                icon: "checkmark.circle.fill",
+                color: .green,
+                calculator: ConditionalCountCalculator<ActivityResponse> { $0.statusId == 1 }
+            ),
+            StatConfig(
+                key: "in_progress",
+                title: "In Progress",
+                icon: "arrow.clockwise",
+                color: .blue,
+                calculator: ConditionalCountCalculator<ActivityResponse> { $0.statusId == 2 }
+            ),
+            StatConfig(
+                key: "pending",
+                title: "Pending",
+                icon: "hourglass",
+                color: .orange,
+                calculator: ConditionalCountCalculator<ActivityResponse> { $0.statusId == 3 }
+            ),
+            StatConfig(
+                key: "blocked",
+                title: "Blocked",
+                icon: "xmark.octagon",
+                color: .red,
+                calculator: ConditionalCountCalculator<ActivityResponse> { $0.statusId == 4 }
+            ),
+            StatConfig(
+                key: "with_targets",
+                title: "Has Targets",
+                icon: "target",
+                color: .purple,
+                calculator: ConditionalCountCalculator<ActivityResponse> { $0.targetValue != nil }
+            ),
+            StatConfig(
+                key: "avg_progress",
+                title: "Avg Progress",
+                icon: "percent",
+                color: .indigo,
+                calculator: PercentageCalculator<ActivityResponse> { activity in
+                    guard let progress = activity.progressPercentage else { return false }
+                    return progress >= 50
+                }
+            )
+        ]
+        
+        return StatsManager(statConfigs: configs)
+    }
+}
+
+// MARK: - Participants Stats Configuration
+extension StatsManager where Entity == ParticipantResponse {
+    static func participantsManager() -> StatsManager<ParticipantResponse> {
+        let configs = [
+            StatConfig(
+                key: "total",
+                title: "Total Participants",
+                icon: "person.2.fill",
+                color: .blue,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "male",
+                title: "Male",
+                icon: "person.fill",
+                color: .blue,
+                calculator: ConditionalCountCalculator<ParticipantResponse> { $0.gender == "male" }
+            ),
+            StatConfig(
+                key: "female",
+                title: "Female",
+                icon: "person.fill",
+                color: .pink,
+                calculator: ConditionalCountCalculator<ParticipantResponse> { $0.gender == "female" }
+            ),
+            StatConfig(
+                key: "with_disability",
+                title: "With Disability",
+                icon: "figure.roll",
+                color: .orange,
+                calculator: ConditionalCountCalculator<ParticipantResponse> { $0.disability }
+            ),
+            StatConfig(
+                key: "youth",
+                title: "Youth",
+                icon: "person.crop.circle.badge.plus",
+                color: .green,
+                calculator: ConditionalCountCalculator<ParticipantResponse> { $0.ageGroup == "youth" }
+            ),
+            StatConfig(
+                key: "adult",
+                title: "Adults",
+                icon: "person.crop.circle",
+                color: .purple,
+                calculator: ConditionalCountCalculator<ParticipantResponse> { $0.ageGroup == "adult" }
+            ),
+            StatConfig(
+                key: "with_documents",
+                title: "Has Documents",
+                icon: "doc.text",
+                color: .indigo,
+                calculator: ConditionalCountCalculator<ParticipantResponse> { 
+                    ($0.documentCount ?? 0) > 0
+                }
+            )
+        ]
+        
+        return StatsManager(statConfigs: configs)
+    }
+}
+
+// MARK: - Backend-Powered Activity Stats Manager
+@MainActor
+class BackendActivityStatsManager: ObservableObject {
+    @Published var stats: [StatResult] = []
+    @Published var isCalculating = false
+    @Published var lastCalculated = Date.distantPast
+    @Published var activityStatistics: ActivityStatistics?
+    @Published var progressAnalysis: ActivityProgressAnalysis?
+    
+    private let activityHandler = ActivityFFIHandler()
+    
+    func fetchStats(auth: AuthContextPayload) async {
+        guard !isCalculating else { return }
+        
+        isCalculating = true
+        defer { isCalculating = false }
+        
+        async let statsResult = activityHandler.getStatistics(auth: auth)
+        async let progressResult = activityHandler.getProgressAnalysis(auth: auth)
+        
+        do {
+            let (activityStats, progressAnalysis) = try await (statsResult.get(), progressResult.get())
+            
+            await MainActor.run {
+                self.activityStatistics = activityStats
+                self.progressAnalysis = progressAnalysis
+                self.generateStatsFromBackend(activityStats, progressAnalysis)
+                self.lastCalculated = Date()
+            }
+        } catch {
+            print("Failed to fetch activity stats from backend: \(error)")
+            await MainActor.run {
+                self.stats = []
+            }
+        }
+    }
+    
+    private func generateStatsFromBackend(_ activityStats: ActivityStatistics, _ progressAnalysis: ActivityProgressAnalysis) {
+        let configs = [
+            StatConfig(
+                key: "total",
+                title: "Total Activities",
+                icon: "list.bullet",
+                color: .blue,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "on_track",
+                title: "On Track",
+                icon: "checkmark.circle",
+                color: .green,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "behind",
+                title: "Behind",
+                icon: "exclamationmark.triangle",
+                color: .orange,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "at_risk",
+                title: "At Risk",
+                icon: "xmark.circle",
+                color: .red,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "avg_progress",
+                title: "Avg Progress",
+                icon: "percent",
+                color: .purple,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "completion_rate",
+                title: "Completion Rate",
+                icon: "chart.pie",
+                color: .indigo,
+                calculator: CountCalculator()
+            )
+        ]
+        
+        let backendValues: [String: StatValue] = [
+            "total": .count(Int(activityStats.totalActivities)),
+            "on_track": .count(Int(progressAnalysis.activitiesOnTrack)),
+            "behind": .count(Int(progressAnalysis.activitiesBehind)),
+            "at_risk": .count(Int(progressAnalysis.activitiesAtRisk)),
+            "avg_progress": .percentage(progressAnalysis.averageProgressPercentage),
+            "completion_rate": .percentage(progressAnalysis.completionRate)
+        ]
+        
+        let now = Date()
+        self.stats = configs.map { config in
+            let value = backendValues[config.key] ?? .count(0)
+            return StatResult(
+                config: config,
+                value: value,
+                trend: nil,
+                lastUpdated: now
+            )
+        }
+    }
+    
+    func createAnyStatsManager() -> AnyStatsManager {
+        return AnyStatsManager(
+            stats: self.stats,
+            isCalculating: self.isCalculating,
+            lastCalculated: self.lastCalculated
+        )
+    }
+}
+
+// MARK: - Backend-Powered Participant Stats Manager
+@MainActor
+class BackendParticipantStatsManager: ObservableObject {
+    @Published var stats: [StatResult] = []
+    @Published var isCalculating = false
+    @Published var lastCalculated = Date.distantPast
+    @Published var participantStatistics: ParticipantStatistics?
+    @Published var demographics: ParticipantDemographics?
+    
+    private let participantHandler = ParticipantFFIHandler()
+    
+    func fetchStats(auth: AuthContextPayload) async {
+        guard !isCalculating else { return }
+        
+        isCalculating = true
+        defer { isCalculating = false }
+        
+        async let statsResult = participantHandler.getComprehensiveStatistics(auth: auth)
+        async let demographicsResult = participantHandler.getDemographics(auth: auth)
+        
+        do {
+            let (participantStats, demographics) = try await (statsResult.get(), demographicsResult.get())
+            
+            await MainActor.run {
+                self.participantStatistics = participantStats
+                self.demographics = demographics
+                self.generateStatsFromBackend(participantStats, demographics)
+                self.lastCalculated = Date()
+            }
+        } catch {
+            print("Failed to fetch participant stats from backend: \(error)")
+            await MainActor.run {
+                self.stats = []
+            }
+        }
+    }
+    
+    private func generateStatsFromBackend(_ participantStats: ParticipantStatistics, _ demographics: ParticipantDemographics) {
+        let configs = [
+            StatConfig(
+                key: "total",
+                title: "Total Participants",
+                icon: "person.2.fill",
+                color: .blue,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "active",
+                title: "Active",
+                icon: "person.crop.circle.badge.checkmark",
+                color: .green,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "with_disability",
+                title: "With Disability",
+                icon: "figure.roll",
+                color: .orange,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "with_workshops",
+                title: "In Workshops",
+                icon: "person.3",
+                color: .purple,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "with_documents",
+                title: "Has Documents",
+                icon: "doc.text",
+                color: .indigo,
+                calculator: CountCalculator()
+            ),
+            StatConfig(
+                key: "data_completeness",
+                title: "Data Complete",
+                icon: "checkmark.seal",
+                color: .mint,
+                calculator: CountCalculator()
+            )
+        ]
+        
+        let backendValues: [String: StatValue] = [
+            "total": .count(Int(participantStats.totalParticipants)),
+            "active": .count(Int(participantStats.activeParticipants)),
+            "with_disability": .count(Int(participantStats.participantsWithDisabilities)),
+            "with_workshops": .count(Int(demographics.participantsWithWorkshops)),
+            "with_documents": .count(Int(demographics.participantsWithDocuments)),
+            "data_completeness": .percentage(demographics.dataCompletenessPercentage)
+        ]
+        
+        let now = Date()
+        self.stats = configs.map { config in
+            let value = backendValues[config.key] ?? .count(0)
+            return StatResult(
+                config: config,
+                value: value,
+                trend: nil,
+                lastUpdated: now
+            )
+        }
+    }
+    
+    func createAnyStatsManager() -> AnyStatsManager {
+        return AnyStatsManager(
+            stats: self.stats,
+            isCalculating: self.isCalculating,
+            lastCalculated: self.lastCalculated
+        )
+    }
+}
+
+
 // MARK: - Backend-Powered User Stats Manager
 /// Specialized stats manager for users that fetches comprehensive statistics from backend
 @MainActor
