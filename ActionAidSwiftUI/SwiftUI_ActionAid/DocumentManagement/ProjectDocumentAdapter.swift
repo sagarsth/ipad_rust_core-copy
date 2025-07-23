@@ -249,35 +249,7 @@ struct ProjectDocumentAdapter: DocumentUploadable {
     }
 }
 
-// MARK: - DocumentIntegratable Implementation for ProjectResponse
 
-extension ProjectResponse: DocumentIntegratable {
-    var entityId: String {
-        return id
-    }
-    
-    var entityTableName: String {
-        return "projects"
-    }
-    
-    var linkableFields: [(String, String)] {
-        return [
-            ("", "None"),
-            ("objective", "Objective"),
-            ("outcome", "Outcome"),
-            ("timeline", "Timeline"),
-            ("proposal_document", "Proposal Document"),
-            ("budget_document", "Budget Document"),
-            ("logical_framework", "Logical Framework"),
-            ("final_report", "Final Report"),
-            ("monitoring_plan", "Monitoring Plan")
-        ]
-    }
-    
-    var entityTypeName: String {
-        return "Project"
-    }
-}
 
 // MARK: - Helper Extension
 

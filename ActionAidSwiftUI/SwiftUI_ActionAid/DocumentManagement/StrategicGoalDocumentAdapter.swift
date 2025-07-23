@@ -17,19 +17,28 @@ struct StrategicGoalDocumentAdapter: DocumentUploadable {
     // MARK: - DocumentIntegratable Implementation
     
     var entityId: String {
-        return goal.entityId
+        return goal.id
     }
     
     var entityTableName: String {
-        return goal.entityTableName
+        return "strategic_goals"
     }
     
     var linkableFields: [(String, String)] {
-        return goal.linkableFields
+        return [
+            ("", "None"),
+            ("outcome", "Outcome"),
+            ("kpi", "KPI"),
+            ("actual_value", "Actual Value"),
+            ("supporting_documentation", "Supporting Documentation"),
+            ("impact_assessment", "Impact Assessment"),
+            ("theory_of_change", "Theory of Change"),
+            ("baseline_data", "Baseline Data")
+        ]
     }
     
     var entityTypeName: String {
-        return goal.entityTypeName
+        return "Strategic Goal"
     }
     
     // MARK: - DocumentUploadable Implementation
