@@ -63,6 +63,9 @@ struct ParticipantsView: View {
             if selectedFilters.contains("all") {
                 matchesFilter = true
             } else {
+                // Debug: Print active filters to verify ID uniqueness
+                print("🔍 [DEBUG] Active filters: \(selectedFilters)")
+                
                 // Check each active filter - using OR logic within categories, AND logic between categories
                 var genderMatch = true
                 var ageGroupMatch = true
@@ -70,38 +73,32 @@ struct ParticipantsView: View {
                 var disabilityTypeMatch = true
                 
                 // Gender filtering (OR logic within gender category)
-                let validGenderValues = ["male", "female", "other", "prefer_not_to_say"]
-                let genderFilters = selectedFilters.intersection(Set(validGenderValues))
-                if !genderFilters.isEmpty {
-                    genderMatch = genderFilters.contains(participant.gender ?? "")
+                let mappedGenders = mapGenderFilters(selectedFilters)
+                if !mappedGenders.isEmpty {
+                    print("🔍 [DEBUG] Mapped genders: \(mappedGenders)")
+                    genderMatch = mappedGenders.contains(participant.gender ?? "")
                 }
                 
                 // Age group filtering (OR logic within age group category)
-                let validAgeGroupValues = ["child", "youth", "adult", "elderly"]
-                let ageGroupFilters = selectedFilters.intersection(Set(validAgeGroupValues))
-                if !ageGroupFilters.isEmpty {
-                    ageGroupMatch = ageGroupFilters.contains(participant.ageGroup ?? "")
+                let mappedAgeGroups = mapAgeGroupFilters(selectedFilters)
+                if !mappedAgeGroups.isEmpty {
+                    print("🔍 [DEBUG] Mapped age groups: \(mappedAgeGroups)")
+                    ageGroupMatch = mappedAgeGroups.contains(participant.ageGroup ?? "")
                 }
                 
                 // Disability filtering (general disability status)
-                if selectedFilters.contains("with_disability") && selectedFilters.contains("no_disability") {
-                    // Both selected = show all (no filter)
-                    disabilityMatch = true
-                } else if selectedFilters.contains("with_disability") {
-                    // Only "with disability" selected
-                    disabilityMatch = participant.disability
-                } else if selectedFilters.contains("no_disability") {
-                    // Only "no disability" selected
-                    disabilityMatch = !participant.disability
+                if let disabilityFlag = getDisabilityFlag(selectedFilters) {
+                    print("🔍 [DEBUG] Disability flag: \(disabilityFlag)")
+                    disabilityMatch = participant.disability == disabilityFlag
                 }
                 
                 // Disability type filtering (OR logic within disability types)
-                let validDisabilityTypes = ["visual", "hearing", "physical", "intellectual", "psychosocial", "multiple", "other"]
-                let disabilityTypeFilters = selectedFilters.intersection(Set(validDisabilityTypes))
-                if !disabilityTypeFilters.isEmpty {
+                let mappedDisabilityTypes = mapDisabilityTypeFilters(selectedFilters)
+                if !mappedDisabilityTypes.isEmpty {
+                    print("🔍 [DEBUG] Mapped disability types: \(mappedDisabilityTypes)")
                     // If specific disability types are selected, only show participants with those types
                     if let participantDisabilityType = participant.disabilityType {
-                        disabilityTypeMatch = disabilityTypeFilters.contains(participantDisabilityType)
+                        disabilityTypeMatch = mappedDisabilityTypes.contains(participantDisabilityType)
                     } else {
                         disabilityTypeMatch = false // No disability type means doesn't match specific type filter
                     }
@@ -429,24 +426,19 @@ struct ParticipantsView: View {
     
     /// Get filtered participant IDs for bulk selection based on current UI filters
     private func getFilteredParticipantIds() async {
-        print("🔄 [BACKEND_FILTER] getFilteredParticipantIds called")
-        print("🔄 [BACKEND_FILTER] selectedFilters: \(selectedFilters)")
-        print("🔄 [BACKEND_FILTER] isSelectAllActive: \(selectionManager.isSelectAllActive)")
+        // Backend filter operation
         
         guard !selectionManager.isLoadingFilteredIds else { 
-            print("🔄 [BACKEND_FILTER] ❌ Already loading, returning")
             return 
         }
         
         // Check if we have any backend filters active
         let hasBackendFilters = !searchText.isEmpty || !selectedFilters.contains("all")
-        print("🔄 [BACKEND_FILTER] hasBackendFilters: \(hasBackendFilters)")
         
         // If no backend filters are applied, select all visible items
         if !hasBackendFilters {
             await MainActor.run {
                 let allVisibleIds = Set(filteredParticipants.map(\.id))
-                print("🔄 [BACKEND_FILTER] No backend filters, selecting \(allVisibleIds.count) visible items")
                 selectionManager.selectAllItems(allVisibleIds)
             }
             return
@@ -481,14 +473,11 @@ struct ParticipantsView: View {
             selectionManager.isLoadingFilteredIds = false
             switch result {
             case .success(let filteredIds):
-                print("🔄 [BACKEND_FILTER] ✅ Backend returned \(filteredIds.count) filtered IDs")
                 // Only select IDs that are currently visible
                 let visibleIds = Set(filteredParticipants.map(\.id))
                 let filteredVisibleIds = Set(filteredIds).intersection(visibleIds)
-                print("🔄 [BACKEND_FILTER] Visible IDs: \(visibleIds.count), Final selection: \(filteredVisibleIds.count)")
                 selectionManager.selectAllItems(filteredVisibleIds)
             case .failure(let error):
-                print("🔄 [BACKEND_FILTER] ❌ Backend error: \(error.localizedDescription)")
                 crudManager.errorMessage = "Failed to get filtered IDs: \(error.localizedDescription)"
                 crudManager.showErrorAlert = true
             }
@@ -503,39 +492,27 @@ struct ParticipantsView: View {
         var disabilityTypes: [String]? = nil
         
         if !selectedFilters.contains("all") {
-            // Gender filters - collect all selected gender values
-            let validGenders = ["male", "female", "other", "prefer_not_to_say"]
-            let selectedGenders = validGenders.filter { selectedFilters.contains($0) }
-            if !selectedGenders.isEmpty {
-                genders = selectedGenders
+            // Gender filters - map prefixed IDs to backend values
+            let mappedGenders = mapGenderFilters(selectedFilters)
+            if !mappedGenders.isEmpty {
+                genders = mappedGenders
             }
             
-            // Age group filters - collect all selected age group values
-            let validAgeGroups = ["child", "youth", "adult", "elderly"]
-            let selectedAgeGroups = validAgeGroups.filter { selectedFilters.contains($0) }
-            if !selectedAgeGroups.isEmpty {
-                ageGroups = selectedAgeGroups
+            // Age group filters - map prefixed IDs to backend values
+            let mappedAgeGroups = mapAgeGroupFilters(selectedFilters)
+            if !mappedAgeGroups.isEmpty {
+                ageGroups = mappedAgeGroups
             }
             
-            // Disability type filters - collect all selected disability type values
-            let validDisabilityTypes = ["visual", "hearing", "physical", "intellectual", "psychosocial", "multiple", "other"]
-            let selectedDisabilityTypes = validDisabilityTypes.filter { selectedFilters.contains($0) }
-            if !selectedDisabilityTypes.isEmpty {
-                disabilityTypes = selectedDisabilityTypes
+            // Disability type filters - map prefixed IDs to backend values
+            let mappedDisabilityTypes = mapDisabilityTypeFilters(selectedFilters)
+            if !mappedDisabilityTypes.isEmpty {
+                disabilityTypes = mappedDisabilityTypes
                 // Don't set general disability flag when specific types are selected
                 // Backend will handle this automatically
             } else {
                 // Only apply general disability filter if no specific types are selected
-                if selectedFilters.contains("with_disability") && selectedFilters.contains("no_disability") {
-                    // Both selected = no filter (show all)
-                    disability = nil
-                } else if selectedFilters.contains("with_disability") {
-                    // Only "with disability" selected
-                    disability = true
-                } else if selectedFilters.contains("no_disability") {
-                    // Only "no disability" selected
-                    disability = false
-                }
+                disability = getDisabilityFlag(selectedFilters)
             }
         }
         
@@ -555,12 +532,71 @@ struct ParticipantsView: View {
         )
     }
     
+    // MARK: - Filter ID Mapping Helpers
+    
+    /// Map prefixed UI filter IDs to backend values
+    private func mapGenderFilters(_ selectedFilters: Set<String>) -> [String] {
+        let genderMapping: [String: String] = [
+            "gender_male": "male",
+            "gender_female": "female", 
+            "gender_other": "other",
+            "gender_prefer_not_to_say": "prefer_not_to_say"
+        ]
+        
+        return selectedFilters.compactMap { filterId in
+            genderMapping[filterId]
+        }
+    }
+    
+    private func mapAgeGroupFilters(_ selectedFilters: Set<String>) -> [String] {
+        let ageMapping: [String: String] = [
+            "age_child": "child",
+            "age_youth": "youth",
+            "age_adult": "adult", 
+            "age_elderly": "elderly"
+        ]
+        
+        return selectedFilters.compactMap { filterId in
+            ageMapping[filterId]
+        }
+    }
+    
+    private func mapDisabilityTypeFilters(_ selectedFilters: Set<String>) -> [String] {
+        let disabilityTypeMapping: [String: String] = [
+            "disability_type_visual": "visual",
+            "disability_type_hearing": "hearing",
+            "disability_type_physical": "physical",
+            "disability_type_intellectual": "intellectual", 
+            "disability_type_psychosocial": "psychosocial",
+            "disability_type_multiple": "multiple",
+            "disability_type_other": "other"
+        ]
+        
+        return selectedFilters.compactMap { filterId in
+            disabilityTypeMapping[filterId]
+        }
+    }
+    
+    private func getDisabilityFlag(_ selectedFilters: Set<String>) -> Bool? {
+        let hasWithDisability = selectedFilters.contains("disability_with")
+        let hasWithoutDisability = selectedFilters.contains("disability_without")
+        
+        if hasWithDisability && hasWithoutDisability {
+            return nil // Both selected = show all
+        } else if hasWithDisability {
+            return true
+        } else if hasWithoutDisability {
+            return false
+        }
+        return nil
+    }
+    
     // MARK: - Export Operations
     
     private func performExportFromSelection(includeBlobs: Bool = false, format: ExportFormat = .default) {
         guard !selectionManager.selectedItems.isEmpty else { return }
         
-        print("🔄 Starting export from selection mode for \(selectionManager.selectedCount) items, includeBlobs: \(includeBlobs), format: \(format.displayName)")
+        // Starting export operation
         
         Task {
             guard let currentUser = authManager.currentUser else {
@@ -1551,7 +1587,7 @@ struct ParticipantDetailView: View {
                 EditParticipantSheet(participant: currentParticipant, ffiHandler: ffiHandler) { updatedParticipant in
                     print("💾 [PARTICIPANT_DETAIL] Edit completed")
                     currentParticipant = updatedParticipant
-                    print("🔄 [PARTICIPANT_DETAIL] Calling onUpdate() to refresh main list")
+                    // Refresh main list
                     onUpdate()
                     loadDocuments()
                 }
@@ -1690,7 +1726,7 @@ struct ParticipantDetailView: View {
     
     /// Reload participant data from backend to get updated counts and metadata
     private func reloadParticipantData() {
-        print("🔄 [PARTICIPANT_DETAIL] Reloading participant data to get updated counts...")
+                        // Reloading participant data
         
         Task {
             guard let currentUser = authManager.currentUser else { return }
@@ -1811,7 +1847,7 @@ struct ParticipantDetailView: View {
             hasActiveCompressions = newHasActiveCompressions
             
             if hasActiveCompressions {
-                print("🔄 [COMPRESSION_STATUS] \(activeCompressions.count) documents are compressing")
+                // Documents compressing status
                 startDocumentRefreshTimer()
             } else {
                 print("✅ [COMPRESSION_STATUS] All compressions completed - stopping refresh timer")

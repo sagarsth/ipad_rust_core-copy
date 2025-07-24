@@ -1477,8 +1477,17 @@ pub unsafe extern "C" fn participant_check_duplicates(payload_json: *const c_cha
         let duplicates = block_on_async(svc.check_potential_duplicates(&p.name, &auth))
             .map_err(FFIError::from_service_error)?;
         
+        println!("🔍 [FFI_DUPLICATE_CHECK] Found {} duplicates for name '{}'", duplicates.len(), p.name);
+        
         let json_resp = serde_json::to_string(&duplicates)
-            .map_err(|e| FFIError::internal(format!("ser {e}")))?;
+            .map_err(|e| {
+                println!("🚨 [FFI_DUPLICATE_CHECK] JSON serialization failed: {}", e);
+                FFIError::internal(format!("ser {e}"))
+            })?;
+        
+        if duplicates.len() > 0 {
+            println!("📤 [FFI_DUPLICATE_CHECK] JSON response length: {} chars", json_resp.len());
+        }
         let cstr = CString::new(json_resp).unwrap();
         *result = cstr.into_raw();
         Ok(())

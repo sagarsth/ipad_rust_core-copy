@@ -631,14 +631,11 @@ impl ParticipantServiceImpl {
         current_participant: &Participant,
     ) -> ServiceResult<()> {
         // 1. Log potential name duplicates if name is being changed (but don't block)
+        // Note: Moved duplicate check inside the repository transaction to avoid database lock issues
         if let Some(new_name) = &update_data.name {
             if new_name != &current_participant.name {
-                if let Some(existing_participant) = self.repo.find_by_name_case_insensitive(new_name).await.ok() {
-                    if existing_participant.id != current_participant.id {
-                        println!("ℹ️ [PARTICIPANT_SERVICE] Updating participant {} name to '{}' which matches existing participant (ID: {}). Allowing update but logging for potential duplicate detection.", 
-                                 current_participant.id, new_name, existing_participant.id);
-                    }
-                }
+                println!("ℹ️ [PARTICIPANT_SERVICE] Updating participant {} name to '{}'. Duplicate check will be performed within transaction.", 
+                         current_participant.id, new_name);
             }
         }
         
@@ -1977,9 +1974,7 @@ impl ParticipantService for ParticipantServiceImpl {
                         file_path: doc.file_path,
                         linked_field: doc.field_identifier,
                         document_type_name: doc.type_name,
-                        uploaded_at: chrono::DateTime::parse_from_rfc3339(&doc.created_at)
-                            .map(|dt| dt.with_timezone(&chrono::Utc))
-                            .unwrap_or_else(|_| chrono::Utc::now()),
+                        uploaded_at: doc.created_at.clone(), // Already a String in RFC3339 format
                     };
                     
                     if is_identification {
@@ -2003,8 +1998,8 @@ impl ParticipantService for ParticipantServiceImpl {
                 location: participant.location,
                 disability: participant.disability,
                 disability_type: participant.disability_type,
-                created_at: participant.created_at,
-                updated_at: participant.updated_at,
+                created_at: participant.created_at.to_rfc3339(),
+                updated_at: participant.updated_at.to_rfc3339(),
                 profile_photo_url,
                 identification_documents,
                 other_documents,

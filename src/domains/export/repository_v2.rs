@@ -540,6 +540,110 @@ impl SqliteStreamingRepository {
         log::debug!("[PARTICIPANT_STREAM_BY_IDS] Successfully loaded {} participants", participants.len());
         Ok(participants)
     }
+
+    async fn stream_activities(
+        &self,
+        cursor: Option<Uuid>,
+        limit: usize,
+    ) -> ServiceResult<Vec<ActivityExport>> {
+        log::debug!("[ACTIVITY_STREAM] Starting activity stream with cursor: {:?}, limit: {}", cursor, limit);
+        
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT id, project_id, description, kpi, target_value, actual_value, status_id, sync_priority, \
+             created_at, updated_at, created_by_user_id, created_by_device_id, \
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
+             FROM activities"
+        );
+        
+        if let Some(cursor_id) = cursor {
+            query.push(" WHERE id > ");
+            query.push_bind(cursor_id.to_string());
+        }
+        
+        query.push(" ORDER BY id LIMIT ");
+        query.push_bind(limit as i64);
+        
+        let built_query = query.build();
+        log::debug!("[ACTIVITY_STREAM] Executing query: {}", built_query.sql());
+        
+        let rows = built_query.fetch_all(&self.pool).await
+            .map_err(|e| {
+                log::error!("[ACTIVITY_STREAM] Database query failed: {}", e);
+                ServiceError::DatabaseError(e.to_string())
+            })?;
+        
+        let mut activities = Vec::new();
+        for row in rows {
+            match ActivityExport::from_row(&row) {
+                Ok(activity) => activities.push(activity),
+                Err(e) => {
+                    log::error!("[ACTIVITY_STREAM] Failed to convert row to activity: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+        
+        log::debug!("[ACTIVITY_STREAM] Successfully loaded {} activities", activities.len());
+        Ok(activities)
+    }
+    
+    async fn stream_activities_by_ids(
+        &self,
+        cursor: Option<Uuid>,
+        limit: usize,
+        ids: Vec<Uuid>,
+    ) -> ServiceResult<Vec<ActivityExport>> {
+        if ids.is_empty() {
+            log::debug!("[ACTIVITY_STREAM_BY_IDS] No IDs provided, returning empty");
+            return Ok(Vec::new());
+        }
+        
+        log::debug!("[ACTIVITY_STREAM_BY_IDS] Starting stream with {} IDs, cursor: {:?}, limit: {}", ids.len(), cursor, limit);
+        
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT id, project_id, description, kpi, target_value, actual_value, status_id, sync_priority, \
+             created_at, updated_at, created_by_user_id, created_by_device_id, \
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
+             FROM activities WHERE id IN ("
+        );
+        
+        let mut separated = query.separated(", ");
+        for id in &ids {
+            separated.push_bind(id.to_string());
+        }
+        separated.push_unseparated(")");
+        
+        if let Some(cursor_id) = cursor {
+            query.push(" AND id > ");
+            query.push_bind(cursor_id.to_string());
+        }
+        
+        query.push(" ORDER BY id LIMIT ");
+        query.push_bind(limit as i64);
+        
+        let built_query = query.build();
+        log::debug!("[ACTIVITY_STREAM_BY_IDS] Executing query: {}", built_query.sql());
+        
+        let rows = built_query.fetch_all(&self.pool).await
+            .map_err(|e| {
+                log::error!("[ACTIVITY_STREAM_BY_IDS] Database query failed: {}", e);
+                ServiceError::DatabaseError(e.to_string())
+            })?;
+        
+        let mut activities = Vec::new();
+        for row in rows {
+            match ActivityExport::from_row(&row) {
+                Ok(activity) => activities.push(activity),
+                Err(e) => {
+                    log::error!("[ACTIVITY_STREAM_BY_IDS] Failed to convert row to activity: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+        
+        log::debug!("[ACTIVITY_STREAM_BY_IDS] Successfully loaded {} activities", activities.len());
+        Ok(activities)
+    }
 }
 
 #[async_trait]
@@ -639,6 +743,22 @@ impl StreamingExportRepository for SqliteStreamingRepository {
                 Ok(row.get::<i64, _>("count") as usize)
             }
             EntityFilter::ParticipantsByIds { ids } => {
+                // For ID-based filters, return the count of IDs (limited to actual available IDs)
+                if ids.is_empty() {
+                    return Ok(0);
+                }
+                let limited_count = std::cmp::min(ids.len(), 1000);
+                Ok(limited_count)
+            }
+            EntityFilter::ActivitiesAll => {
+                let query = "SELECT COUNT(*) as count FROM activities";
+                let row = sqlx::query(query)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+                Ok(row.get::<i64, _>("count") as usize)
+            }
+            EntityFilter::ActivitiesByIds { ids } => {
                 // For ID-based filters, return the count of IDs (limited to actual available IDs)
                 if ids.is_empty() {
                     return Ok(0);
@@ -822,6 +942,52 @@ impl StreamingExportRepository for SqliteStreamingRepository {
                             Ok(participants) => {
                                 let json_results: Result<Vec<_>, _> = participants.into_iter()
                                     .map(|p| p.to_json())
+                                    .collect();
+                                match json_results {
+                                    Ok(json_vec) => json_vec,
+                                    Err(e) => {
+                                        log::error!("JSON conversion error: {}", e);
+                                        let _ = tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Database query error: {}", e);
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                    }
+                    EntityFilter::ActivitiesAll => {
+                        let repo = SqliteStreamingRepository { pool: pool.clone() };
+                        match repo.stream_activities(cursor, batch_size).await {
+                            Ok(activities) => {
+                                let json_results: Result<Vec<_>, _> = activities.into_iter()
+                                    .map(|a| a.to_json())
+                                    .collect();
+                                match json_results {
+                                    Ok(json_vec) => json_vec,
+                                    Err(e) => {
+                                        log::error!("JSON conversion error: {}", e);
+                                        let _ = tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Database query error: {}", e);
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                    }
+                    EntityFilter::ActivitiesByIds { ids } => {
+                        let repo = SqliteStreamingRepository { pool: pool.clone() };
+                        match repo.stream_activities_by_ids(cursor, batch_size, ids.clone()).await {
+                            Ok(activities) => {
+                                let json_results: Result<Vec<_>, _> = activities.into_iter()
+                                    .map(|a| a.to_json())
                                     .collect();
                                 match json_results {
                                     Ok(json_vec) => json_vec,
@@ -1199,6 +1365,112 @@ impl ExportEntity for ParticipantExport {
         };
         
         log::debug!("[PARTICIPANT_EXPORT] Successfully converted participant: {} ({})", result.name, result.id);
+        Ok(result)
+    }
+    
+    fn id(&self) -> Uuid {
+        self.id
+    }
+    
+    fn to_json(&self) -> ServiceResult<serde_json::Value> {
+        serde_json::to_value(self)
+            .map_err(|e| ServiceError::SerializationError(e.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActivityExport {
+    pub id: Uuid,
+    pub project_id: Option<Uuid>,
+    pub description: Option<String>,
+    pub kpi: Option<String>,
+    pub target_value: Option<f64>,
+    pub actual_value: Option<f64>,
+    pub status_id: Option<i64>,
+    pub sync_priority: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
+    pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
+}
+
+impl ActivityExport {
+    /// Calculate progress percentage based on target and actual values
+    pub fn progress_percentage(&self) -> Option<f64> {
+        if let Some(target) = self.target_value {
+            if target > 0.0 {
+                return Some((self.actual_value.unwrap_or(0.0) / target) * 100.0);
+            }
+        }
+        None
+    }
+}
+
+impl ExportEntity for ActivityExport {
+    fn table_name() -> &'static str {
+        "activities"
+    }
+    
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> ServiceResult<Self> {
+        log::debug!("[ACTIVITY_EXPORT] Converting database row to ActivityExport");
+        
+        let result = Self {
+            id: Uuid::parse_str(&row.get::<String, _>("id"))
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid activity UUID: {}", e)))?,
+            project_id: row.get::<Option<String>, _>("project_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid project_id UUID: {}", e)))?,
+            description: row.get("description"),
+            kpi: row.get("kpi"),
+            target_value: row.get("target_value"),
+            actual_value: row.get("actual_value"),
+            status_id: row.get("status_id"),
+            sync_priority: row.get::<Option<String>, _>("sync_priority"),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid created_at timestamp: {}", e)))?
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("updated_at"))
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid updated_at timestamp: {}", e)))?
+                .with_timezone(&chrono::Utc),
+            created_by_user_id: row.get::<Option<String>, _>("created_by_user_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid created_by_user_id UUID: {}", e)))?,
+            created_by_device_id: row.get::<Option<String>, _>("created_by_device_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid created_by_device_id UUID: {}", e)))?,
+            updated_by_user_id: row.get::<Option<String>, _>("updated_by_user_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid updated_by_user_id UUID: {}", e)))?,
+            updated_by_device_id: row.get::<Option<String>, _>("updated_by_device_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid updated_by_device_id UUID: {}", e)))?,
+            deleted_at: row.get::<Option<String>, _>("deleted_at")
+                .map(|s| chrono::DateTime::parse_from_rfc3339(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid deleted_at timestamp: {}", e)))?
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+            deleted_by_user_id: row.get::<Option<String>, _>("deleted_by_user_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid deleted_by_user_id UUID: {}", e)))?,
+            deleted_by_device_id: row.get::<Option<String>, _>("deleted_by_device_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid deleted_by_device_id UUID: {}", e)))?,
+        };
+        
+        log::debug!("[ACTIVITY_EXPORT] Successfully converted activity: {} ({})", 
+            result.description.as_deref().unwrap_or("No description"), result.id);
         Ok(result)
     }
     

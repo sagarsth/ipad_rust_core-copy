@@ -393,24 +393,19 @@ struct StrategicGoalsView: View {
     
     /// Get filtered goal IDs for bulk selection based on current UI filters
     private func getFilteredGoalIds() async {
-        print("🔄 [BACKEND_FILTER] getFilteredGoalIds called")
-        print("🔄 [BACKEND_FILTER] selectedFilters: \(selectedFilters)")
-        print("🔄 [BACKEND_FILTER] isSelectAllActive: \(selectionManager.isSelectAllActive)")
+        // Backend filter operation
         
         guard !selectionManager.isLoadingFilteredIds else { 
-            print("🔄 [BACKEND_FILTER] ❌ Already loading, returning")
             return 
         }
         
         // Check if we have any backend filters active (search, status, etc.)
         let hasBackendFilters = !searchText.isEmpty || !selectedFilters.contains("all")
-        print("🔄 [BACKEND_FILTER] hasBackendFilters: \(hasBackendFilters)")
         
         // If no backend filters are applied, select all visible items
         if !hasBackendFilters {
             await MainActor.run {
                 let allVisibleIds = Set(filteredGoals.map(\.id))
-                print("🔄 [BACKEND_FILTER] No backend filters, selecting \(allVisibleIds.count) visible items")
                 selectionManager.selectAllItems(allVisibleIds)
             }
             return

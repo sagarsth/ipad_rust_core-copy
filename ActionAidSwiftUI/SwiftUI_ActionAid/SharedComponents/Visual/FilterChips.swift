@@ -107,11 +107,11 @@ struct GroupedFilterChip: View {
             return selectedSubOptions.isEmpty || selectedSubOptions.contains("all")
         }
         
-        // Special handling for disability_type group: show as active if "with_disability" is selected
+        // Special handling for disability_type group: show as active if "disability_with" is selected
         // and no specific types are chosen (meaning all types are implicitly included)
         if group.id == "disability_type" {
             let hasSpecificTypes = hasActiveSubOptions
-            let hasGeneralDisability = selectedSubOptions.contains("with_disability")
+            let hasGeneralDisability = selectedSubOptions.contains("disability_with")
             return hasSpecificTypes || hasGeneralDisability
         }
         
@@ -134,7 +134,7 @@ struct GroupedFilterChip: View {
         // Special handling for disability_type group
         if group.id == "disability_type" {
             let hasSpecificTypes = hasActiveSubOptions
-            let hasGeneralDisability = selectedSubOptions.contains("with_disability")
+            let hasGeneralDisability = selectedSubOptions.contains("disability_with")
             
             if hasSpecificTypes {
                 if activeCount == 1 {
@@ -246,7 +246,7 @@ struct GroupedFilterSelectionPopup: View {
                     }
                     
                     let descriptionText = group.id == "disability_type" 
-                        ? "Select specific disability types to filter. All types are initially selected when 'With Disability' is chosen."
+                        ? "Select specific disability types to filter. All types are initially selected when 'With Disability' is chosen from the Disability filter."
                         : "Select one or more options. Use OR logic within this category."
                     
                     Text(descriptionText)
@@ -326,9 +326,9 @@ struct GroupedFilterSelectionPopup: View {
             selectedSubOptions.contains(subOption.id) ? subOption.id : nil
         })
         
-        // Special handling for disability group: if "with_disability" is selected but no specific types,
+        // Special handling for disability group: if "disability_with" is selected but no specific types,
         // auto-select all types to give user a starting point
-        if group.id == "disability_type" && selectedSubOptions.contains("with_disability") && localSelections.isEmpty {
+        if group.id == "disability_type" && selectedSubOptions.contains("disability_with") && localSelections.isEmpty {
             // Auto-select all disability types when "with disability" is chosen
             localSelections = Set(group.subOptions.map(\.id))
         }

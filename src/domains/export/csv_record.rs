@@ -200,6 +200,54 @@ impl CsvRecord for crate::domains::export::repository_v2::ParticipantExport {
     }
 }
 
+impl CsvRecord for crate::domains::export::repository_v2::ActivityExport {
+    fn headers() -> Vec<&'static str> {
+        vec![
+            "id",
+            "project_id",
+            "description",
+            "kpi",
+            "target_value",
+            "actual_value",
+            "progress_percentage",
+            "status_id",
+            "sync_priority",
+            "created_at",
+            "updated_at",
+            "created_by_user_id",
+            "created_by_device_id",
+            "updated_by_user_id",
+            "updated_by_device_id",
+            "deleted_at",
+            "deleted_by_user_id",
+            "deleted_by_device_id"
+        ]
+    }
+    
+    fn to_csv(&self) -> Vec<String> {
+        vec![
+            self.id.to_string(),
+            csv_optional_uuid_to_string(&self.project_id),
+            csv_optional_to_string(&self.description),
+            csv_optional_to_string(&self.kpi),
+            csv_optional_to_string(&self.target_value),
+            csv_optional_to_string(&self.actual_value),
+            csv_optional_to_string(&self.progress_percentage()),
+            csv_optional_to_string(&self.status_id),
+            csv_optional_to_string(&self.sync_priority),
+            csv_datetime_to_string(&self.created_at),
+            csv_datetime_to_string(&self.updated_at),
+            csv_optional_uuid_to_string(&self.created_by_user_id),
+            csv_optional_uuid_to_string(&self.created_by_device_id),
+            csv_optional_uuid_to_string(&self.updated_by_user_id),
+            csv_optional_uuid_to_string(&self.updated_by_device_id),
+            self.deleted_at.as_ref().map(|dt| csv_datetime_to_string(dt)).unwrap_or_default(),
+            csv_optional_uuid_to_string(&self.deleted_by_user_id),
+            csv_optional_uuid_to_string(&self.deleted_by_device_id)
+        ]
+    }
+}
+
 // Helper functions for CSV formatting
 
 // Implementation for StrategicGoalResponse (more commonly used for exports)

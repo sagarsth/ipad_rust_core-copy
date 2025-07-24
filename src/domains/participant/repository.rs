@@ -508,21 +508,8 @@ impl ParticipantRepository for SqliteParticipantRepository {
         let id_str = id.to_string();
 
         // **ENHANCED: Pre-validate business constraints to provide better error messages**
-        // Check for duplicate names before attempting insert
-        let existing_count: i64 = query_scalar(
-            "SELECT COUNT(*) FROM participants WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL"
-        )
-        .bind(&new_participant.name)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(DbError::from)?;
-            
-        if existing_count > 0 {
-            return Err(DomainError::Validation(ValidationError::format(
-                "name",
-                &format!("A participant with the name '{}' already exists. Please use a different name.", new_participant.name)
-            )));
-        }
+        // Note: Removed strict name validation to allow duplicate names with smart duplicate detection
+        // The frontend will handle duplicate detection and user choice
 
         // **ROBUST: Comprehensive insert with detailed error handling**
         let insert_result = query(
@@ -622,28 +609,8 @@ impl ParticipantRepository for SqliteParticipantRepository {
         auth: &AuthContext,
     ) -> DomainResult<Participant> {
         // **OPTIMIZATION: Pre-validate business constraints BEFORE starting transaction**
-        // This eliminates unnecessary locks and provides better error messages
-        if let Some(new_name) = &update_data.name {
-            // Check for duplicate names (excluding current participant)
-            let existing_participant = query_as::<_, (String, String)>(
-                "SELECT id, name FROM participants WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL"
-            )
-            .bind(new_name)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(DbError::from)?;
-            
-            if let Some((existing_id_str, existing_name)) = existing_participant {
-                if let Ok(existing_id) = Uuid::parse_str(&existing_id_str) {
-                    if existing_id != id {
-                        return Err(DomainError::Validation(ValidationError::format(
-                            "name",
-                            &format!("A participant with the name '{}' already exists. Please use a different name.", existing_name)
-                        )));
-                    }
-                }
-            }
-        }
+        // Note: Removed strict name validation to allow duplicate names with smart duplicate detection
+        // The frontend will handle duplicate detection and user choice
 
         let mut tx = self.pool.begin().await.map_err(DbError::from)?;
         let result = self.update_with_tx(id, update_data, auth, &mut tx).await;
@@ -669,6 +636,26 @@ impl ParticipantRepository for SqliteParticipantRepository {
     ) -> DomainResult<Participant> {
         // **ROBUST: Fetch old state for change tracking and validation**
         let old_entity = self.find_by_id_with_tx(id, tx).await?;
+        
+        // **CONCURRENCY: Check for name duplicates within transaction to avoid database locks**
+        if let Some(new_name) = &update_data.name {
+            if new_name != &old_entity.name {
+                // Use the same transaction to avoid lock conflicts
+                let existing_participant = query_as::<_, (String, String)>(
+                    "SELECT id, name FROM participants WHERE LOWER(name) = LOWER(?) AND deleted_at IS NULL AND id != ?"
+                )
+                .bind(new_name)
+                .bind(id.to_string())
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(DbError::from)?;
+                
+                if let Some((existing_id_str, existing_name)) = existing_participant {
+                    println!("ℹ️ [PARTICIPANT_REPO] Found existing participant '{}' (ID: {}) with same name as update target. Allowing update but logging for potential duplicate detection.", 
+                             existing_name, existing_id_str);
+                }
+            }
+        }
         
         let now = Utc::now();
         let now_str = now.to_rfc3339();

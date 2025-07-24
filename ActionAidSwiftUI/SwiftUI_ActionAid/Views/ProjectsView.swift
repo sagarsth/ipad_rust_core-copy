@@ -552,22 +552,17 @@ struct ProjectsView: View {
     
     /// Get filtered project IDs for bulk selection based on current UI filters
     private func getFilteredProjectIds() async {
-        print("🔄 [BACKEND_FILTER] getFilteredProjectIds called")
-        print("🔄 [BACKEND_FILTER] selectedFilters: \(selectedFilters)")
-        print("🔄 [BACKEND_FILTER] isSelectAllActive: \(selectionManager.isSelectAllActive)")
+        // Backend filter operation
         
         guard !selectionManager.isLoadingFilteredIds else { 
-            print("🔄 [BACKEND_FILTER] ❌ Already loading, returning")
             return 
         }
         
         // Check if we have any backend filters active (search, status, etc.)
         let hasBackendFilters = !searchText.isEmpty || !selectedFilters.contains("all")
-        print("🔄 [BACKEND_FILTER] hasBackendFilters: \(hasBackendFilters)")
         
         // If no backend filters are applied, select all visible items
         if !hasBackendFilters {
-            print("🔄 [BACKEND_FILTER] No backend filters, selecting \(filteredProjects.count) visible items")
             await MainActor.run {
                 let allVisibleIds = Set(filteredProjects.map(\.id))
                 selectionManager.selectAllItems(allVisibleIds)
@@ -580,7 +575,7 @@ struct ProjectsView: View {
         }
         
         guard let currentUser = authManager.currentUser else {
-            print("🔄 [BACKEND_FILTER] ❌ User not authenticated")
+                            // User not authenticated
             await MainActor.run {
                 selectionManager.isLoadingFilteredIds = false
                 crudManager.errorMessage = "User not authenticated."
@@ -618,14 +613,12 @@ struct ProjectsView: View {
             selectionManager.isLoadingFilteredIds = false
             switch result {
             case .success(let filteredIds):
-                print("🔄 [BACKEND_FILTER] ✅ Backend returned \(filteredIds.count) filtered IDs")
                 // Only select IDs that are currently visible (intersection with filtered data)
                 let visibleIds = Set(filteredProjects.map(\.id))
                 let filteredVisibleIds = Set(filteredIds).intersection(visibleIds)
-                print("🔄 [BACKEND_FILTER] Visible IDs: \(visibleIds.count), Final selection: \(filteredVisibleIds.count)")
                 selectionManager.selectAllItems(filteredVisibleIds)
             case .failure(let error):
-                print("🔄 [BACKEND_FILTER] ❌ Backend filter failed: \(error)")
+                // Backend filter failed
                 crudManager.errorMessage = "Failed to get filtered IDs: \(error.localizedDescription)"
                 crudManager.showErrorAlert = true
             }

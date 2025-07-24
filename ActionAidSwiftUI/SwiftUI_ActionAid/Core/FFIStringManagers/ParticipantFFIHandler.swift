@@ -46,10 +46,20 @@ class ParticipantFFIHandler {
                             }
                         },
                         parse: { responseString in
+                            print("📤 [PARTICIPANT_FFI] Raw response: \(responseString)")
                             guard let data = responseString.data(using: .utf8) else {
+                                print("🚨 [PARTICIPANT_FFI] Failed to convert response to UTF-8")
                                 throw FFIError.stringConversionFailed
                             }
-                            return try self.jsonDecoder.decode(R.self, from: data)
+                            do {
+                                let result = try self.jsonDecoder.decode(R.self, from: data)
+                                print("✅ [PARTICIPANT_FFI] Successfully decoded: \(type(of: result))")
+                                return result
+                            } catch {
+                                print("🚨 [PARTICIPANT_FFI] JSON decoding failed: \(error)")
+                                print("🚨 [PARTICIPANT_FFI] Failed JSON: \(responseString)")
+                                throw error
+                            }
                         },
                         free: participant_free
                     )
@@ -111,8 +121,18 @@ class ParticipantFFIHandler {
     }
     
     func checkDuplicates(name: String, auth: AuthContextPayload) async -> Result<[ParticipantDuplicateInfo], Error> {
+        print("🔍 [FFI_HANDLER] Starting duplicate check for name: '\(name)'")
         let payload = ParticipantCheckDuplicatesRequest(name: name, auth: auth)
-        return await executeOperation(payload: payload, ffiCall: participant_check_duplicates)
+        let result: Result<[ParticipantDuplicateInfo], Error> = await executeOperation(payload: payload, ffiCall: participant_check_duplicates)
+        
+        switch result {
+        case .success(let duplicates):
+            print("✅ [FFI_HANDLER] Successfully found \(duplicates.count) duplicates")
+        case .failure(let error):
+            print("🚨 [FFI_HANDLER] Duplicate check failed: \(error)")
+        }
+        
+        return result
     }
     
     func bulkDelete(ids: [String], hardDelete: Bool?, force: Bool?, auth: AuthContextPayload) async -> Result<BatchDeleteResult, Error> {

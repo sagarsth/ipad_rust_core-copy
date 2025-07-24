@@ -1312,8 +1312,8 @@ pub struct ParticipantDuplicateInfo {
     pub location: Option<String>,
     pub disability: bool,
     pub disability_type: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: String,
+    pub updated_at: String,
     
     // Document information for duplicate detection
     pub profile_photo_url: Option<String>,
@@ -1334,5 +1334,5 @@ pub struct DuplicateDocumentInfo {
     pub file_path: String,
     pub linked_field: Option<String>,
     pub document_type_name: Option<String>,
-    pub uploaded_at: DateTime<Utc>,
+    pub uploaded_at: String,
 }

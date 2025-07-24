@@ -232,10 +232,10 @@ extension FilterOption {
             icon: "person.2",
             color: .blue,
             subOptions: [
-                FilterSubOption(id: "male", displayName: "Male", icon: "person", color: .blue),
-                FilterSubOption(id: "female", displayName: "Female", icon: "person", color: .pink),
-                FilterSubOption(id: "other", displayName: "Other", icon: "person.badge.key", color: .mint),
-                FilterSubOption(id: "prefer_not_to_say", displayName: "Prefer Not to Say", icon: "person.badge.shield.checkmark", color: .cyan)
+                FilterSubOption(id: "gender_male", displayName: "Male", icon: "person", color: .blue),
+                FilterSubOption(id: "gender_female", displayName: "Female", icon: "person", color: .pink),
+                FilterSubOption(id: "gender_other", displayName: "Other", icon: "person.badge.key", color: .mint),
+                FilterSubOption(id: "gender_prefer_not_to_say", displayName: "Prefer Not to Say", icon: "person.badge.shield.checkmark", color: .cyan)
             ]
         ),
         GroupedFilterOption(
@@ -244,10 +244,10 @@ extension FilterOption {
             icon: "calendar",
             color: .orange,
             subOptions: [
-                FilterSubOption(id: "child", displayName: "Child", icon: "figure.2.arms.open", color: .green),
-                FilterSubOption(id: "youth", displayName: "Youth", icon: "figure.walk", color: .orange),
-                FilterSubOption(id: "adult", displayName: "Adult", icon: "person.fill", color: .purple),
-                FilterSubOption(id: "elderly", displayName: "Elderly", icon: "figure.walk.motion", color: .brown)
+                FilterSubOption(id: "age_child", displayName: "Child", icon: "figure.2.arms.open", color: .green),
+                FilterSubOption(id: "age_youth", displayName: "Youth", icon: "figure.walk", color: .orange),
+                FilterSubOption(id: "age_adult", displayName: "Adult", icon: "person.fill", color: .purple),
+                FilterSubOption(id: "age_elderly", displayName: "Elderly", icon: "figure.walk.motion", color: .brown)
             ]
         ),
         GroupedFilterOption(
@@ -256,8 +256,8 @@ extension FilterOption {
             icon: "figure.roll",
             color: .purple,
             subOptions: [
-                FilterSubOption(id: "with_disability", displayName: "With Disability", icon: "figure.roll", color: .indigo),
-                FilterSubOption(id: "no_disability", displayName: "No Disability", icon: "figure.walk", color: .teal)
+                FilterSubOption(id: "disability_with", displayName: "With Disability", icon: "figure.roll", color: .indigo),
+                FilterSubOption(id: "disability_without", displayName: "No Disability", icon: "figure.walk", color: .teal)
             ]
         ),
         GroupedFilterOption(
@@ -266,13 +266,13 @@ extension FilterOption {
             icon: "medical.thermometer",
             color: .red,
             subOptions: [
-                FilterSubOption(id: "visual", displayName: "Visual", icon: "eye.slash", color: .blue),
-                FilterSubOption(id: "hearing", displayName: "Hearing", icon: "ear.badge.slash", color: .green),
-                FilterSubOption(id: "physical", displayName: "Physical", icon: "figure.roll", color: .orange),
-                FilterSubOption(id: "intellectual", displayName: "Intellectual", icon: "brain.head.profile", color: .purple),
-                FilterSubOption(id: "psychosocial", displayName: "Psychosocial", icon: "heart.text.square", color: .pink),
-                FilterSubOption(id: "multiple", displayName: "Multiple", icon: "person.2.gobackward", color: .red),
-                FilterSubOption(id: "other", displayName: "Other", icon: "questionmark.circle", color: .gray)
+                FilterSubOption(id: "disability_type_visual", displayName: "Visual", icon: "eye.slash", color: .blue),
+                FilterSubOption(id: "disability_type_hearing", displayName: "Hearing", icon: "ear.badge.slash", color: .green),
+                FilterSubOption(id: "disability_type_physical", displayName: "Physical", icon: "figure.roll", color: .orange),
+                FilterSubOption(id: "disability_type_intellectual", displayName: "Intellectual", icon: "brain.head.profile", color: .purple),
+                FilterSubOption(id: "disability_type_psychosocial", displayName: "Psychosocial", icon: "heart.text.square", color: .pink),
+                FilterSubOption(id: "disability_type_multiple", displayName: "Multiple", icon: "person.2.gobackward", color: .red),
+                FilterSubOption(id: "disability_type_other", displayName: "Other", icon: "questionmark.circle", color: .gray)
             ]
         )
     ]

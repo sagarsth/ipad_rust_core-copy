@@ -160,6 +160,12 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
             return self.write_csv_record(&participant).await;
         }
         
+        // Try to deserialize as ActivityExport
+        if let Ok(activity) = serde_json::from_value::<crate::domains::export::repository_v2::ActivityExport>(record.clone()) {
+            log::debug!("[CSV_WRITER] Successfully deserialized as ActivityExport: {}", activity.id);
+            return self.write_csv_record(&activity).await;
+        }
+        
         // Try to deserialize as StrategicGoalResponse
         if let Ok(strategic_goal) = serde_json::from_value::<crate::domains::strategic_goal::types::StrategicGoalResponse>(record.clone()) {
             log::debug!("[CSV_WRITER] Successfully deserialized as StrategicGoalResponse: {}", strategic_goal.id);

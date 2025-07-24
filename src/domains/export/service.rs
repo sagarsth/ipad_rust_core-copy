@@ -295,8 +295,8 @@ async fn perform_export_job(
                         Ok::<i64, String>(0)
                     }
                     EntityFilter::ActivitiesByIds { ids } => {
-                        export_activities_by_ids(&temp_dir_path, &ids).await?;
-                        Ok::<i64, String>(0)
+                        let count = export_activities_by_ids_with_documents(&temp_dir_path, &ids, include_blobs, &file_storage_clone2).await?;
+                        Ok::<i64, String>(count)
                     }
                     EntityFilter::DonorsAll => {
                         export_donors(&temp_dir_path).await?;
@@ -327,8 +327,8 @@ async fn perform_export_job(
                         Ok::<i64, String>(0)
                     }
                     EntityFilter::ParticipantsByIds { ids } => {
-                        export_participants_by_ids(&temp_dir_path, &ids).await?;
-                        Ok::<i64, String>(0)
+                        let count = export_participants_by_ids_with_documents(&temp_dir_path, &ids, include_blobs, &file_storage_clone2).await?;
+                        Ok::<i64, String>(count)
                     }
                     EntityFilter::WorkshopsAll { include_participants } => {
                         export_workshops(&temp_dir_path, include_participants).await?;
@@ -1865,4 +1865,236 @@ async fn export_participants_by_date_range(dest_dir: &Path, start: DateTime<Utc>
     
     writer.finalize()?;
     Ok(())
+}
+
+/// Export participants by IDs with optional document support (similar to strategic goals)
+pub async fn export_participants_by_ids_with_documents(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
+    if ids.is_empty() {
+        log::info!("Export participants by IDs: empty IDs list");
+        return Ok(0);
+    }
+
+    log::info!("Export participants by IDs: {} IDs, include_documents: {}", ids.len(), include_documents);
+
+    let participant_repo = globals::get_participant_repo().map_err(|e| e.to_string())?;
+    
+    // Get participants
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    log::info!("Calling participant repo.find_by_ids with params: page={}, per_page={}", params.page, params.per_page);
+    let result = participant_repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    log::info!("Repository returned {} participants, total={}", result.items.len(), result.total);
+
+    // Export participants using optimized writer
+    let participants_file_path = dest_dir.join("participants.jsonl");
+    let mut participants_writer = OptimizedJsonLWriter::new(&participants_file_path)?;
+
+    let mut total_files_copied = 0;
+
+    if include_documents {
+        let media_doc_repo = globals::get_media_document_repo().map_err(|e| e.to_string())?;
+        
+        // Get all participant IDs
+        let participant_ids: Vec<Uuid> = result.items.iter().map(|p| p.id).collect();
+        log::info!("Fetching all documents for {} participants efficiently", participant_ids.len());
+        
+        // Fetch ALL documents for ALL participants in a single query - this solves the N+1 problem
+        let all_documents = media_doc_repo
+            .find_by_related_entities("participants", &participant_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        // Group documents by related_id (participant_id) for efficient lookup
+        let mut documents_by_participant: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                documents_by_participant.entry(related_id).or_insert_with(Vec::new).push(document);
+            }
+        }
+        
+        log::info!("Found {} total documents across all participants", documents_by_participant.values().map(|v| v.len()).sum::<usize>());
+
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing participant {} to file: id={}", i + 1, entity.id);
+            
+            // Get document count from our pre-fetched data
+            let document_count = documents_by_participant.get(&entity.id).map(|docs| docs.len()).unwrap_or(0);
+            let metadata = serde_json::json!({
+                "document_count": document_count,
+                "has_documents": document_count > 0
+            });
+            
+            participants_writer.write_enhanced_entity(entity, metadata)?;
+        }
+
+        // Export associated media documents and files
+        log::info!("Exporting associated media documents");
+        let mut files_dir_created = false;
+        let files_dir = dest_dir.join("files");
+        
+        // Check if we actually have documents before processing
+        let total_docs_count: usize = documents_by_participant.values().map(|docs| docs.len()).sum();
+        log::info!("Total documents to export: {}", total_docs_count);
+        
+        if total_docs_count > 0 {
+            // Process all documents we already fetched (no more database calls!)
+            for documents in documents_by_participant.values() {
+                for document in documents {
+                    if !files_dir_created {
+                        std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+                        files_dir_created = true;
+                    }
+
+                    let (source_file_path, file_source_type) = select_best_file_path_with_storage(&document, file_storage);
+                    let unique_filename = format!("{}_{}", document.id, document.original_filename);
+                    let dest_file_path = files_dir.join(&unique_filename);
+                    let abs_source_path = file_storage.get_absolute_path(source_file_path);
+
+                    if abs_source_path.exists() {
+                        match std::fs::copy(&abs_source_path, &dest_file_path) {
+                            Ok(_) => {
+                                log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, unique_filename);
+                                total_files_copied += 1;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                            }
+                        }
+                    } else {
+                        log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
+                    }
+                }
+            }
+        } else {
+            log::info!("No documents found, skipping document export files");
+        }
+    } else {
+        // Export participants without document metadata
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing participant {} to file: id={}", i + 1, entity.id);
+            participants_writer.write_entity(entity)?;
+        }
+    }
+    
+    // Finalize participants writer
+    participants_writer.finalize()?;
+    
+    log::info!("Export participants by IDs completed: wrote {} participants, {} files", result.items.len(), total_files_copied);
+    Ok(result.items.len() as i64)
+}
+
+/// Export activities by IDs with optional document support (similar to strategic goals)
+pub async fn export_activities_by_ids_with_documents(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
+    if ids.is_empty() {
+        log::info!("Export activities by IDs: empty IDs list");
+        return Ok(0);
+    }
+
+    log::info!("Export activities by IDs: {} IDs, include_documents: {}", ids.len(), include_documents);
+
+    let activity_repo = globals::get_activity_repo().map_err(|e| e.to_string())?;
+    
+    // Get activities
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    log::info!("Calling activity repo.find_by_ids with params: page={}, per_page={}", params.page, params.per_page);
+    let result = activity_repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    log::info!("Repository returned {} activities, total={}", result.items.len(), result.total);
+
+    // Export activities using optimized writer
+    let activities_file_path = dest_dir.join("activities.jsonl");
+    let mut activities_writer = OptimizedJsonLWriter::new(&activities_file_path)?;
+
+    let mut total_files_copied = 0;
+
+    if include_documents {
+        let media_doc_repo = globals::get_media_document_repo().map_err(|e| e.to_string())?;
+        
+        // Get all activity IDs
+        let activity_ids: Vec<Uuid> = result.items.iter().map(|a| a.id).collect();
+        log::info!("Fetching all documents for {} activities efficiently", activity_ids.len());
+        
+        // Fetch ALL documents for ALL activities in a single query - this solves the N+1 problem
+        let all_documents = media_doc_repo
+            .find_by_related_entities("activities", &activity_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        // Group documents by related_id (activity_id) for efficient lookup
+        let mut documents_by_activity: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                documents_by_activity.entry(related_id).or_insert_with(Vec::new).push(document);
+            }
+        }
+        
+        log::info!("Found {} total documents across all activities", documents_by_activity.values().map(|v| v.len()).sum::<usize>());
+
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing activity {} to file: id={}", i + 1, entity.id);
+            
+            // Get document count from our pre-fetched data
+            let document_count = documents_by_activity.get(&entity.id).map(|docs| docs.len()).unwrap_or(0);
+            let metadata = serde_json::json!({
+                "document_count": document_count,
+                "has_documents": document_count > 0
+            });
+            
+            activities_writer.write_enhanced_entity(entity, metadata)?;
+        }
+
+        // Export associated media documents and files
+        log::info!("Exporting associated media documents");
+        let mut files_dir_created = false;
+        let files_dir = dest_dir.join("files");
+        
+        // Check if we actually have documents before processing
+        let total_docs_count: usize = documents_by_activity.values().map(|docs| docs.len()).sum();
+        log::info!("Total documents to export: {}", total_docs_count);
+        
+        if total_docs_count > 0 {
+            // Process all documents we already fetched (no more database calls!)
+            for documents in documents_by_activity.values() {
+                for document in documents {
+                    if !files_dir_created {
+                        std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+                        files_dir_created = true;
+                    }
+
+                    let (source_file_path, file_source_type) = select_best_file_path_with_storage(&document, file_storage);
+                    let unique_filename = format!("{}_{}", document.id, document.original_filename);
+                    let dest_file_path = files_dir.join(&unique_filename);
+                    let abs_source_path = file_storage.get_absolute_path(source_file_path);
+
+                    if abs_source_path.exists() {
+                        match std::fs::copy(&abs_source_path, &dest_file_path) {
+                            Ok(_) => {
+                                log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, unique_filename);
+                                total_files_copied += 1;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                            }
+                        }
+                    } else {
+                        log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
+                    }
+                }
+            }
+        } else {
+            log::info!("No documents found, skipping document export files");
+        }
+    } else {
+        // Export activities without document metadata
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing activity {} to file: id={}", i + 1, entity.id);
+            activities_writer.write_entity(entity)?;
+        }
+    }
+    
+    // Finalize activities writer
+    activities_writer.finalize()?;
+    
+    log::info!("Export activities by IDs completed: wrote {} activities, {} files", result.items.len(), total_files_copied);
+    Ok(result.items.len() as i64)
 }

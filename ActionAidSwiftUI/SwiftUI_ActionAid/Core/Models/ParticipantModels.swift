@@ -632,7 +632,7 @@ struct ParticipantDuplicateInfo: Codable, Identifiable {
     let livelihoodCount: Int64
     
     enum CodingKeys: String, CodingKey {
-        case id, name, gender, location, disability, workshopCount, livelihoodCount
+        case id, name, gender, location, disability
         case ageGroup = "age_group"
         case disabilityType = "disability_type"
         case createdAt = "created_at"
@@ -641,6 +641,8 @@ struct ParticipantDuplicateInfo: Codable, Identifiable {
         case identificationDocuments = "identification_documents"
         case otherDocuments = "other_documents"
         case totalDocumentCount = "total_document_count"
+        case workshopCount = "workshop_count"
+        case livelihoodCount = "livelihood_count"
     }
     
     // Helper computed properties

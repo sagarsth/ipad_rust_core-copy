@@ -153,6 +153,22 @@ impl ExportServiceV2 {
                     ids.len() <= 1000 // Without attachments: 1000 max
                 }
             }
+            EntityFilter::ParticipantsByIds { ids } => {
+                // Limit: 1000 items max for participants
+                if request.include_blobs {
+                    ids.len() <= 1000 // With attachments: 1000 max
+                } else {
+                    ids.len() <= 1000 // Without attachments: 1000 max
+                }
+            }
+            EntityFilter::ActivitiesByIds { ids } => {
+                // Limit: 1000 items max for activities
+                if request.include_blobs {
+                    ids.len() <= 1000 // With attachments: 1000 max
+                } else {
+                    ids.len() <= 1000 // Without attachments: 1000 max
+                }
+            }
             EntityFilter::StrategicGoals { .. } => {
                 // All strategic goals exports: limit to 1000 via streaming
                 true
@@ -298,6 +314,8 @@ impl ExportServiceV2 {
         let (entity_ids, entity_type) = match request.filters.first() {
             Some(EntityFilter::StrategicGoalsByIds { ids }) => (ids.clone(), "strategic_goals"),
             Some(EntityFilter::ProjectsByIds { ids }) => (ids.clone(), "projects"),
+            Some(EntityFilter::ParticipantsByIds { ids }) => (ids.clone(), "participants"),
+            Some(EntityFilter::ActivitiesByIds { ids }) => (ids.clone(), "activities"),
             _ => {
                 log::warn!("CSV with ZIP structure only supports entity ID-based filters currently");
                 return Err(ServiceError::ValidationError("CSV ZIP export only supports entity ID-based filters currently".to_string()));
@@ -404,6 +422,8 @@ impl ExportServiceV2 {
             let documents_size = match entity_type {
                 "strategic_goals" => self.copy_documents_for_strategic_goals(temp_path, &entity_ids).await?,
                 "projects" => self.copy_documents_for_projects(temp_path, &entity_ids).await?,
+                "participants" => self.copy_documents_for_participants(temp_path, &entity_ids).await?,
+                "activities" => self.copy_documents_for_activities(temp_path, &entity_ids).await?,
                 _ => 0
             };
             total_file_size += documents_size;
@@ -415,11 +435,15 @@ impl ExportServiceV2 {
         let entity_display_name = match entity_type {
             "strategic_goals" => "Strategic Goals",
             "projects" => "Projects",
+            "participants" => "Participants",
+            "activities" => "Activities",
             _ => "Entities"
         };
         let entity_singular = match entity_type {
             "strategic_goals" => "goal",
             "projects" => "project",
+            "participants" => "participant",
+            "activities" => "activity",
             _ => "entity"
         };
         let readme_content = format!(
@@ -550,6 +574,8 @@ impl ExportServiceV2 {
         let (entity_ids, entity_type) = match request.filters.first() {
             Some(EntityFilter::StrategicGoalsByIds { ids }) => (ids.clone(), "strategic_goals"),
             Some(EntityFilter::ProjectsByIds { ids }) => (ids.clone(), "projects"),
+            Some(EntityFilter::ParticipantsByIds { ids }) => (ids.clone(), "participants"),
+            Some(EntityFilter::ActivitiesByIds { ids }) => (ids.clone(), "activities"),
             _ => {
                 return Err(ServiceError::ValidationError("Parquet ZIP export only supports entity ID-based filters".to_string()));
             }
@@ -612,6 +638,8 @@ impl ExportServiceV2 {
             let documents_size = match entity_type {
                 "strategic_goals" => self.copy_documents_for_strategic_goals(temp_path, &entity_ids).await?,
                 "projects" => self.copy_documents_for_projects(temp_path, &entity_ids).await?,
+                "participants" => self.copy_documents_for_participants(temp_path, &entity_ids).await?,
+                "activities" => self.copy_documents_for_activities(temp_path, &entity_ids).await?,
                 _ => 0
             };
             total_file_size += documents_size;
@@ -623,11 +651,15 @@ impl ExportServiceV2 {
         let entity_display_name = match entity_type {
             "strategic_goals" => "Strategic Goals",
             "projects" => "Projects",
+            "participants" => "Participants",
+            "activities" => "Activities",
             _ => "Entities"
         };
         let entity_singular = match entity_type {
             "strategic_goals" => "goal",
             "projects" => "project",
+            "participants" => "participant",
+            "activities" => "activity",
             _ => "entity"
         };
         let readme_content = format!(
@@ -791,9 +823,89 @@ impl ExportServiceV2 {
                 
                 Ok(ExportSummary { job })
             }
+            Some(EntityFilter::ParticipantsByIds { ids }) => {
+                let count = crate::domains::export::service::export_participants_by_ids_with_documents(
+                    temp_dir.path(), 
+                    ids, 
+                    request.include_blobs, 
+                    &file_storage
+                ).await.map_err(|e| ServiceError::InternalError(e))?;
+                
+                // Create ZIP from the structured directory
+                let original_path = self.generate_export_path(request);
+                let zip_name = if let Some(stem) = original_path.file_stem() {
+                    format!("{}.zip", stem.to_string_lossy())
+                } else {
+                    format!("participants_export_{}.zip", uuid::Uuid::new_v4())
+                };
+                let output_path = original_path.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(&zip_name);
+                
+                crate::domains::export::service::create_zip_from_dir(temp_dir.path(), &output_path)
+                    .map_err(|e| ServiceError::InternalError(format!("Failed to create ZIP: {}", e)))?;
+                
+                // Create summary
+                let metadata = std::fs::metadata(&output_path)
+                    .map_err(|e| ServiceError::InternalError(format!("Failed to stat ZIP: {}", e)))?;
+                
+                let job = ExportJob {
+                    id: uuid::Uuid::new_v4(),
+                    requested_by_user_id: Some(auth.user_id),
+                    requested_at: chrono::Utc::now(),
+                    include_blobs: request.include_blobs,
+                    status: ExportStatus::Completed,
+                    local_path: Some(output_path.to_string_lossy().to_string()),
+                    total_entities: Some(count),
+                    total_bytes: Some(metadata.len() as i64),
+                    error_message: None,
+                };
+                
+                Ok(ExportSummary { job })
+            }
+            Some(EntityFilter::ActivitiesByIds { ids }) => {
+                let count = crate::domains::export::service::export_activities_by_ids_with_documents(
+                    temp_dir.path(), 
+                    ids, 
+                    request.include_blobs, 
+                    &file_storage
+                ).await.map_err(|e| ServiceError::InternalError(e))?;
+                
+                // Create ZIP from the structured directory
+                let original_path = self.generate_export_path(request);
+                let zip_name = if let Some(stem) = original_path.file_stem() {
+                    format!("{}.zip", stem.to_string_lossy())
+                } else {
+                    format!("activities_export_{}.zip", uuid::Uuid::new_v4())
+                };
+                let output_path = original_path.parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(&zip_name);
+                
+                crate::domains::export::service::create_zip_from_dir(temp_dir.path(), &output_path)
+                    .map_err(|e| ServiceError::InternalError(format!("Failed to create ZIP: {}", e)))?;
+                
+                // Create summary
+                let metadata = std::fs::metadata(&output_path)
+                    .map_err(|e| ServiceError::InternalError(format!("Failed to stat ZIP: {}", e)))?;
+                
+                let job = ExportJob {
+                    id: uuid::Uuid::new_v4(),
+                    requested_by_user_id: Some(auth.user_id),
+                    requested_at: chrono::Utc::now(),
+                    include_blobs: request.include_blobs,
+                    status: ExportStatus::Completed,
+                    local_path: Some(output_path.to_string_lossy().to_string()),
+                    total_entities: Some(count),
+                    total_bytes: Some(metadata.len() as i64),
+                    error_message: None,
+                };
+                
+                Ok(ExportSummary { job })
+            }
             _ => {
                 // For other filters, fall back to simple JSONL export
-                Err(ServiceError::ValidationError("ZIP structure export only supports StrategicGoalsByIds and ProjectsByIds filters currently".to_string()))
+                Err(ServiceError::ValidationError("ZIP structure export only supports StrategicGoalsByIds, ProjectsByIds, ParticipantsByIds, and ActivitiesByIds filters currently".to_string()))
             }
         }
     }
@@ -875,6 +987,8 @@ impl ExportServiceV2 {
         let (entity_ids, entity_type) = match request.filters.first() {
             Some(EntityFilter::StrategicGoalsByIds { ids }) => (ids.clone(), "strategic_goals"),
             Some(EntityFilter::ProjectsByIds { ids }) => (ids.clone(), "projects"),
+            Some(EntityFilter::ParticipantsByIds { ids }) => (ids.clone(), "participants"),
+            Some(EntityFilter::ActivitiesByIds { ids }) => (ids.clone(), "activities"),
             _ => {
                 return Err(ServiceError::ValidationError("JSONL ZIP export only supports entity ID-based filters".to_string()));
             }
@@ -982,6 +1096,8 @@ impl ExportServiceV2 {
             let documents_size = match entity_type {
                 "strategic_goals" => self.copy_documents_for_strategic_goals(temp_path, &entity_ids).await?,
                 "projects" => self.copy_documents_for_projects(temp_path, &entity_ids).await?,
+                "participants" => self.copy_documents_for_participants(temp_path, &entity_ids).await?,
+                "activities" => self.copy_documents_for_activities(temp_path, &entity_ids).await?,
                 _ => 0
             };
             total_file_size += documents_size;
@@ -993,11 +1109,15 @@ impl ExportServiceV2 {
         let entity_display_name = match entity_type {
             "strategic_goals" => "Strategic Goals",
             "projects" => "Projects",
+            "participants" => "Participants",
+            "activities" => "Activities",
             _ => "Entities"
         };
         let entity_singular = match entity_type {
             "strategic_goals" => "goal",
             "projects" => "project",
+            "participants" => "participant",
+            "activities" => "activity",
             _ => "entity"
         };
         let readme_content = format!(
@@ -1092,6 +1212,26 @@ impl ExportServiceV2 {
             EntityFilter::ProjectsByIds { ids } => {
                 let limited_ids = if ids.len() > 1000 {
                     log::warn!("Projects export limited to first 1000 items (requested: {})", ids.len());
+                    ids[..1000].to_vec()
+                } else {
+                    ids.clone()
+                };
+                
+                (50, limited_ids.len()) // Batch size 50, max 1000 total
+            }
+            EntityFilter::ParticipantsByIds { ids } => {
+                let limited_ids = if ids.len() > 1000 {
+                    log::warn!("Participants export limited to first 1000 items (requested: {})", ids.len());
+                    ids[..1000].to_vec()
+                } else {
+                    ids.clone()
+                };
+                
+                (50, limited_ids.len()) // Batch size 50, max 1000 total
+            }
+            EntityFilter::ActivitiesByIds { ids } => {
+                let limited_ids = if ids.len() > 1000 {
+                    log::warn!("Activities export limited to first 1000 items (requested: {})", ids.len());
                     ids[..1000].to_vec()
                 } else {
                     ids.clone()
@@ -1396,6 +1536,8 @@ impl ExportServiceV2 {
         let entity_type = match filters.first() {
             Some(EntityFilter::StrategicGoalsByIds { .. }) => "strategic_goals",
             Some(EntityFilter::ProjectsByIds { .. }) => "projects",
+            Some(EntityFilter::ParticipantsByIds { .. }) => "participants",
+            Some(EntityFilter::ActivitiesByIds { .. }) => "activities",
             _ => "entities"
         };
         let entity_type_copy = entity_type.to_string();
@@ -1823,6 +1965,162 @@ impl ExportServiceV2 {
         }
         
         log::debug!("Successfully copied {} documents ({} bytes) to organized goal folders", copied_count, total_bytes);
+        Ok(total_bytes)
+    }
+
+    /// Copies documents for participants to a destination directory.
+    async fn copy_documents_for_participants(&self, dest_dir: &Path, ids: &[Uuid]) -> ServiceResult<u64> {
+        // Early bailout if no IDs
+        if ids.is_empty() {
+            log::debug!("No participant IDs provided, skipping document copy");
+            return Ok(0);
+        }
+
+        log::debug!("Checking for documents related to {} participants", ids.len());
+        
+        let media_doc_repo = globals::get_media_document_repo()
+            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+        
+        // Quick count check first to avoid unnecessary work
+        let document_count = media_doc_repo
+            .count_by_related_entities("participants", &ids)
+            .await
+            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+            
+        if document_count == 0 {
+            log::debug!("No documents found for participants, skipping file operations");
+            return Ok(0);
+        }
+
+        log::debug!("Found {} documents to copy", document_count);
+        
+        let all_documents = media_doc_repo
+            .find_by_related_entities("participants", &ids)
+            .await
+            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+            
+        if all_documents.is_empty() {
+            log::debug!("Document query returned empty results");
+            return Ok(0);
+        }
+
+        // Create organized folder structure: files/participants/participant_id/
+        let files_dir = dest_dir.join("files");
+        let participants_dir = files_dir.join("participants");
+        tokio::fs::create_dir_all(&participants_dir).await
+            .map_err(|e| ServiceError::InternalError(format!("Failed to create participants directory: {}", e)))?;
+        
+        let mut total_bytes = 0;
+        let mut copied_count = 0;
+
+        // Group documents by participant ID and copy to organized folders
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                // Create participant-specific folder
+                let participant_dir = participants_dir.join(related_id.to_string());
+                tokio::fs::create_dir_all(&participant_dir).await
+                    .map_err(|e| ServiceError::InternalError(format!("Failed to create participant directory {}: {}", related_id, e)))?;
+
+                let (source_file_path, _) = crate::domains::export::service::select_best_file_path_with_storage(&document, &self.file_storage);
+                let abs_source_path = self.file_storage.get_absolute_path(source_file_path);
+
+                if abs_source_path.exists() {
+                    let dest_file_path = participant_dir.join(&document.original_filename);
+                    match tokio::fs::copy(&abs_source_path, &dest_file_path).await {
+                        Ok(bytes_copied) => {
+                            total_bytes += bytes_copied;
+                            copied_count += 1;
+                            log::debug!("Copied document {} to participant folder {}", document.original_filename, related_id);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to copy document {} to participant folder {}: {}", document.original_filename, related_id, e);
+                        }
+                    }
+                } else {
+                    log::warn!("Document file not found: {}", source_file_path);
+                }
+            }
+        }
+
+        log::info!("Copied {} documents ({} bytes) for {} participants", copied_count, total_bytes, ids.len());
+        Ok(total_bytes)
+    }
+
+    /// Copies documents for activities to a destination directory.
+    async fn copy_documents_for_activities(&self, dest_dir: &Path, ids: &[Uuid]) -> ServiceResult<u64> {
+        // Early bailout if no IDs
+        if ids.is_empty() {
+            log::debug!("No activity IDs provided, skipping document copy");
+            return Ok(0);
+        }
+
+        log::debug!("Checking for documents related to {} activities", ids.len());
+        
+        let media_doc_repo = globals::get_media_document_repo()
+            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+        
+        // Quick count check first to avoid unnecessary work
+        let document_count = media_doc_repo
+            .count_by_related_entities("activities", &ids)
+            .await
+            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+            
+        if document_count == 0 {
+            log::debug!("No documents found for activities, skipping file operations");
+            return Ok(0);
+        }
+
+        log::debug!("Found {} documents to copy", document_count);
+        
+        let all_documents = media_doc_repo
+            .find_by_related_entities("activities", &ids)
+            .await
+            .map_err(|e| ServiceError::InternalError(e.to_string()))?;
+            
+        if all_documents.is_empty() {
+            log::debug!("Document query returned empty results");
+            return Ok(0);
+        }
+
+        // Create organized folder structure: files/activities/activity_id/
+        let files_dir = dest_dir.join("files");
+        let activities_dir = files_dir.join("activities");
+        tokio::fs::create_dir_all(&activities_dir).await
+            .map_err(|e| ServiceError::InternalError(format!("Failed to create activities directory: {}", e)))?;
+        
+        let mut total_bytes = 0;
+        let mut copied_count = 0;
+
+        // Group documents by activity ID and copy to organized folders
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                // Create activity-specific folder
+                let activity_dir = activities_dir.join(related_id.to_string());
+                tokio::fs::create_dir_all(&activity_dir).await
+                    .map_err(|e| ServiceError::InternalError(format!("Failed to create activity directory {}: {}", related_id, e)))?;
+
+                let (source_file_path, _) = crate::domains::export::service::select_best_file_path_with_storage(&document, &self.file_storage);
+                let abs_source_path = self.file_storage.get_absolute_path(source_file_path);
+
+                if abs_source_path.exists() {
+                    let dest_file_path = activity_dir.join(&document.original_filename);
+                    match tokio::fs::copy(&abs_source_path, &dest_file_path).await {
+                        Ok(bytes_copied) => {
+                            total_bytes += bytes_copied;
+                            copied_count += 1;
+                            log::debug!("Copied document {} to activity folder {}", document.original_filename, related_id);
+                        }
+                        Err(e) => {
+                            log::error!("Failed to copy document {} to activity folder {}: {}", document.original_filename, related_id, e);
+                        }
+                    }
+                } else {
+                    log::warn!("Document file not found: {}", source_file_path);
+                }
+            }
+        }
+
+        log::info!("Copied {} documents ({} bytes) for {} activities", copied_count, total_bytes, ids.len());
         Ok(total_bytes)
     }
 }

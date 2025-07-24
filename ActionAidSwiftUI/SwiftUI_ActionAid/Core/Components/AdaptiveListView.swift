@@ -729,9 +729,6 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
         // Apply column count limits based on orientation and device
         let maxColumns = getMaxColumnsForCurrentContext()
         
-        print("🔄 [COLUMNS] Domain: \(domainName), Filtered: \(filteredColumns.count), Max: \(maxColumns), Landscape: \(orientationDetector.isLandscape)")
-        print("🔄 [COLUMNS] Available columns: \(filteredColumns.map { "\($0.title)(\($0.isRequired ? "req" : "opt"))" }.joined(separator: ", "))")
-        
         // If we have more columns than the limit, prioritize them
         if filteredColumns.count > maxColumns {
             // Always include required columns first
@@ -743,11 +740,9 @@ struct AdaptiveListView<Item: Identifiable & MonthGroupable & Equatable, CardCon
             let selectedOptionalColumns = Array(optionalColumns.prefix(max(0, remainingSlots)))
             
             let finalColumns = requiredColumns + selectedOptionalColumns
-            print("🔄 [COLUMNS] Limited to: \(finalColumns.map { $0.title }.joined(separator: ", "))")
             return finalColumns
         }
         
-        print("🔄 [COLUMNS] No limit applied, showing all \(filteredColumns.count) columns")
         return filteredColumns
     }
     
