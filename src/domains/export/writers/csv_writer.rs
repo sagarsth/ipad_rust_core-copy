@@ -110,6 +110,11 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
                 return Ok(crate::domains::export::repository_v2::ParticipantExport::headers());
             }
             
+            if obj.contains_key("project_id") && obj.contains_key("kpi") && obj.contains_key("target_value") {
+                log::debug!("[CSV_WRITER] Detected as ActivityExport - has project_id, kpi, target_value");
+                return Ok(crate::domains::export::repository_v2::ActivityExport::headers());
+            }
+            
             // Default to strategic goals if no other pattern matches
             log::debug!("[CSV_WRITER] Defaulting to StrategicGoalResponse - no other patterns matched");
             return Ok(crate::domains::strategic_goal::types::StrategicGoalResponse::headers());
@@ -233,6 +238,51 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
                 "created_by_user_id",
                 "updated_by_user_id",
                 "deleted_at"
+            ]
+        } else if obj.contains_key("gender") && obj.contains_key("disability") && obj.contains_key("age_group") {
+            log::debug!("[CSV_WRITER] Using participant field extraction");
+            // Participant fields
+            vec![
+                "id",
+                "name",
+                "gender",
+                "disability",
+                "disability_type",
+                "age_group",
+                "location",
+                "sync_priority",
+                "created_at",
+                "updated_at",
+                "created_by_user_id",
+                "created_by_device_id",
+                "updated_by_user_id",
+                "updated_by_device_id",
+                "deleted_at",
+                "deleted_by_user_id",
+                "deleted_by_device_id"
+            ]
+        } else if obj.contains_key("project_id") && obj.contains_key("kpi") && obj.contains_key("target_value") {
+            log::debug!("[CSV_WRITER] Using activity field extraction");
+            // Activity fields
+            vec![
+                "id",
+                "project_id",
+                "description",
+                "kpi",
+                "target_value",
+                "actual_value",
+                "progress_percentage",
+                "status_id",
+                "sync_priority",
+                "created_at",
+                "updated_at",
+                "created_by_user_id",
+                "created_by_device_id",
+                "updated_by_user_id",
+                "updated_by_device_id",
+                "deleted_at",
+                "deleted_by_user_id",
+                "deleted_by_device_id"
             ]
         } else {
             log::debug!("[CSV_WRITER] Using strategic goal field extraction");
