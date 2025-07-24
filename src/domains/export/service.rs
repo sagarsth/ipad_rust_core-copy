@@ -303,24 +303,24 @@ async fn perform_export_job(
                         Ok::<i64, String>(0)
                     }
                     EntityFilter::DonorsByIds { ids } => {
-                        export_donors_by_ids(&temp_dir_path, &ids).await?;
-                        Ok::<i64, String>(0)
+                        let count = export_donors_by_ids_with_documents(&temp_dir_path, &ids, include_blobs, &file_storage_clone2).await?;
+                        Ok::<i64, String>(count)
                     }
                     EntityFilter::FundingAll => {
                         export_fundings(&temp_dir_path).await?;
                         Ok::<i64, String>(0)
                     }
                     EntityFilter::FundingByIds { ids } => {
-                        export_fundings_by_ids(&temp_dir_path, &ids).await?;
-                        Ok::<i64, String>(0)
+                        let count = export_fundings_by_ids_with_documents(&temp_dir_path, &ids, include_blobs, &file_storage_clone2).await?;
+                        Ok::<i64, String>(count)
                     }
                     EntityFilter::LivelihoodsAll => {
                         export_livelihoods(&temp_dir_path).await?;
                         Ok::<i64, String>(0)
                     }
                     EntityFilter::LivelihoodsByIds { ids } => {
-                        export_livelihoods_by_ids(&temp_dir_path, &ids).await?;
-                        Ok::<i64, String>(0)
+                        let count = export_livelihoods_by_ids_with_documents(&temp_dir_path, &ids, include_blobs, &file_storage_clone2).await?;
+                        Ok::<i64, String>(count)
                     }
                     EntityFilter::ParticipantsAll => {
                         export_participants(&temp_dir_path).await?;
@@ -1083,19 +1083,20 @@ async fn export_donors_by_date_range(dest_dir: &Path, start: DateTime<Utc>, end:
 async fn export_fundings_by_date_range(dest_dir: &Path, start: DateTime<Utc>, end: DateTime<Utc>) -> Result<(), String> {
     let repo = globals::get_project_funding_repo().map_err(|e| e.to_string())?;
     let file_path = dest_dir.join("fundings.jsonl");
-    let mut file = std::fs::File::create(&file_path).map_err(|e| e.to_string())?;
+    let mut writer = OptimizedJsonLWriter::new(&file_path)?;
     let mut page = 1u32;
     let per_page = 200;
     loop {
         let params = PaginationParams { page, per_page };
         let page_result = repo.find_by_date_range(start, end, params).await.map_err(|e| e.to_string())?;
         for entity in page_result.items {
-            let json = serde_json::to_string(&entity).map_err(|e| e.to_string())?;
-            writeln!(file, "{}", json).map_err(|e| e.to_string())?;
+            writer.write_entity(&entity)?;
         }
         if page >= page_result.total_pages { break; }
         page += 1;
     }
+    
+    writer.finalize()?;
     Ok(())
 }
 
@@ -1867,6 +1868,354 @@ async fn export_participants_by_date_range(dest_dir: &Path, start: DateTime<Utc>
     Ok(())
 }
 
+/// Export donors by IDs with optional document support
+pub async fn export_donors_by_ids_with_documents(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
+    if ids.is_empty() {
+        log::info!("Export donors by IDs: empty IDs list");
+        return Ok(0);
+    }
+
+    log::info!("Export donors by IDs: {} IDs, include_documents: {}", ids.len(), include_documents);
+
+    let donor_repo = globals::get_donor_repo().map_err(|e| e.to_string())?;
+    
+    // Get donors
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    log::info!("Calling donor repo.find_by_ids with params: page={}, per_page={}", params.page, params.per_page);
+    let result = donor_repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    log::info!("Repository returned {} donors, total={}", result.items.len(), result.total);
+
+    // Export donors using optimized writer
+    let donors_file_path = dest_dir.join("donors.jsonl");
+    let mut donors_writer = OptimizedJsonLWriter::new(&donors_file_path)?;
+
+    let mut total_files_copied = 0;
+
+    if include_documents {
+        let media_doc_repo = globals::get_media_document_repo().map_err(|e| e.to_string())?;
+        
+        // Get all donor IDs
+        let donor_ids: Vec<Uuid> = result.items.iter().map(|d| d.id).collect();
+        log::info!("Fetching all documents for {} donors efficiently", donor_ids.len());
+        
+        // Fetch ALL documents for ALL donors in a single query
+        let all_documents = media_doc_repo
+            .find_by_related_entities("donors", &donor_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        // Group documents by related_id (donor_id) for efficient lookup
+        let mut documents_by_donor: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                documents_by_donor.entry(related_id).or_insert_with(Vec::new).push(document);
+            }
+        }
+        
+        log::info!("Found {} total documents across all donors", documents_by_donor.values().map(|v| v.len()).sum::<usize>());
+
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing donor {} to file: id={}", i + 1, entity.id);
+            
+            // Get document count from our pre-fetched data
+            let document_count = documents_by_donor.get(&entity.id).map(|docs| docs.len()).unwrap_or(0);
+            let metadata = serde_json::json!({
+                "document_count": document_count,
+                "has_documents": document_count > 0
+            });
+            
+            donors_writer.write_enhanced_entity(entity, metadata)?;
+        }
+
+        // Export associated media documents and files
+        log::info!("Exporting associated media documents");
+        let mut files_dir_created = false;
+        let files_dir = dest_dir.join("files");
+        
+        // Check if we actually have documents before processing
+        let total_docs_count: usize = documents_by_donor.values().map(|docs| docs.len()).sum();
+        log::info!("Total documents to export: {}", total_docs_count);
+        
+        if total_docs_count > 0 {
+            // Process all documents we already fetched
+            for documents in documents_by_donor.values() {
+                for document in documents {
+                    if !files_dir_created {
+                        std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+                        files_dir_created = true;
+                    }
+
+                    let (source_file_path, file_source_type) = select_best_file_path_with_storage(&document, file_storage);
+                    let unique_filename = format!("{}_{}", document.id, document.original_filename);
+                    let dest_file_path = files_dir.join(&unique_filename);
+                    let abs_source_path = file_storage.get_absolute_path(source_file_path);
+
+                    if abs_source_path.exists() {
+                        match std::fs::copy(&abs_source_path, &dest_file_path) {
+                            Ok(_) => {
+                                log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, unique_filename);
+                                total_files_copied += 1;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                            }
+                        }
+                    } else {
+                        log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
+                    }
+                }
+            }
+        } else {
+            log::info!("No documents found, skipping document export files");
+        }
+    } else {
+        // Export donors without document metadata
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing donor {} to file: id={}", i + 1, entity.id);
+            donors_writer.write_entity(entity)?;
+        }
+    }
+    
+    // Finalize donors writer
+    donors_writer.finalize()?;
+    
+    log::info!("Export donors by IDs completed: wrote {} donors, {} files", result.items.len(), total_files_copied);
+    Ok(result.items.len() as i64)
+}
+
+/// Export fundings by IDs with optional document support
+pub async fn export_fundings_by_ids_with_documents(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
+    if ids.is_empty() {
+        log::info!("Export fundings by IDs: empty IDs list");
+        return Ok(0);
+    }
+
+    log::info!("Export fundings by IDs: {} IDs, include_documents: {}", ids.len(), include_documents);
+
+    let funding_repo = globals::get_project_funding_repo().map_err(|e| e.to_string())?;
+    
+    // Get fundings
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    log::info!("Calling funding repo.find_by_ids with params: page={}, per_page={}", params.page, params.per_page);
+    let result = funding_repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    log::info!("Repository returned {} fundings, total={}", result.items.len(), result.total);
+
+    // Export fundings using optimized writer
+    let fundings_file_path = dest_dir.join("fundings.jsonl");
+    let mut fundings_writer = OptimizedJsonLWriter::new(&fundings_file_path)?;
+
+    let mut total_files_copied = 0;
+
+    if include_documents {
+        let media_doc_repo = globals::get_media_document_repo().map_err(|e| e.to_string())?;
+        
+        // Get all funding IDs
+        let funding_ids: Vec<Uuid> = result.items.iter().map(|f| f.id).collect();
+        log::info!("Fetching all documents for {} fundings efficiently", funding_ids.len());
+        
+        // Fetch ALL documents for ALL fundings in a single query
+        let all_documents = media_doc_repo
+            .find_by_related_entities("project_funding", &funding_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        // Group documents by related_id (funding_id) for efficient lookup
+        let mut documents_by_funding: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                documents_by_funding.entry(related_id).or_insert_with(Vec::new).push(document);
+            }
+        }
+        
+        log::info!("Found {} total documents across all fundings", documents_by_funding.values().map(|v| v.len()).sum::<usize>());
+
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing funding {} to file: id={}", i + 1, entity.id);
+            
+            // Get document count from our pre-fetched data
+            let document_count = documents_by_funding.get(&entity.id).map(|docs| docs.len()).unwrap_or(0);
+            let metadata = serde_json::json!({
+                "document_count": document_count,
+                "has_documents": document_count > 0
+            });
+            
+            fundings_writer.write_enhanced_entity(entity, metadata)?;
+        }
+
+        // Export associated media documents and files
+        log::info!("Exporting associated media documents");
+        let mut files_dir_created = false;
+        let files_dir = dest_dir.join("files");
+        
+        // Check if we actually have documents before processing
+        let total_docs_count: usize = documents_by_funding.values().map(|docs| docs.len()).sum();
+        log::info!("Total documents to export: {}", total_docs_count);
+        
+        if total_docs_count > 0 {
+            // Process all documents we already fetched
+            for documents in documents_by_funding.values() {
+                for document in documents {
+                    if !files_dir_created {
+                        std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+                        files_dir_created = true;
+                    }
+
+                    let (source_file_path, file_source_type) = select_best_file_path_with_storage(&document, file_storage);
+                    let unique_filename = format!("{}_{}", document.id, document.original_filename);
+                    let dest_file_path = files_dir.join(&unique_filename);
+                    let abs_source_path = file_storage.get_absolute_path(source_file_path);
+
+                    if abs_source_path.exists() {
+                        match std::fs::copy(&abs_source_path, &dest_file_path) {
+                            Ok(_) => {
+                                log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, unique_filename);
+                                total_files_copied += 1;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                            }
+                        }
+                    } else {
+                        log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
+                    }
+                }
+            }
+        } else {
+            log::info!("No documents found, skipping document export files");
+        }
+    } else {
+        // Export fundings without document metadata
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing funding {} to file: id={}", i + 1, entity.id);
+            fundings_writer.write_entity(entity)?;
+        }
+    }
+    
+    // Finalize fundings writer
+    fundings_writer.finalize()?;
+    
+    log::info!("Export fundings by IDs completed: wrote {} fundings, {} files", result.items.len(), total_files_copied);
+    Ok(result.items.len() as i64)
+}
+
+/// Export livelihoods by IDs with optional document support
+pub async fn export_livelihoods_by_ids_with_documents(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
+    if ids.is_empty() {
+        log::info!("Export livelihoods by IDs: empty IDs list");
+        return Ok(0);
+    }
+
+    log::info!("Export livelihoods by IDs: {} IDs, include_documents: {}", ids.len(), include_documents);
+
+    let livelihood_repo = globals::get_livelihood_repo().map_err(|e| e.to_string())?;
+    
+    // Get livelihoods
+    let params = PaginationParams { page: 1, per_page: ids.len() as u32 };
+    log::info!("Calling livelihood repo.find_by_ids with params: page={}, per_page={}", params.page, params.per_page);
+    let result = livelihood_repo.find_by_ids(ids, params).await.map_err(|e| e.to_string())?;
+
+    log::info!("Repository returned {} livelihoods, total={}", result.items.len(), result.total);
+
+    // Export livelihoods using optimized writer
+    let livelihoods_file_path = dest_dir.join("livelihoods.jsonl");
+    let mut livelihoods_writer = OptimizedJsonLWriter::new(&livelihoods_file_path)?;
+
+    let mut total_files_copied = 0;
+
+    if include_documents {
+        let media_doc_repo = globals::get_media_document_repo().map_err(|e| e.to_string())?;
+        
+        // Get all livelihood IDs
+        let livelihood_ids: Vec<Uuid> = result.items.iter().map(|l| l.id).collect();
+        log::info!("Fetching all documents for {} livelihoods efficiently", livelihood_ids.len());
+        
+        // Fetch ALL documents for ALL livelihoods in a single query
+        let all_documents = media_doc_repo
+            .find_by_related_entities("livelihoods", &livelihood_ids)
+            .await
+            .map_err(|e| e.to_string())?;
+        
+        // Group documents by related_id (livelihood_id) for efficient lookup
+        let mut documents_by_livelihood: std::collections::HashMap<Uuid, Vec<crate::domains::document::types::MediaDocument>> = std::collections::HashMap::new();
+        for document in all_documents {
+            if let Some(related_id) = document.related_id {
+                documents_by_livelihood.entry(related_id).or_insert_with(Vec::new).push(document);
+            }
+        }
+        
+        log::info!("Found {} total documents across all livelihoods", documents_by_livelihood.values().map(|v| v.len()).sum::<usize>());
+
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing livelihood {} to file: id={}", i + 1, entity.id);
+            
+            // Get document count from our pre-fetched data
+            let document_count = documents_by_livelihood.get(&entity.id).map(|docs| docs.len()).unwrap_or(0);
+            let metadata = serde_json::json!({
+                "document_count": document_count,
+                "has_documents": document_count > 0
+            });
+            
+            livelihoods_writer.write_enhanced_entity(entity, metadata)?;
+        }
+
+        // Export associated media documents and files
+        log::info!("Exporting associated media documents");
+        let mut files_dir_created = false;
+        let files_dir = dest_dir.join("files");
+        
+        // Check if we actually have documents before processing
+        let total_docs_count: usize = documents_by_livelihood.values().map(|docs| docs.len()).sum();
+        log::info!("Total documents to export: {}", total_docs_count);
+        
+        if total_docs_count > 0 {
+            // Process all documents we already fetched
+            for documents in documents_by_livelihood.values() {
+                for document in documents {
+                    if !files_dir_created {
+                        std::fs::create_dir_all(&files_dir).map_err(|e| e.to_string())?;
+                        files_dir_created = true;
+                    }
+
+                    let (source_file_path, file_source_type) = select_best_file_path_with_storage(&document, file_storage);
+                    let unique_filename = format!("{}_{}", document.id, document.original_filename);
+                    let dest_file_path = files_dir.join(&unique_filename);
+                    let abs_source_path = file_storage.get_absolute_path(source_file_path);
+
+                    if abs_source_path.exists() {
+                        match std::fs::copy(&abs_source_path, &dest_file_path) {
+                            Ok(_) => {
+                                log::info!("Successfully copied {} file: {} -> {}", file_source_type, source_file_path, unique_filename);
+                                total_files_copied += 1;
+                            }
+                            Err(e) => {
+                                log::error!("Failed to copy {} file {}: {}", file_source_type, source_file_path, e);
+                            }
+                        }
+                    } else {
+                        log::error!("File not found for export: {} (type: {})", source_file_path, file_source_type);
+                    }
+                }
+            }
+        } else {
+            log::info!("No documents found, skipping document export files");
+        }
+    } else {
+        // Export livelihoods without document metadata
+        for (i, entity) in result.items.iter().enumerate() {
+            log::info!("Writing livelihood {} to file: id={}", i + 1, entity.id);
+            livelihoods_writer.write_entity(entity)?;
+        }
+    }
+    
+    // Finalize livelihoods writer
+    livelihoods_writer.finalize()?;
+    
+    log::info!("Export livelihoods by IDs completed: wrote {} livelihoods, {} files", result.items.len(), total_files_copied);
+    Ok(result.items.len() as i64)
+}
+
 /// Export participants by IDs with optional document support (similar to strategic goals)
 pub async fn export_participants_by_ids_with_documents(dest_dir: &Path, ids: &[Uuid], include_documents: bool, file_storage: &Arc<dyn FileStorageService>) -> Result<i64, String> {
     if ids.is_empty() {
@@ -2098,3 +2447,4 @@ pub async fn export_activities_by_ids_with_documents(dest_dir: &Path, ids: &[Uui
     log::info!("Export activities by IDs completed: wrote {} activities, {} files", result.items.len(), total_files_copied);
     Ok(result.items.len() as i64)
 }
+

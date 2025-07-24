@@ -110,9 +110,24 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
                 return Ok(crate::domains::export::repository_v2::ParticipantExport::headers());
             }
             
-            if obj.contains_key("project_id") && obj.contains_key("kpi") && obj.contains_key("target_value") {
-                log::debug!("[CSV_WRITER] Detected as ActivityExport - has project_id, kpi, target_value");
+            if obj.contains_key("kpi") && obj.contains_key("target_value") && obj.contains_key("actual_value") {
+                log::debug!("[CSV_WRITER] Detected as ActivityExport - has kpi, target_value, actual_value");
                 return Ok(crate::domains::export::repository_v2::ActivityExport::headers());
+            }
+            
+            if obj.contains_key("contact_person") && obj.contains_key("first_donation_date") && obj.contains_key("country") {
+                log::debug!("[CSV_WRITER] Detected as DonorExport - has contact_person, first_donation_date, country");
+                return Ok(crate::domains::export::repository_v2::DonorExport::headers());
+            }
+            
+            if obj.contains_key("donor_id") && obj.contains_key("grant_id") && obj.contains_key("currency") && obj.contains_key("amount") {
+                log::debug!("[CSV_WRITER] Detected as FundingExport - has donor_id, grant_id, currency, amount");
+                return Ok(crate::domains::export::repository_v2::FundingExport::headers());
+            }
+            
+            if obj.contains_key("type_") && obj.contains_key("initial_grant_amount") && obj.contains_key("initial_grant_date") && obj.contains_key("sync_priority") {
+                log::debug!("[CSV_WRITER] Detected as LivelihoodExport - has type_, initial_grant_amount, initial_grant_date, sync_priority");
+                return Ok(crate::domains::export::repository_v2::LivelihoodExport::headers());
             }
             
             // Default to strategic goals if no other pattern matches
@@ -169,6 +184,24 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
         if let Ok(activity) = serde_json::from_value::<crate::domains::export::repository_v2::ActivityExport>(record.clone()) {
             log::debug!("[CSV_WRITER] Successfully deserialized as ActivityExport: {}", activity.id);
             return self.write_csv_record(&activity).await;
+        }
+        
+        // Try to deserialize as DonorExport
+        if let Ok(donor) = serde_json::from_value::<crate::domains::export::repository_v2::DonorExport>(record.clone()) {
+            log::debug!("[CSV_WRITER] Successfully deserialized as DonorExport: {}", donor.id);
+            return self.write_csv_record(&donor).await;
+        }
+        
+        // Try to deserialize as FundingExport
+        if let Ok(funding) = serde_json::from_value::<crate::domains::export::repository_v2::FundingExport>(record.clone()) {
+            log::debug!("[CSV_WRITER] Successfully deserialized as FundingExport: {}", funding.id);
+            return self.write_csv_record(&funding).await;
+        }
+        
+        // Try to deserialize as LivelihoodExport
+        if let Ok(livelihood) = serde_json::from_value::<crate::domains::export::repository_v2::LivelihoodExport>(record.clone()) {
+            log::debug!("[CSV_WRITER] Successfully deserialized as LivelihoodExport: {}", livelihood.id);
+            return self.write_csv_record(&livelihood).await;
         }
         
         // Try to deserialize as StrategicGoalResponse
@@ -261,7 +294,7 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
                 "deleted_by_user_id",
                 "deleted_by_device_id"
             ]
-        } else if obj.contains_key("project_id") && obj.contains_key("kpi") && obj.contains_key("target_value") {
+        } else if obj.contains_key("kpi") && obj.contains_key("target_value") && obj.contains_key("actual_value") {
             log::debug!("[CSV_WRITER] Using activity field extraction");
             // Activity fields
             vec![
@@ -271,8 +304,78 @@ impl<W: AsyncWrite + Unpin + Send> StreamingCsvWriter<W> {
                 "kpi",
                 "target_value",
                 "actual_value",
-                "progress_percentage",
                 "status_id",
+                "sync_priority",
+                "created_at",
+                "updated_at",
+                "created_by_user_id",
+                "created_by_device_id",
+                "updated_by_user_id",
+                "updated_by_device_id",
+                "deleted_at",
+                "deleted_by_user_id",
+                "deleted_by_device_id"
+            ]
+        } else if obj.contains_key("contact_person") && obj.contains_key("first_donation_date") && obj.contains_key("country") {
+            log::debug!("[CSV_WRITER] Using donor field extraction");
+            // Donor fields
+            vec![
+                "id",
+                "name",
+                "type_",
+                "contact_person",
+                "email",
+                "phone",
+                "country",
+                "first_donation_date",
+                "notes",
+                "created_at",
+                "updated_at",
+                "created_by_user_id",
+                "created_by_device_id",
+                "updated_by_user_id",
+                "updated_by_device_id",
+                "deleted_at",
+                "deleted_by_user_id",
+                "deleted_by_device_id"
+            ]
+        } else if obj.contains_key("donor_id") && obj.contains_key("grant_id") && obj.contains_key("currency") && obj.contains_key("amount") {
+            log::debug!("[CSV_WRITER] Using funding field extraction");
+            // Funding fields
+            vec![
+                "id",
+                "project_id",
+                "donor_id",
+                "grant_id",
+                "amount",
+                "currency",
+                "start_date",
+                "end_date",
+                "status",
+                "reporting_requirements",
+                "notes",
+                "created_at",
+                "updated_at",
+                "created_by_user_id",
+                "created_by_device_id",
+                "updated_by_user_id",
+                "updated_by_device_id",
+                "deleted_at",
+                "deleted_by_user_id",
+                "deleted_by_device_id"
+            ]
+        } else if obj.contains_key("type_") && obj.contains_key("initial_grant_amount") && obj.contains_key("initial_grant_date") && obj.contains_key("sync_priority") {
+            log::debug!("[CSV_WRITER] Using livelihood field extraction");
+            // Livelihood fields
+            vec![
+                "id",
+                "participant_id",
+                "project_id",
+                "type_",
+                "description",
+                "status_id",
+                "initial_grant_date",
+                "initial_grant_amount",
                 "sync_priority",
                 "created_at",
                 "updated_at",

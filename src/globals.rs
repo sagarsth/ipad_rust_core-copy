@@ -311,9 +311,16 @@ pub fn get_activity_entity_merger() -> FFIResult<Arc<ActivityEntityMerger>> {
 pub fn get_project_funding_repo() -> FFIResult<Arc<dyn ProjectFundingRepository>> {
     PROJECT_FUNDING_REPO.lock().map_err(|_| FFIError::internal("PROJECT_FUNDING_REPO lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFundingRepository not initialized".to_string()))
 }
+
+// Alias for export compatibility
+pub fn get_funding_repo() -> FFIResult<Arc<dyn ProjectFundingRepository>> {
+    get_project_funding_repo()
+}
+
 pub fn get_project_funding_delete_service() -> FFIResult<Arc<dyn DeleteService<ProjectFunding>>> {
     DELETE_SERVICE_PROJECT_FUNDING.lock().map_err(|_| FFIError::internal("DELETE_SERVICE_PROJECT_FUNDING lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFunding DeleteService not initialized".to_string()))
 }
+
 pub fn get_project_funding_entity_merger() -> FFIResult<Arc<FundingEntityMerger>> {
     PROJECT_FUNDING_ENTITY_MERGER.lock().map_err(|_| FFIError::internal("PROJECT_FUNDING_ENTITY_MERGER lock poisoned".to_string()))?.clone().ok_or_else(|| FFIError::internal("ProjectFundingEntityMerger not initialized".to_string()))
 }

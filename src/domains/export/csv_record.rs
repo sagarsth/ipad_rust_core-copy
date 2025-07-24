@@ -204,12 +204,11 @@ impl CsvRecord for crate::domains::export::repository_v2::ActivityExport {
     fn headers() -> Vec<&'static str> {
         vec![
             "id",
-            "project_id",
+            "project_id", 
             "description",
             "kpi",
             "target_value",
-            "actual_value",
-            "progress_percentage",
+            "actual_value", 
             "status_id",
             "sync_priority",
             "created_at",
@@ -228,22 +227,169 @@ impl CsvRecord for crate::domains::export::repository_v2::ActivityExport {
         vec![
             self.id.to_string(),
             csv_optional_uuid_to_string(&self.project_id),
-            csv_optional_to_string(&self.description),
-            csv_optional_to_string(&self.kpi),
-            csv_optional_to_string(&self.target_value),
-            csv_optional_to_string(&self.actual_value),
-            csv_optional_to_string(&self.progress_percentage()),
-            csv_optional_to_string(&self.status_id),
-            csv_optional_to_string(&self.sync_priority),
+            self.description.clone().unwrap_or_default(),
+            self.kpi.clone().unwrap_or_default(),
+            self.target_value.map(|v| v.to_string()).unwrap_or_default(),
+            self.actual_value.map(|v| v.to_string()).unwrap_or_default(),
+            self.status_id.map(|v| v.to_string()).unwrap_or_default(),
+            self.sync_priority.clone().unwrap_or_default(),
             csv_datetime_to_string(&self.created_at),
             csv_datetime_to_string(&self.updated_at),
             csv_optional_uuid_to_string(&self.created_by_user_id),
             csv_optional_uuid_to_string(&self.created_by_device_id),
             csv_optional_uuid_to_string(&self.updated_by_user_id),
             csv_optional_uuid_to_string(&self.updated_by_device_id),
-            self.deleted_at.as_ref().map(|dt| csv_datetime_to_string(dt)).unwrap_or_default(),
+            self.deleted_at.as_ref().map(|d| csv_datetime_to_string(d)).unwrap_or_default(),
             csv_optional_uuid_to_string(&self.deleted_by_user_id),
-            csv_optional_uuid_to_string(&self.deleted_by_device_id)
+            csv_optional_uuid_to_string(&self.deleted_by_device_id),
+        ]
+    }
+}
+
+impl CsvRecord for crate::domains::export::repository_v2::DonorExport {
+    fn headers() -> Vec<&'static str> {
+        vec![
+            "id",
+            "name",
+            "type_",
+            "contact_person",
+            "email",
+            "phone",
+            "country",
+            "first_donation_date",
+            "notes",
+            "created_at",
+            "updated_at",
+            "created_by_user_id",
+            "created_by_device_id",
+            "updated_by_user_id",
+            "updated_by_device_id",
+            "deleted_at",
+            "deleted_by_user_id",
+            "deleted_by_device_id"
+        ]
+    }
+    
+    fn to_csv(&self) -> Vec<String> {
+        vec![
+            self.id.to_string(),
+            self.name.clone(),
+            self.type_.clone().unwrap_or_default(),
+            self.contact_person.clone().unwrap_or_default(),
+            self.email.clone().unwrap_or_default(),
+            self.phone.clone().unwrap_or_default(),
+            self.country.clone().unwrap_or_default(),
+            self.first_donation_date.clone().unwrap_or_default(),
+            self.notes.clone().unwrap_or_default(),
+            self.created_at.to_rfc3339(),
+            self.updated_at.to_rfc3339(),
+            self.created_by_user_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.created_by_device_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.updated_by_user_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.updated_by_device_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.deleted_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
+            self.deleted_by_user_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.deleted_by_device_id.map(|u| u.to_string()).unwrap_or_default(),
+        ]
+    }
+}
+
+impl CsvRecord for crate::domains::export::repository_v2::FundingExport {
+    fn headers() -> Vec<&'static str> {
+        vec![
+            "id",
+            "project_id",
+            "donor_id",
+            "grant_id",
+            "amount",
+            "currency",
+            "start_date",
+            "end_date",
+            "status",
+            "reporting_requirements",
+            "notes",
+            "created_at",
+            "updated_at",
+            "created_by_user_id",
+            "created_by_device_id",
+            "updated_by_user_id",
+            "updated_by_device_id",
+            "deleted_at",
+            "deleted_by_user_id",
+            "deleted_by_device_id"
+        ]
+    }
+    
+    fn to_csv(&self) -> Vec<String> {
+        vec![
+            self.id.to_string(),
+            self.project_id.to_string(),
+            self.donor_id.to_string(),
+            self.grant_id.clone().unwrap_or_default(),
+            self.amount.map(|v| v.to_string()).unwrap_or_default(),
+            self.currency.clone(),
+            self.start_date.clone().unwrap_or_default(),
+            self.end_date.clone().unwrap_or_default(),
+            self.status.clone().unwrap_or_default(),
+            self.reporting_requirements.clone().unwrap_or_default(),
+            self.notes.clone().unwrap_or_default(),
+            self.created_at.to_rfc3339(),
+            self.updated_at.to_rfc3339(),
+            self.created_by_user_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.created_by_device_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.updated_by_user_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.updated_by_device_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.deleted_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
+            self.deleted_by_user_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.deleted_by_device_id.map(|u| u.to_string()).unwrap_or_default(),
+        ]
+    }
+}
+
+impl CsvRecord for crate::domains::export::repository_v2::LivelihoodExport {
+    fn headers() -> Vec<&'static str> {
+        vec![
+            "id",
+            "participant_id",
+            "project_id",
+            "type_",
+            "description",
+            "status_id",
+            "initial_grant_date",
+            "initial_grant_amount",
+            "sync_priority",
+            "created_at",
+            "updated_at",
+            "created_by_user_id",
+            "created_by_device_id",
+            "updated_by_user_id",
+            "updated_by_device_id",
+            "deleted_at",
+            "deleted_by_user_id",
+            "deleted_by_device_id"
+        ]
+    }
+    
+    fn to_csv(&self) -> Vec<String> {
+        vec![
+            self.id.to_string(),
+            self.participant_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.project_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.type_.clone(),
+            self.description.clone().unwrap_or_default(),
+            self.status_id.map(|v| v.to_string()).unwrap_or_default(),
+            self.initial_grant_date.clone().unwrap_or_default(),
+            self.initial_grant_amount.map(|v| v.to_string()).unwrap_or_default(),
+            self.sync_priority.clone(),
+            self.created_at.to_rfc3339(),
+            self.updated_at.to_rfc3339(),
+            self.created_by_user_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.created_by_device_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.updated_by_user_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.updated_by_device_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.deleted_at.map(|d| d.to_rfc3339()).unwrap_or_default(),
+            self.deleted_by_user_id.map(|u| u.to_string()).unwrap_or_default(),
+            self.deleted_by_device_id.map(|u| u.to_string()).unwrap_or_default(),
         ]
     }
 }

@@ -189,6 +189,30 @@ impl ExportServiceV2 {
                 // Workshops: limit to 1000 without blobs
                 !request.include_blobs
             }
+            EntityFilter::LivelihoodsByIds { ids } => {
+                // Limit: 1000 items max for livelihoods
+                if request.include_blobs {
+                    ids.len() <= 1000 // With attachments: 1000 max
+                } else {
+                    ids.len() <= 1000 // Without attachments: 1000 max
+                }
+            }
+            EntityFilter::DonorsByIds { ids } => {
+                // Limit: 1000 items max for donors
+                if request.include_blobs {
+                    ids.len() <= 1000 // With attachments: 1000 max
+                } else {
+                    ids.len() <= 1000 // Without attachments: 1000 max
+                }
+            }
+            EntityFilter::FundingByIds { ids } => {
+                // Limit: 1000 items max for fundings
+                if request.include_blobs {
+                    ids.len() <= 1000 // With attachments: 1000 max
+                } else {
+                    ids.len() <= 1000 // Without attachments: 1000 max
+                }
+            }
             // Other filters: only simple cases without blobs
             _ => !request.include_blobs && matches!(&request.format, Some(ExportFormat::Csv { .. }) | None)
         }
@@ -316,6 +340,9 @@ impl ExportServiceV2 {
             Some(EntityFilter::ProjectsByIds { ids }) => (ids.clone(), "projects"),
             Some(EntityFilter::ParticipantsByIds { ids }) => (ids.clone(), "participants"),
             Some(EntityFilter::ActivitiesByIds { ids }) => (ids.clone(), "activities"),
+            Some(EntityFilter::DonorsByIds { ids }) => (ids.clone(), "donors"),
+            Some(EntityFilter::FundingByIds { ids }) => (ids.clone(), "fundings"),
+            Some(EntityFilter::LivelihoodsByIds { ids }) => (ids.clone(), "livelihoods"),
             _ => {
                 log::warn!("CSV with ZIP structure only supports entity ID-based filters currently");
                 return Err(ServiceError::ValidationError("CSV ZIP export only supports entity ID-based filters currently".to_string()));
@@ -326,6 +353,26 @@ impl ExportServiceV2 {
         let csv_path = temp_path.join(&csv_filename);
         
         log::debug!("Creating enhanced CSV export with document associations at: {}", csv_path.display());
+
+        // For CSV with document associations, we'll collect entities through streaming
+        // to ensure we get all the data we need for document metadata
+        let stream = self.create_entity_stream(&request.filters, progress_tx.clone()).await?;
+        
+        // Collect entities from stream for processing
+        let mut entities = Vec::new();
+        tokio::pin!(stream);
+        
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(entity) => entities.push(entity),
+                Err(e) => {
+                    return Err(ServiceError::InternalError(format!("Stream error: {}", e)));
+                }
+            }
+        }
+
+        // Determine the entity count for return
+        let entity_count = entities.len() as i64;
 
         // Create CSV file with document metadata columns
         let csv_file = File::create(&csv_path).await.map_err(|e| ServiceError::InternalError(e.to_string()))?;
@@ -576,6 +623,9 @@ impl ExportServiceV2 {
             Some(EntityFilter::ProjectsByIds { ids }) => (ids.clone(), "projects"),
             Some(EntityFilter::ParticipantsByIds { ids }) => (ids.clone(), "participants"),
             Some(EntityFilter::ActivitiesByIds { ids }) => (ids.clone(), "activities"),
+            Some(EntityFilter::DonorsByIds { ids }) => (ids.clone(), "donors"),
+            Some(EntityFilter::FundingByIds { ids }) => (ids.clone(), "fundings"),
+            Some(EntityFilter::LivelihoodsByIds { ids }) => (ids.clone(), "livelihoods"),
             _ => {
                 return Err(ServiceError::ValidationError("Parquet ZIP export only supports entity ID-based filters".to_string()));
             }
@@ -903,6 +953,18 @@ impl ExportServiceV2 {
                 
                 Ok(ExportSummary { job })
             }
+            Some(EntityFilter::DonorsByIds { .. }) => {
+                // Donors export is not yet implemented with structured ZIP
+                Err(ServiceError::ValidationError("Donors export with ZIP structure not yet implemented".to_string()))
+            }
+            Some(EntityFilter::FundingByIds { .. }) => {
+                // Funding export is not yet implemented with structured ZIP
+                Err(ServiceError::ValidationError("Funding export with ZIP structure not yet implemented".to_string()))
+            }
+            Some(EntityFilter::LivelihoodsByIds { .. }) => {
+                // Livelihood export is not yet implemented with structured ZIP
+                Err(ServiceError::ValidationError("Livelihood export with ZIP structure not yet implemented".to_string()))
+            }
             _ => {
                 // For other filters, fall back to simple JSONL export
                 Err(ServiceError::ValidationError("ZIP structure export only supports StrategicGoalsByIds, ProjectsByIds, ParticipantsByIds, and ActivitiesByIds filters currently".to_string()))
@@ -989,6 +1051,9 @@ impl ExportServiceV2 {
             Some(EntityFilter::ProjectsByIds { ids }) => (ids.clone(), "projects"),
             Some(EntityFilter::ParticipantsByIds { ids }) => (ids.clone(), "participants"),
             Some(EntityFilter::ActivitiesByIds { ids }) => (ids.clone(), "activities"),
+            Some(EntityFilter::DonorsByIds { ids }) => (ids.clone(), "donors"),
+            Some(EntityFilter::FundingByIds { ids }) => (ids.clone(), "fundings"),
+            Some(EntityFilter::LivelihoodsByIds { ids }) => (ids.clone(), "livelihoods"),
             _ => {
                 return Err(ServiceError::ValidationError("JSONL ZIP export only supports entity ID-based filters".to_string()));
             }
@@ -2122,6 +2187,36 @@ impl ExportServiceV2 {
 
         log::info!("Copied {} documents ({} bytes) for {} activities", copied_count, total_bytes, ids.len());
         Ok(total_bytes)
+    }
+
+    async fn compress_directory_to_zip(&self, dir: &Path, zip_name: &str) -> ServiceResult<()> {
+        let temp_dir = TempDir::new().map_err(|e| ServiceError::InternalError(format!("Failed to create temp dir: {}", e)))?;
+        let temp_path = temp_dir.path();
+
+        // Create a temporary directory for the zip
+        let zip_path = temp_path.join(zip_name);
+        tokio::fs::create_dir_all(&zip_path).await.map_err(|e| ServiceError::InternalError(format!("Failed to create zip directory: {}", e)))?;
+
+        // Copy files from the original directory to the zip directory
+        let mut copied_files = 0;
+        let mut total_bytes = 0;
+
+        let mut read_dir = tokio::fs::read_dir(dir).await.map_err(|e| ServiceError::InternalError(format!("Failed to read directory: {}", e)))?;
+        while let Some(entry) = read_dir.next_entry().await.map_err(|e| ServiceError::InternalError(format!("Failed to read directory entry: {}", e)))? {
+            let path = entry.path();
+
+            if path.is_file() {
+                let relative_path = path.strip_prefix(dir).map_err(|e| ServiceError::InternalError(format!("Failed to get relative path: {}", e)))?;
+                let dest_path = zip_path.join(relative_path);
+                tokio::fs::create_dir_all(dest_path.parent().unwrap()).await.map_err(|e| ServiceError::InternalError(format!("Failed to create parent directory: {}", e)))?;
+                tokio::fs::copy(&path, &dest_path).await.map_err(|e| ServiceError::InternalError(format!("Failed to copy file: {}", e)))?;
+                copied_files += 1;
+                total_bytes += tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+            }
+        }
+
+        log::info!("Copied {} files and {} bytes to zip", copied_files, total_bytes);
+        Ok(())
     }
 }
 

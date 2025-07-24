@@ -644,6 +644,219 @@ impl SqliteStreamingRepository {
         log::debug!("[ACTIVITY_STREAM_BY_IDS] Successfully loaded {} activities", activities.len());
         Ok(activities)
     }
+
+    async fn stream_donors(
+        &self,
+        cursor: Option<Uuid>,
+        limit: usize,
+    ) -> ServiceResult<Vec<DonorExport>> {
+        log::debug!("[DONOR_STREAM] Starting donor stream with cursor: {:?}, limit: {}", cursor, limit);
+        
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT id, name, type_, contact_person, email, phone, country, first_donation_date, notes, \
+             created_at, updated_at, created_by_user_id, created_by_device_id, \
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
+             FROM donors WHERE deleted_at IS NULL "
+        );
+        
+        if let Some(cursor_id) = cursor {
+            query.push(" AND id > ");
+            query.push_bind(cursor_id.to_string());
+        }
+        
+        query.push(" ORDER BY id ASC LIMIT ");
+        query.push_bind(limit as i64);
+
+        let rows = query.build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+
+        let donors = rows.into_iter()
+            .map(|row| DonorExport::from_row(&row))
+            .collect::<ServiceResult<Vec<_>>>()?;
+
+        log::debug!("[DONOR_STREAM] Successfully loaded {} donors", donors.len());
+        Ok(donors)
+    }
+
+    async fn stream_donors_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> ServiceResult<Vec<DonorExport>> {
+        log::debug!("[DONOR_STREAM_BY_IDS] Starting stream for {} donor IDs", ids.len());
+        
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT id, name, type_, contact_person, email, phone, country, first_donation_date, notes, \
+             created_at, updated_at, created_by_user_id, created_by_device_id, \
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
+             FROM donors WHERE deleted_at IS NULL AND id IN ("
+        );
+        
+        let mut separated = query.separated(", ");
+        for id in ids {
+            separated.push_bind(id.to_string());
+        }
+        separated.push_unseparated(") ORDER BY id ASC");
+
+        let rows = query.build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+
+        let donors = rows.into_iter()
+            .map(|row| DonorExport::from_row(&row))
+            .collect::<ServiceResult<Vec<_>>>()?;
+
+        log::debug!("[DONOR_STREAM_BY_IDS] Successfully loaded {} donors", donors.len());
+        Ok(donors)
+    }
+
+    async fn stream_fundings(
+        &self,
+        cursor: Option<Uuid>,
+        limit: usize,
+    ) -> ServiceResult<Vec<FundingExport>> {
+        log::debug!("[FUNDING_STREAM] Starting funding stream with cursor: {:?}, limit: {}", cursor, limit);
+        
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT id, project_id, donor_id, grant_id, amount, currency, start_date, end_date, status, \
+             reporting_requirements, notes, created_at, updated_at, created_by_user_id, created_by_device_id, \
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
+             FROM project_funding WHERE deleted_at IS NULL "
+        );
+        
+        if let Some(cursor_id) = cursor {
+            query.push(" AND id > ");
+            query.push_bind(cursor_id.to_string());
+        }
+        
+        query.push(" ORDER BY id ASC LIMIT ");
+        query.push_bind(limit as i64);
+
+        let rows = query.build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+
+        let fundings = rows.into_iter()
+            .map(|row| FundingExport::from_row(&row))
+            .collect::<ServiceResult<Vec<_>>>()?;
+
+        log::debug!("[FUNDING_STREAM] Successfully loaded {} fundings", fundings.len());
+        Ok(fundings)
+    }
+
+    async fn stream_fundings_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> ServiceResult<Vec<FundingExport>> {
+        log::debug!("[FUNDING_STREAM_BY_IDS] Starting stream for {} funding IDs", ids.len());
+        
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT id, project_id, donor_id, grant_id, amount, currency, start_date, end_date, status, \
+             reporting_requirements, notes, created_at, updated_at, created_by_user_id, created_by_device_id, \
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
+             FROM project_funding WHERE deleted_at IS NULL AND id IN ("
+        );
+        
+        let mut separated = query.separated(", ");
+        for id in ids {
+            separated.push_bind(id.to_string());
+        }
+        separated.push_unseparated(") ORDER BY id ASC");
+
+        let rows = query.build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+
+        let fundings = rows.into_iter()
+            .map(|row| FundingExport::from_row(&row))
+            .collect::<ServiceResult<Vec<_>>>()?;
+
+        log::debug!("[FUNDING_STREAM_BY_IDS] Successfully loaded {} fundings", fundings.len());
+        Ok(fundings)
+    }
+
+    async fn stream_livelihoods(
+        &self,
+        cursor: Option<Uuid>,
+        limit: usize,
+    ) -> ServiceResult<Vec<LivelihoodExport>> {
+        log::debug!("[LIVELIHOOD_STREAM] Starting livelihood stream with cursor: {:?}, limit: {}", cursor, limit);
+        
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT id, participant_id, project_id, type_, description, status_id, initial_grant_date, \
+             initial_grant_amount, sync_priority, created_at, updated_at, created_by_user_id, created_by_device_id, \
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
+             FROM livelihoods WHERE deleted_at IS NULL "
+        );
+        
+        if let Some(cursor_id) = cursor {
+            query.push(" AND id > ");
+            query.push_bind(cursor_id.to_string());
+        }
+        
+        query.push(" ORDER BY id ASC LIMIT ");
+        query.push_bind(limit as i64);
+
+        let rows = query.build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+
+        let livelihoods = rows.into_iter()
+            .map(|row| LivelihoodExport::from_row(&row))
+            .collect::<ServiceResult<Vec<_>>>()?;
+
+        log::debug!("[LIVELIHOOD_STREAM] Successfully loaded {} livelihoods", livelihoods.len());
+        Ok(livelihoods)
+    }
+
+    async fn stream_livelihoods_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> ServiceResult<Vec<LivelihoodExport>> {
+        log::debug!("[LIVELIHOOD_STREAM_BY_IDS] Starting stream for {} livelihood IDs", ids.len());
+        
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut query = sqlx::QueryBuilder::new(
+            "SELECT id, participant_id, project_id, type_, description, status_id, initial_grant_date, \
+             initial_grant_amount, sync_priority, created_at, updated_at, created_by_user_id, created_by_device_id, \
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
+             FROM livelihoods WHERE deleted_at IS NULL AND id IN ("
+        );
+        
+        let mut separated = query.separated(", ");
+        for id in ids {
+            separated.push_bind(id.to_string());
+        }
+        separated.push_unseparated(") ORDER BY id ASC");
+
+        let rows = query.build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+
+        let livelihoods = rows.into_iter()
+            .map(|row| LivelihoodExport::from_row(&row))
+            .collect::<ServiceResult<Vec<_>>>()?;
+
+        log::debug!("[LIVELIHOOD_STREAM_BY_IDS] Successfully loaded {} livelihoods", livelihoods.len());
+        Ok(livelihoods)
+    }
 }
 
 #[async_trait]
@@ -759,6 +972,54 @@ impl StreamingExportRepository for SqliteStreamingRepository {
                 Ok(row.get::<i64, _>("count") as usize)
             }
             EntityFilter::ActivitiesByIds { ids } => {
+                // For ID-based filters, return the count of IDs (limited to actual available IDs)
+                if ids.is_empty() {
+                    return Ok(0);
+                }
+                let limited_count = std::cmp::min(ids.len(), 1000);
+                Ok(limited_count)
+            }
+            EntityFilter::DonorsAll => {
+                let query = "SELECT COUNT(*) as count FROM donors WHERE deleted_at IS NULL";
+                let row = sqlx::query(query)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+                Ok(row.get::<i64, _>("count") as usize)
+            }
+            EntityFilter::DonorsByIds { ids } => {
+                // For ID-based filters, return the count of IDs (limited to actual available IDs)
+                if ids.is_empty() {
+                    return Ok(0);
+                }
+                let limited_count = std::cmp::min(ids.len(), 1000);
+                Ok(limited_count)
+            }
+            EntityFilter::FundingAll => {
+                let query = "SELECT COUNT(*) as count FROM project_funding WHERE deleted_at IS NULL";
+                let row = sqlx::query(query)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+                Ok(row.get::<i64, _>("count") as usize)
+            }
+            EntityFilter::FundingByIds { ids } => {
+                // For ID-based filters, return the count of IDs (limited to actual available IDs)
+                if ids.is_empty() {
+                    return Ok(0);
+                }
+                let limited_count = std::cmp::min(ids.len(), 1000);
+                Ok(limited_count)
+            }
+            EntityFilter::LivelihoodsAll => {
+                let query = "SELECT COUNT(*) as count FROM livelihoods WHERE deleted_at IS NULL";
+                let row = sqlx::query(query)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| ServiceError::DatabaseError(e.to_string()))?;
+                Ok(row.get::<i64, _>("count") as usize)
+            }
+            EntityFilter::LivelihoodsByIds { ids } => {
                 // For ID-based filters, return the count of IDs (limited to actual available IDs)
                 if ids.is_empty() {
                     return Ok(0);
@@ -988,6 +1249,144 @@ impl StreamingExportRepository for SqliteStreamingRepository {
                             Ok(activities) => {
                                 let json_results: Result<Vec<_>, _> = activities.into_iter()
                                     .map(|a| a.to_json())
+                                    .collect();
+                                match json_results {
+                                    Ok(json_vec) => json_vec,
+                                    Err(e) => {
+                                        log::error!("JSON conversion error: {}", e);
+                                        let _ = tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Database query error: {}", e);
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                    }
+                    EntityFilter::DonorsAll => {
+                        let repo = SqliteStreamingRepository { pool: pool.clone() };
+                        match repo.stream_donors(cursor, batch_size).await {
+                            Ok(donors) => {
+                                let json_results: Result<Vec<_>, _> = donors.into_iter()
+                                    .map(|d| d.to_json())
+                                    .collect();
+                                match json_results {
+                                    Ok(json_vec) => json_vec,
+                                    Err(e) => {
+                                        log::error!("JSON conversion error: {}", e);
+                                        let _ = tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Database query error: {}", e);
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                    }
+                    EntityFilter::DonorsByIds { ids } => {
+                        let repo = SqliteStreamingRepository { pool: pool.clone() };
+                        match repo.stream_donors_by_ids(&ids).await {
+                            Ok(donors) => {
+                                let json_results: Result<Vec<_>, _> = donors.into_iter()
+                                    .map(|d| d.to_json())
+                                    .collect();
+                                match json_results {
+                                    Ok(json_vec) => json_vec,
+                                    Err(e) => {
+                                        log::error!("JSON conversion error: {}", e);
+                                        let _ = tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Database query error: {}", e);
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                    }
+                    EntityFilter::FundingAll => {
+                        let repo = SqliteStreamingRepository { pool: pool.clone() };
+                        match repo.stream_fundings(cursor, batch_size).await {
+                            Ok(fundings) => {
+                                let json_results: Result<Vec<_>, _> = fundings.into_iter()
+                                    .map(|f| f.to_json())
+                                    .collect();
+                                match json_results {
+                                    Ok(json_vec) => json_vec,
+                                    Err(e) => {
+                                        log::error!("JSON conversion error: {}", e);
+                                        let _ = tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Database query error: {}", e);
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                    }
+                    EntityFilter::FundingByIds { ids } => {
+                        let repo = SqliteStreamingRepository { pool: pool.clone() };
+                        match repo.stream_fundings_by_ids(&ids).await {
+                            Ok(fundings) => {
+                                let json_results: Result<Vec<_>, _> = fundings.into_iter()
+                                    .map(|f| f.to_json())
+                                    .collect();
+                                match json_results {
+                                    Ok(json_vec) => json_vec,
+                                    Err(e) => {
+                                        log::error!("JSON conversion error: {}", e);
+                                        let _ = tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Database query error: {}", e);
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                    }
+                    EntityFilter::LivelihoodsAll => {
+                        let repo = SqliteStreamingRepository { pool: pool.clone() };
+                        match repo.stream_livelihoods(cursor, batch_size).await {
+                            Ok(livelihoods) => {
+                                let json_results: Result<Vec<_>, _> = livelihoods.into_iter()
+                                    .map(|l| l.to_json())
+                                    .collect();
+                                match json_results {
+                                    Ok(json_vec) => json_vec,
+                                    Err(e) => {
+                                        log::error!("JSON conversion error: {}", e);
+                                        let _ = tx.send(Err(e)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Database query error: {}", e);
+                                let _ = tx.send(Err(e)).await;
+                                return;
+                            }
+                        }
+                    }
+                    EntityFilter::LivelihoodsByIds { ids } => {
+                        let repo = SqliteStreamingRepository { pool: pool.clone() };
+                        match repo.stream_livelihoods_by_ids(&ids).await {
+                            Ok(livelihoods) => {
+                                let json_results: Result<Vec<_>, _> = livelihoods.into_iter()
+                                    .map(|l| l.to_json())
                                     .collect();
                                 match json_results {
                                     Ok(json_vec) => json_vec,
@@ -1481,6 +1880,251 @@ impl ExportEntity for ActivityExport {
     fn to_json(&self) -> ServiceResult<serde_json::Value> {
         serde_json::to_value(self)
             .map_err(|e| ServiceError::SerializationError(e.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DonorExport {
+    pub id: Uuid,
+    pub name: String,
+    pub type_: Option<String>,
+    pub contact_person: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    pub country: Option<String>,
+    pub first_donation_date: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
+    pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
+}
+
+impl ExportEntity for DonorExport {
+    fn table_name() -> &'static str {
+        "donors"
+    }
+    
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> ServiceResult<Self> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.get::<String, _>("id"))
+                .map_err(|e| ServiceError::ValidationError(e.to_string()))?,
+            name: row.get("name"),
+            type_: row.get("type_"),
+            contact_person: row.get("contact_person"),
+            email: row.get("email"),
+            phone: row.get("phone"),
+            country: row.get("country"),
+            first_donation_date: row.get("first_donation_date"),
+            notes: row.get("notes"),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))
+                .map_err(|e| ServiceError::ValidationError(e.to_string()))?
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("updated_at"))
+                .map_err(|e| ServiceError::ValidationError(e.to_string()))?
+                .with_timezone(&chrono::Utc),
+            created_by_user_id: row.get::<Option<String>, _>("created_by_user_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            created_by_device_id: row.get::<Option<String>, _>("created_by_device_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            updated_by_user_id: row.get::<Option<String>, _>("updated_by_user_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            updated_by_device_id: row.get::<Option<String>, _>("updated_by_device_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            deleted_at: row.get::<Option<String>, _>("deleted_at")
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+            deleted_by_user_id: row.get::<Option<String>, _>("deleted_by_user_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            deleted_by_device_id: row.get::<Option<String>, _>("deleted_by_device_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+        })
+    }
+    
+    fn id(&self) -> Uuid {
+        self.id
+    }
+    
+    fn to_json(&self) -> ServiceResult<serde_json::Value> {
+        log::debug!("[DONOR_EXPORT] Converting donor to JSON: {}", self.id);
+        serde_json::to_value(self).map_err(|e| ServiceError::SerializationError(e.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FundingExport {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub donor_id: Uuid,
+    pub grant_id: Option<String>,
+    pub amount: Option<f64>,
+    pub currency: String,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub status: Option<String>,
+    pub reporting_requirements: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
+    pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
+}
+
+impl ExportEntity for FundingExport {
+    fn table_name() -> &'static str {
+        "project_funding"
+    }
+    
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> ServiceResult<Self> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.get::<String, _>("id"))
+                .map_err(|e| ServiceError::ValidationError(e.to_string()))?,
+            project_id: Uuid::parse_str(&row.get::<String, _>("project_id"))
+                .map_err(|e| ServiceError::ValidationError(e.to_string()))?,
+            donor_id: Uuid::parse_str(&row.get::<String, _>("donor_id"))
+                .map_err(|e| ServiceError::ValidationError(e.to_string()))?,
+            grant_id: row.get("grant_id"),
+            amount: row.get("amount"),
+            currency: row.get("currency"),
+            start_date: row.get("start_date"),
+            end_date: row.get("end_date"),
+            status: row.get("status"),
+            reporting_requirements: row.get("reporting_requirements"),
+            notes: row.get("notes"),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))
+                .map_err(|e| ServiceError::ValidationError(e.to_string()))?
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("updated_at"))
+                .map_err(|e| ServiceError::ValidationError(e.to_string()))?
+                .with_timezone(&chrono::Utc),
+            created_by_user_id: row.get::<Option<String>, _>("created_by_user_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            created_by_device_id: row.get::<Option<String>, _>("created_by_device_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            updated_by_user_id: row.get::<Option<String>, _>("updated_by_user_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            updated_by_device_id: row.get::<Option<String>, _>("updated_by_device_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            deleted_at: row.get::<Option<String>, _>("deleted_at")
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+            deleted_by_user_id: row.get::<Option<String>, _>("deleted_by_user_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+            deleted_by_device_id: row.get::<Option<String>, _>("deleted_by_device_id")
+                .and_then(|s| Uuid::parse_str(&s).ok()),
+        })
+    }
+    
+    fn id(&self) -> Uuid {
+        self.id
+    }
+    
+    fn to_json(&self) -> ServiceResult<serde_json::Value> {
+        log::debug!("[FUNDING_EXPORT] Converting funding to JSON: {}", self.id);
+        serde_json::to_value(self).map_err(|e| ServiceError::SerializationError(e.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LivelihoodExport {
+    pub id: Uuid,
+    pub participant_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub type_: String,
+    pub description: Option<String>,
+    pub status_id: Option<i64>,
+    pub initial_grant_date: Option<String>,
+    pub initial_grant_amount: Option<f64>,
+    pub sync_priority: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub created_by_user_id: Option<Uuid>,
+    pub created_by_device_id: Option<Uuid>,
+    pub updated_by_user_id: Option<Uuid>,
+    pub updated_by_device_id: Option<Uuid>,
+    pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub deleted_by_user_id: Option<Uuid>,
+    pub deleted_by_device_id: Option<Uuid>,
+}
+
+impl ExportEntity for LivelihoodExport {
+    fn table_name() -> &'static str {
+        "livelihoods"
+    }
+    
+    fn from_row(row: &sqlx::sqlite::SqliteRow) -> ServiceResult<Self> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.get::<String, _>("id"))
+                .map_err(|e| ServiceError::ValidationError(e.to_string()))?,
+            participant_id: row.get::<Option<String>, _>("participant_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid participant_id UUID: {}", e)))?,
+            project_id: row.get::<Option<String>, _>("project_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid project_id UUID: {}", e)))?,
+            type_: row.get("type_"),
+            description: row.get("description"),
+            status_id: row.get("status_id"),
+            initial_grant_date: row.get("initial_grant_date"),
+            initial_grant_amount: row.get("initial_grant_amount"),
+            sync_priority: row.get("sync_priority"),
+            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("created_at"))
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid created_at timestamp: {}", e)))?
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<String, _>("updated_at"))
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid updated_at timestamp: {}", e)))?
+                .with_timezone(&chrono::Utc),
+            created_by_user_id: row.get::<Option<String>, _>("created_by_user_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid created_by_user_id UUID: {}", e)))?,
+            created_by_device_id: row.get::<Option<String>, _>("created_by_device_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid created_by_device_id UUID: {}", e)))?,
+            updated_by_user_id: row.get::<Option<String>, _>("updated_by_user_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid updated_by_user_id UUID: {}", e)))?,
+            updated_by_device_id: row.get::<Option<String>, _>("updated_by_device_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid updated_by_device_id UUID: {}", e)))?,
+            deleted_at: row.get::<Option<String>, _>("deleted_at")
+                .map(|s| chrono::DateTime::parse_from_rfc3339(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid deleted_at timestamp: {}", e)))?
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+            deleted_by_user_id: row.get::<Option<String>, _>("deleted_by_user_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid deleted_by_user_id UUID: {}", e)))?,
+            deleted_by_device_id: row.get::<Option<String>, _>("deleted_by_device_id")
+                .map(|s| Uuid::parse_str(&s))
+                .transpose()
+                .map_err(|e| ServiceError::ValidationError(format!("Invalid deleted_by_device_id UUID: {}", e)))?,
+        })
+    }
+    
+    fn id(&self) -> Uuid {
+        self.id
+    }
+    
+    fn to_json(&self) -> ServiceResult<serde_json::Value> {
+        log::debug!("[LIVELIHOOD_EXPORT] Converting livelihood to JSON: {}", self.id);
+        serde_json::to_value(self).map_err(|e| ServiceError::SerializationError(e.to_string()))
     }
 }
 
