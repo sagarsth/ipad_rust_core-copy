@@ -89,9 +89,92 @@ class ActivityService {
         targetPath: String,
         token: String
     ) async throws -> ExportJobResponse {
-        // Note: This would need to be implemented similarly to ProjectService
-        // when the FFI function is added to the Rust backend
-        throw FFIError.rustError("Export functionality not yet implemented for activities")
+        return try await withCheckedThrowingContinuation { continuation in
+            let exportOptions = ActivityExportByIdsOptions(
+                ids: ids,
+                includeBlobs: includeBlobs,
+                targetPath: targetPath,
+                format: format
+            )
+            
+            guard let optionsData = try? JSONEncoder().encode(exportOptions),
+                  let optionsString = String(data: optionsData, encoding: .utf8) else {
+                continuation.resume(throwing: FFIError.stringConversionFailed)
+                return
+            }
+            
+            print("🚀 [ACTIVITY_EXPORT_SERVICE] Calling backend with format: \(format.displayName)")
+            print("🚀 [ACTIVITY_EXPORT_SERVICE] Export options JSON: \(optionsString)")
+            
+            var result: UnsafeMutablePointer<CChar>?
+            
+            let status = optionsString.withCString { optionsCStr in
+                token.withCString { tokenCStr in
+                    export_activities_by_ids(optionsCStr, tokenCStr, &result)
+                }
+            }
+            
+            if status == 0, let resultPtr = result {
+                let resultString = String(cString: resultPtr)
+                export_free(resultPtr)
+                
+                do {
+                    let exportResponse = try JSONDecoder().decode(ExportJobResponse.self, from: Data(resultString.utf8))
+                    print("✅ [ACTIVITY_EXPORT_SERVICE] Export job created: \(exportResponse.job.id)")
+                    continuation.resume(returning: exportResponse)
+                } catch {
+                    print("❌ [ACTIVITY_EXPORT_SERVICE] Failed to decode export response: \(error)")
+                    continuation.resume(throwing: FFIError.rustError("Failed to decode export response: \(error.localizedDescription)"))
+                }
+            } else {
+                if let resultPtr = result {
+                    let errorString = String(cString: resultPtr)
+                    export_free(resultPtr)
+                    print("❌ [ACTIVITY_EXPORT_SERVICE] Backend error: \(errorString)")
+                    continuation.resume(throwing: FFIError.rustError("Export failed: \(errorString)"))
+                } else {
+                    print("❌ [ACTIVITY_EXPORT_SERVICE] Unknown export error")
+                    continuation.resume(throwing: FFIError.rustError("Export failed: Unknown error"))
+                }
+            }
+        }
+    }
+    
+    /// Get export job status
+    func getExportStatus(jobId: String) async throws -> ExportJobResponse {
+        return try await withCheckedThrowingContinuation { continuation in
+            print("🔄 [ACTIVITY_EXPORT_STATUS] Checking status for job: \(jobId)")
+            
+            var result: UnsafeMutablePointer<CChar>?
+            
+            let status = jobId.withCString { jobIdCStr in
+                export_get_status(jobIdCStr, &result)
+            }
+            
+            if status == 0, let resultPtr = result {
+                let resultString = String(cString: resultPtr)
+                export_free(resultPtr)
+                
+                do {
+                    let exportResponse = try JSONDecoder().decode(ExportJobResponse.self, from: Data(resultString.utf8))
+                    print("✅ [ACTIVITY_EXPORT_STATUS] Status retrieved: \(exportResponse.job.status)")
+                    continuation.resume(returning: exportResponse)
+                } catch {
+                    print("❌ [ACTIVITY_EXPORT_STATUS] Failed to decode status response: \(error)")
+                    continuation.resume(throwing: FFIError.rustError("Failed to decode status response: \(error.localizedDescription)"))
+                }
+            } else {
+                if let resultPtr = result {
+                    let errorString = String(cString: resultPtr)
+                    export_free(resultPtr)
+                    print("❌ [ACTIVITY_EXPORT_STATUS] Backend error: \(errorString)")
+                    continuation.resume(throwing: FFIError.rustError("Status check failed: \(errorString)"))
+                } else {
+                    print("❌ [ACTIVITY_EXPORT_STATUS] Unknown status error")
+                    continuation.resume(throwing: FFIError.rustError("Status check failed: Unknown error"))
+                }
+            }
+        }
     }
     
     // MARK: - Analytics Operations

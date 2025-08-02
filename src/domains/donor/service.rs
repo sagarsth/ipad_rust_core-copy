@@ -9,7 +9,11 @@ use crate::domains::donor::repository::DonorRepository;
 use crate::domains::donor::types::{
     Donor, NewDonor, DonorResponse, UpdateDonor, DonorInclude, DonorSummary, 
     DonorDashboardStats, FundingSummaryStats, DonorWithFundingDetails, 
-    DonorWithDocumentTimeline, DonorFundingStats, UserDonorRole
+    DonorWithDocumentTimeline, DonorFundingStats, UserDonorRole,
+    DashboardTrendAnalysis, DonorActivityTimeline, DonorEngagementMetrics,
+    DonorDocumentTimeline, DonorDocumentSummary, DocumentComplianceStatus,
+    DonorFilter, DonorBulkOperationResult, DonorDuplicateInfo, DonorType,
+    DonorStatsSummary, DonorTrendAnalysis
 };
 use crate::domains::funding::repository::ProjectFundingRepository;
 use crate::domains::sync::repository::{ChangeLogRepository, TombstoneRepository};
@@ -21,6 +25,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use std::collections::HashMap;
 use chrono::{self, Utc, DateTime, Duration, Datelike};
+use sqlx::query_scalar;
+use std::str::FromStr;
 
 // Import necessary document types and services
 use crate::domains::document::repository::MediaDocumentRepository;
@@ -175,6 +181,113 @@ pub trait DonorService: DeleteService<Donor> + Send + Sync {
         include: Option<&[DonorInclude]>,
         auth: &AuthContext,
     ) -> ServiceResult<PaginatedResult<DonorResponse>>;
+
+    // === ADVANCED FILTERING ===
+    /// Find donor IDs by complex filter criteria - enables bulk operations
+    async fn find_donor_ids_by_filter(
+        &self,
+        filter: DonorFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>>;
+
+    /// Find donors by complex filter criteria with pagination
+    async fn find_donors_by_filter(
+        &self,
+        filter: DonorFilter,
+        params: PaginationParams,
+        include: Option<&[DonorInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<DonorResponse>>;
+
+    /// Performance-optimized version of find_donor_ids_by_filter
+    async fn find_donor_ids_by_filter_optimized(
+        &self,
+        filter: DonorFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>>;
+
+    // === BULK OPERATIONS ===
+    /// Bulk update sync priority for donors matching filter criteria
+    async fn bulk_update_sync_priority_by_filter(
+        &self,
+        filter: DonorFilter,
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<u64>;
+
+    /// Bulk update sync priority for specific donor IDs
+    async fn bulk_update_donor_sync_priority(
+        &self,
+        ids: Vec<Uuid>,
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<u64>;
+
+    /// Memory-efficient bulk update with streaming processing
+    async fn bulk_update_donors_streaming(
+        &self,
+        updates: Vec<(Uuid, UpdateDonor)>,
+        chunk_size: usize,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorBulkOperationResult>;
+
+    // === ENRICHMENT & ANALYTICS ===
+    /// Get donor engagement metrics
+    async fn get_donor_engagement_metrics(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorEngagementMetrics>;
+
+    /// Get comprehensive donor trend analysis
+    async fn get_donor_trend_analysis(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorTrendAnalysis>;
+
+    /// Get donor funding analytics
+    async fn get_donor_funding_analytics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, f64>>;
+
+    /// Get donor growth trends over time periods
+    async fn get_donor_growth_trends(
+        &self,
+        months: Option<i32>,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>>;
+
+    /// Get data quality report for dashboard alerts
+    async fn get_donor_data_quality_report(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, f64>>;
+
+    // === DUPLICATE DETECTION ===
+    /// Check for potential duplicate donors by name and return their details
+    async fn check_potential_duplicates(
+        &self,
+        name: &str,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<DonorDuplicateInfo>>;
+
+    // === PERFORMANCE OPTIMIZATION ===
+    /// Get database index optimization suggestions
+    async fn get_index_optimization_suggestions(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<String>>;
+
+    /// Enhanced donor creation with documents
+    async fn create_donor_with_documents_enhanced(
+        &self,
+        new_donor: NewDonor,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(DonorResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)>;
 }
 
 /// Implementation of the donor service
@@ -281,7 +394,7 @@ impl DonorServiceImpl {
             if include_funding_stats && response.active_fundings_count.is_none() {
                 match self.funding_repo.get_donor_funding_stats(response.id).await {
                     Ok((active_count, total_amount)) => {
-                        response = response.with_funding_stats(active_count, total_amount);
+                        response = response.with_funding_stats(active_count, total_amount, 0, 0.0, None);
                     },
                     Err(_) => {
                         // Stats calculation failed, but we shouldn't fail the overall response
@@ -330,6 +443,194 @@ impl DonorServiceImpl {
         }
 
         results
+    }
+
+    /// Comprehensive business rule validation for new donors
+    async fn validate_donor_business_rules(
+        &self,
+        new_donor: &NewDonor,
+        _current_state: Option<&Donor>,
+    ) -> ServiceResult<()> {
+        // 1. Log potential duplicates for information (but don't block creation)
+        if let Ok(existing_donors) = self.repo.find_by_type(&new_donor.type_.clone().unwrap_or_default(), 
+                                                           PaginationParams { page: 1, per_page: 1 }).await {
+            if !existing_donors.items.is_empty() {
+                log::info!("Found {} existing donors with same type '{}'. Allowing creation but logging for potential analysis.",
+                         existing_donors.total, new_donor.type_.as_ref().unwrap_or(&"Unknown".to_string()));
+            }
+        }
+
+        // 2. Validate donor type consistency
+        if let Some(donor_type) = &new_donor.type_ {
+            match DonorType::from_str(donor_type) {
+                Some(_) => {}, // Valid type
+                None => {
+                    return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                        "type_",
+                        &format!("Invalid donor type '{}'. Must be one of: {}", 
+                            donor_type, DonorType::all_variants().join(", "))
+                    ))));
+                }
+            }
+        }
+
+        // 3. Check name quality (business rule for data integrity)
+        if new_donor.name.len() < 2 {
+            return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                "name",
+                "Donor name is too short. Please provide a valid organization or person name."
+            ))));
+        }
+
+        // 4. Validate email format if provided
+        if let Some(email) = &new_donor.email {
+            if !email.contains('@') || !email.contains('.') {
+                return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                    "email",
+                    "Invalid email format. Please provide a valid email address."
+                ))));
+            }
+        }
+
+        // 5. Validate funding amount if this is a corporate donor
+        if let Some(donor_type) = &new_donor.type_ {
+            if donor_type == "Corporate" && new_donor.contact_person.is_none() {
+                log::warn!("Corporate donor '{}' created without contact person. Consider adding contact information.", new_donor.name);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Comprehensive business rule validation for donor updates
+    async fn validate_donor_business_rules_for_update(
+        &self,
+        update_data: &UpdateDonor,
+        current_donor: &Donor,
+    ) -> ServiceResult<()> {
+        // 1. Log potential name duplicates if name is being changed (but don't block)
+        if let Some(new_name) = &update_data.name {
+            if new_name != &current_donor.name {
+                log::info!("Updating donor {} name from '{}' to '{}'. Duplicate check will be performed within transaction.",
+                         current_donor.id, current_donor.name, new_name);
+            }
+        }
+
+        // 2. Validate type changes
+        if let Some(new_type) = &update_data.type_ {
+            if let Some(current_type) = &current_donor.type_ {
+                if new_type != current_type {
+                    log::warn!("Donor {} type changed from '{}' to '{}' by user {}. Consider reviewing associated funding records.",
+                             current_donor.id, current_type, new_type, update_data.updated_by_user_id);
+                }
+            }
+        }
+
+        // 3. Validate sync priority changes
+        if let Some(new_priority) = &update_data.sync_priority {
+            if new_priority == "never" {
+                log::warn!("Donor {} sync priority changed to Never by user {}. This will prevent synchronization.",
+                         current_donor.id, update_data.updated_by_user_id);
+            } else if new_priority == "high" {
+                log::info!("Donor {} sync priority changed to High by user {}",
+                         current_donor.id, update_data.updated_by_user_id);
+            }
+        }
+
+        // 4. Business rule: Email format validation
+        if let Some(new_email) = &update_data.email {
+            if !new_email.contains('@') || !new_email.contains('.') {
+                return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                    "email",
+                    "Invalid email format. Please provide a valid email address."
+                ))));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Comprehensive document upload validation for donors
+    async fn validate_document_upload(
+        &self,
+        file_data: &[u8],
+        filename: &str,
+        linked_field: &Option<String>,
+    ) -> ServiceResult<()> {
+        // 1. File size validation (business rule)
+        const MAX_FILE_SIZE: usize = 100 * 1024 * 1024; // 100MB for donor documents
+        if file_data.len() > MAX_FILE_SIZE {
+            return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                "file_size",
+                &format!("File size ({:.2} MB) exceeds maximum allowed size of 100 MB. Please compress or reduce the file size.",
+                    file_data.len() as f64 / 1024.0 / 1024.0)
+            ))));
+        }
+
+        // 2. Minimum file size validation
+        if file_data.len() < 100 {
+            return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                "file_size",
+                "File is too small to be a valid document. Please check the file and try again."
+            ))));
+        }
+
+        // 3. Filename validation
+        if filename.trim().is_empty() {
+            return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                "filename",
+                "Filename cannot be empty. Please provide a valid filename."
+            ))));
+        }
+
+        // 4. File extension validation
+        let extension = filename.split('.').last().unwrap_or("").to_lowercase();
+        let allowed_extensions = ["pdf", "jpg", "jpeg", "png", "doc", "docx", "txt", "rtf", "xls", "xlsx"];
+        if !allowed_extensions.contains(&extension.as_str()) {
+            return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                "file_extension",
+                &format!("File type '.{}' is not allowed. Supported formats: {}",
+                    extension, allowed_extensions.join(", "))
+            ))));
+        }
+
+        // 5. Linked field specific validation for donors
+        if let Some(field) = linked_field {
+            match field.as_str() {
+                "donor_agreement_ref" => {
+                    // Agreement documents should be PDF
+                    if extension != "pdf" {
+                        return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                            "file_extension",
+                            "Donor agreements must be PDF files for legal compliance."
+                        ))));
+                    }
+                }
+                "due_diligence_ref" => {
+                    // Due diligence documents should be PDF or Excel
+                    if !["pdf", "xls", "xlsx"].contains(&extension.as_str()) {
+                        return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                            "file_extension",
+                            "Due diligence documents must be PDF or Excel files."
+                        ))));
+                    }
+                }
+                "tax_information_ref" => {
+                    // Tax documents should be PDF
+                    if !["pdf", "jpg", "jpeg", "png"].contains(&extension.as_str()) {
+                        return Err(ServiceError::Domain(DomainError::Validation(ValidationError::format(
+                            "file_extension",
+                            "Tax documents must be PDF or image files."
+                        ))));
+                    }
+                }
+                _ => {
+                    // Other fields accept all allowed formats
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -394,15 +695,19 @@ impl DonorService for DonorServiceImpl {
         new_donor: NewDonor,
         auth: &AuthContext,
     ) -> ServiceResult<DonorResponse> {
+        // 1. Check permissions first
         auth.authorize(Permission::CreateDonors)?;
         
-        // Validate the input data
-        new_donor.validate()?;
+        // 2. Enhanced input validation
+        new_donor.validate().map_err(ServiceError::Domain)?;
         
-        // Call the repository to create the donor
-        let donor = self.repo.create(&new_donor, auth).await?;
+        // 3. Additional business rule validation
+        self.validate_donor_business_rules(&new_donor, None).await?;
         
-        // Enrich and return the response
+        // 4. Create the donor
+        let donor = self.repo.create(&new_donor, auth).await.map_err(ServiceError::Domain)?;
+        
+        // 5. Enrich and return the response
         self.enrich_response(donor.into(), None, auth).await
     }
 
@@ -505,23 +810,25 @@ impl DonorService for DonorServiceImpl {
         mut update_data: UpdateDonor,
         auth: &AuthContext,
     ) -> ServiceResult<DonorResponse> {
+        // 1. Check permissions first
         auth.authorize(Permission::EditDonors)?;
         
-        // Removed incorrect ID comparison logic as UpdateDonor has no id field
+        // 2. Set updated_by_user_id
+        update_data.updated_by_user_id = auth.user_id;
         
-        // Set updated_by_user_id if it exists on the struct
-        // Assuming UpdateDonor has `updated_by_user_id: Option<Uuid>` or similar
-        // update_data.updated_by_user_id = Some(auth.user_id);
-        // If not, the repository might handle this based on AuthContext.
-        // Let's assume repo handles it for now.
+        // 3. Enhanced input validation
+        update_data.validate().map_err(ServiceError::Domain)?;
         
-        // Validate the input data
-        update_data.validate()?;
-
-        // Call the repository to update the donor
-        let updated_donor = self.repo.update(id, &update_data, auth).await?;
+        // 4. Fetch current state BEFORE transaction for validation
+        let current_donor = self.repo.find_by_id(id).await.map_err(ServiceError::Domain)?;
         
-        // Enrich and return the response
+        // 5. Enhanced business rule validation with current state
+        self.validate_donor_business_rules_for_update(&update_data, &current_donor).await?;
+        
+        // 6. Proceed with update
+        let updated_donor = self.repo.update(id, &update_data, auth).await.map_err(ServiceError::Domain)?;
+        
+        // 7. Enrich and return the response
         self.enrich_response(updated_donor.into(), None, auth).await
     }
 
@@ -569,10 +876,17 @@ impl DonorService for DonorServiceImpl {
         compression_priority: Option<CompressionPriority>,
         auth: &AuthContext,
     ) -> ServiceResult<MediaDocumentResponse> {
+        // 1. Verify donor exists BEFORE starting document operations
+        let _donor = self.repo.find_by_id(donor_id).await.map_err(ServiceError::Domain)?;
+        
+        // 2. Check permissions
         auth.authorize(Permission::ViewDonors)?; // Need to view donor to link document
         auth.authorize(Permission::UploadDocuments)?; // Need permission to upload
 
-        // Validate linked_field using DocumentLinkable trait
+        // 3. Enhanced document upload validation
+        self.validate_document_upload(&file_data, &original_filename, &linked_field).await?;
+
+        // 4. Validate linked_field using DocumentLinkable trait
         if let Some(field_name) = &linked_field {
             let is_valid_linkable_field = Donor::field_metadata().iter().any(|meta| {
                 meta.field_name == field_name && meta.supports_documents
@@ -585,11 +899,8 @@ impl DonorService for DonorServiceImpl {
                  return Err(DomainError::Validation(validation_error).into()); 
             }
         }
-        
-        // Check if donor exists (implicitly done by document service's link validation)
-        // Alternatively, explicitly check: self.repo.find_by_id(donor_id).await?;
 
-        // Use the injected document service
+        // 5. Use the injected document service
         let result = self.document_service.upload_document(
             auth,
             file_data,
@@ -696,12 +1007,27 @@ impl DonorService for DonorServiceImpl {
             total_donors: donor_stats.total_donors,
             donors_by_type: donor_stats.donor_count_by_type,
             donors_by_country: donor_stats.donor_count_by_country,
+            donors_by_engagement: HashMap::new(), // TODO: Implement engagement tracking
             recent_donors_count, // Count based on recent *donations* as per repo method name
+            at_risk_donors_count: 0, // TODO: Implement risk calculation
+            trend_analysis: DashboardTrendAnalysis {
+                new_donors_trend: Vec::new(),
+                funding_amount_trend: Vec::new(),
+                engagement_trend: Vec::new(),
+                retention_trend: Vec::new(),
+            },
+            top_donors: Vec::new(), // TODO: Calculate top donors
+            alerts: Vec::new(), // TODO: Generate alerts
             funding_summary: FundingSummaryStats {
                 total_active_fundings,
                 total_funding_amount: total_amount,
                 avg_funding_amount: avg_amount,
+                median_funding_amount: avg_amount, // Using avg as placeholder
                 funding_by_currency,
+                funding_by_status: HashMap::new(),
+                monthly_funding_trend: Vec::new(),
+                top_funding_countries: Vec::new(),
+                funding_concentration: 0.0,
             },
         })
     }
@@ -856,11 +1182,19 @@ impl DonorService for DonorServiceImpl {
                 DonorFundingStats {
                     active_fundings_count: active_count,
                     total_fundings_count: total_count,
+                    completed_fundings_count: 0, // TODO: Get from repository
+                    pending_fundings_count: 0, // TODO: Get from repository
                     total_funding_amount: total_amount,
                     active_funding_amount: active_amount,
                     avg_funding_amount: avg_amount,
+                    median_funding_amount: avg_amount, // Using avg as placeholder
                     largest_funding_amount: largest_amount,
+                    smallest_funding_amount: 0.0, // TODO: Get from repository
                     currency_distribution: currency_dist,
+                    funding_frequency: 0.0, // TODO: Calculate frequency
+                    retention_rate: 0.0, // TODO: Calculate retention
+                    funding_trend: Vec::new(), // TODO: Get trend data
+                    project_success_rate: 0.0, // TODO: Calculate success rate
                 }
             },
             Err(e) => {
@@ -869,11 +1203,19 @@ impl DonorService for DonorServiceImpl {
                  DonorFundingStats {
                     active_fundings_count: 0,
                     total_fundings_count: 0,
+                    completed_fundings_count: 0,
+                    pending_fundings_count: 0,
                     total_funding_amount: 0.0,
                     active_funding_amount: 0.0,
                     avg_funding_amount: 0.0,
+                    median_funding_amount: 0.0,
                     largest_funding_amount: 0.0,
+                    smallest_funding_amount: 0.0,
                     currency_distribution: HashMap::new(),
+                    funding_frequency: 0.0,
+                    retention_rate: 0.0,
+                    funding_trend: Vec::new(),
+                    project_success_rate: 0.0,
                 }
             }
         };
@@ -893,6 +1235,27 @@ impl DonorService for DonorServiceImpl {
             donor: donor_response,
             funding_stats: stats,
             recent_fundings,
+            activity_timeline: DonorActivityTimeline {
+                donor_id: id,
+                funding_activities: Vec::new(), // TODO: Get from repository
+                communication_activities: Vec::new(), // TODO: Get from repository
+                document_activities: Vec::new(), // TODO: Get from repository
+                agreement_activities: Vec::new(), // TODO: Get from repository
+                profile_changes: Vec::new(), // TODO: Get from repository
+            },
+            engagement_metrics: DonorEngagementMetrics {
+                donor_id: id,
+                engagement_score: 0.0, // TODO: Calculate
+                funding_retention_rate: 0.0, // TODO: Calculate
+                avg_donation_frequency_months: 0.0, // TODO: Calculate
+                last_donation_date: None, // TODO: Get from repository
+                last_communication_date: None, // TODO: Get from repository
+                communication_frequency_score: 0.0, // TODO: Calculate
+                project_success_correlation: 0.0, // TODO: Calculate
+                responsiveness_score: 0.0, // TODO: Calculate
+                relationship_strength: crate::domains::donor::types::RelationshipStrength::Weak, // TODO: Calculate
+                risk_indicators: Vec::new(), // TODO: Calculate
+            },
         })
     }
 
@@ -940,8 +1303,33 @@ impl DonorService for DonorServiceImpl {
         // 5. Create and return the response
         Ok(DonorWithDocumentTimeline {
             donor: donor_response,
-            documents_by_month,
-            total_document_count,
+            document_timeline: DonorDocumentTimeline {
+                donor_id: id,
+                agreements_by_year: HashMap::new(), // TODO: Organize documents by year
+                communications_by_quarter: documents_by_month, // Reuse the monthly organization
+                due_diligence_docs: Vec::new(), // TODO: Filter by document type
+                tax_documents: Vec::new(), // TODO: Filter by document type
+                legal_documents: Vec::new(), // TODO: Filter by document type
+                total_document_count: total_document_count as usize,
+                document_completeness_score: 0.0, // TODO: Calculate completeness
+            },
+            document_summary: DonorDocumentSummary {
+                agreement_count: 0, // TODO: Count by type
+                due_diligence_count: 0, // TODO: Count by type
+                tax_document_count: 0, // TODO: Count by type
+                communication_count: 0, // TODO: Count by type
+                legal_document_count: 0, // TODO: Count by type
+                financial_statement_count: 0, // TODO: Count by type
+                total_size_mb: 0.0, // TODO: Calculate total size
+                last_document_upload: None, // TODO: Get latest upload time
+                document_counts_by_type: HashMap::new(), // TODO: Group counts by type
+            },
+            compliance_status: DocumentComplianceStatus {
+                has_required_documents: false, // TODO: Check requirements
+                missing_documents: Vec::new(), // TODO: Identify missing docs
+                expired_documents: Vec::new(), // TODO: Check for expired docs
+                compliance_score: 0.0, // TODO: Calculate compliance score
+            },
         })
     }
 
@@ -998,5 +1386,346 @@ impl DonorService for DonorServiceImpl {
             paginated_result.total,
             params,
         ))
+    }
+
+    // === ADVANCED FILTERING ===
+    async fn find_donor_ids_by_filter(
+        &self,
+        filter: DonorFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>> {
+        auth.authorize(Permission::ViewDonors)?;
+        filter.validate().map_err(ServiceError::Domain)?;
+        self.repo.find_ids_by_filter(&filter).await.map_err(ServiceError::Domain)
+    }
+
+    async fn find_donors_by_filter(
+        &self,
+        filter: DonorFilter,
+        params: PaginationParams,
+        include: Option<&[DonorInclude]>,
+        auth: &AuthContext,
+    ) -> ServiceResult<PaginatedResult<DonorResponse>> {
+        auth.authorize(Permission::ViewDonors)?;
+        filter.validate().map_err(ServiceError::Domain)?;
+        
+        let paginated_result = self.repo.find_by_filter(&filter, params).await.map_err(ServiceError::Domain)?;
+        let mut enriched_items = Vec::with_capacity(paginated_result.items.len());
+        
+        for item in paginated_result.items {
+            let response = DonorResponse::from(item);
+            let enriched = self.enrich_response(response, include, auth).await?;
+            enriched_items.push(enriched);
+        }
+        
+        Ok(PaginatedResult::new(
+            enriched_items,
+            paginated_result.total,
+            params,
+        ))
+    }
+
+    async fn find_donor_ids_by_filter_optimized(
+        &self,
+        filter: DonorFilter,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<Uuid>> {
+        auth.authorize(Permission::ViewDonors)?;
+        filter.validate().map_err(ServiceError::Domain)?;
+        self.repo.find_ids_by_filter_optimized(&filter).await.map_err(ServiceError::Domain)
+    }
+
+    // === BULK OPERATIONS ===
+    async fn bulk_update_sync_priority_by_filter(
+        &self,
+        filter: DonorFilter,
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<u64> {
+        auth.authorize(Permission::EditDonors)?;
+        filter.validate().map_err(ServiceError::Domain)?;
+        self.repo.bulk_update_sync_priority_by_filter(&filter, priority, auth).await.map_err(ServiceError::Domain)
+    }
+
+    async fn bulk_update_donor_sync_priority(
+        &self,
+        ids: Vec<Uuid>,
+        priority: SyncPriority,
+        auth: &AuthContext,
+    ) -> ServiceResult<u64> {
+        auth.authorize(Permission::EditDonors)?;
+        
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let rows_affected = self.repo.update_sync_priority(&ids, priority, auth).await
+            .map_err(ServiceError::Domain)?;
+
+        Ok(rows_affected)
+    }
+
+    async fn bulk_update_donors_streaming(
+        &self,
+        updates: Vec<(Uuid, UpdateDonor)>,
+        _chunk_size: usize, // Repository handles chunking internally
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorBulkOperationResult> {
+        auth.authorize(Permission::EditDonors)?;
+        
+        let bulk_result = self.repo.bulk_update_donors_streaming(updates, auth).await
+            .map_err(ServiceError::Domain)?;
+        Ok(bulk_result)
+    }
+
+    // === ENRICHMENT & ANALYTICS ===
+    async fn get_donor_engagement_metrics(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorEngagementMetrics> {
+        auth.authorize(Permission::ViewDonors)?;
+        let metrics = self.repo.get_donor_engagement_metrics(id).await.map_err(ServiceError::Domain)?;
+        Ok(metrics)
+    }
+
+    async fn get_donor_trend_analysis(
+        &self,
+        id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<DonorTrendAnalysis> {
+        auth.authorize(Permission::ViewDonors)?;
+        
+        // Get basic donor info
+        let donor = self.repo.find_by_id(id).await.map_err(ServiceError::Domain)?;
+        
+        // Create trend analysis (placeholder implementation)
+        Ok(DonorTrendAnalysis {
+            donor_id: id,
+            donation_patterns: HashMap::new(),
+            funding_amount_trend: Vec::new(),
+            communication_trend: Vec::new(),
+            engagement_trend: Vec::new(),
+            seasonal_patterns: HashMap::new(),
+            prediction_confidence: 0.0,
+        })
+    }
+
+    async fn get_donor_funding_analytics(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, f64>> {
+        auth.authorize(Permission::ViewDonors)?;
+        
+        let stats = self.repo.get_donation_stats().await.map_err(ServiceError::Domain)?;
+        
+        let mut analytics = HashMap::new();
+        analytics.insert("total_donors".to_string(), stats.total_donors as f64);
+        analytics.insert("active_donors".to_string(), stats.active_donors as f64);
+        analytics.insert("inactive_donors".to_string(), stats.inactive_donors as f64);
+        analytics.insert("total_donation_amount".to_string(), stats.total_donation_amount.unwrap_or(0.0));
+        analytics.insert("avg_donation_amount".to_string(), stats.avg_donation_amount.unwrap_or(0.0));
+        analytics.insert("data_completeness_avg".to_string(), stats.data_completeness_avg);
+        
+        Ok(analytics)
+    }
+
+    async fn get_donor_growth_trends(
+        &self,
+        months: Option<i32>,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, i64>> {
+        auth.authorize(Permission::ViewDonors)?;
+        
+        let period_months = months.unwrap_or(12);
+        let now = Utc::now();
+        
+        let mut trends = HashMap::new();
+        
+        // Calculate monthly growth for the specified period
+        for i in 0..period_months {
+            let month_start = now - chrono::Duration::days((i + 1) as i64 * 30);
+            let month_end = now - chrono::Duration::days(i as i64 * 30);
+            
+            let month_key = month_start.format("%Y-%m").to_string();
+            
+            // Get count for this month
+            let month_count = query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM donors WHERE created_at >= ? AND created_at < ? AND deleted_at IS NULL"
+            )
+            .bind(month_start.to_rfc3339())
+            .bind(month_end.to_rfc3339())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+            
+            trends.insert(month_key, month_count);
+        }
+        
+        Ok(trends)
+    }
+
+    async fn get_donor_data_quality_report(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<HashMap<String, f64>> {
+        auth.authorize(Permission::ViewDonors)?;
+        
+        let stats = self.repo.get_donation_stats().await.map_err(ServiceError::Domain)?;
+        
+        let mut quality_report = HashMap::new();
+        
+        // Overall completeness
+        quality_report.insert("overall_completeness".to_string(), stats.data_completeness_avg);
+        
+        // Type coverage
+        let total_with_type = stats.donor_count_by_type.values().sum::<i64>();
+        if stats.total_donors > 0 {
+            let type_completeness = (total_with_type as f64 / stats.total_donors as f64) * 100.0;
+            quality_report.insert("type_completeness".to_string(), type_completeness);
+        }
+        
+        // Country coverage
+        let total_with_country = stats.donor_count_by_country.values().sum::<i64>();
+        if stats.total_donors > 0 {
+            let country_completeness = (total_with_country as f64 / stats.total_donors as f64) * 100.0;
+            quality_report.insert("country_completeness".to_string(), country_completeness);
+        }
+        
+        // Engagement rate
+        if stats.total_donors > 0 {
+            let engagement_rate = (stats.active_donors as f64 / stats.total_donors as f64) * 100.0;
+            quality_report.insert("engagement_rate".to_string(), engagement_rate);
+        }
+        
+        Ok(quality_report)
+    }
+
+    // === DUPLICATE DETECTION ===
+    async fn check_potential_duplicates(
+        &self,
+        name: &str,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<DonorDuplicateInfo>> {
+        auth.authorize(Permission::ViewDonors)?;
+        
+        // Use case-insensitive search for potential duplicates
+        let search_filter = DonorFilter::new()
+            .with_search_text(name.to_string());
+        
+        let similar_donors = self.repo.find_by_filter(&search_filter, 
+                                                    PaginationParams { page: 1, per_page: 10 }).await
+            .map_err(ServiceError::Domain)?;
+        
+        let mut duplicate_infos = Vec::new();
+        
+        for donor in similar_donors.items {
+            // Calculate similarity score (simple implementation)
+            let similarity_score = if donor.name.to_lowercase() == name.to_lowercase() {
+                1.0
+            } else if donor.name.to_lowercase().contains(&name.to_lowercase()) {
+                0.8
+            } else {
+                0.5
+            };
+            
+            let duplicate_info = DonorDuplicateInfo {
+                id: donor.id,
+                name: donor.name,
+                type_: donor.type_.and_then(|t| DonorType::from_str(&t)),
+                contact_person: donor.contact_person,
+                email: donor.email,
+                phone: donor.phone,
+                country: donor.country,
+                similarity_score,
+                matching_fields: vec!["name".to_string()], // Could be enhanced
+                confidence_level: if similarity_score > 0.9 {
+                    crate::domains::donor::types::DuplicateConfidence::High
+                } else if similarity_score > 0.7 {
+                    crate::domains::donor::types::DuplicateConfidence::Medium
+                } else {
+                    crate::domains::donor::types::DuplicateConfidence::Low
+                },
+                document_similarity: None, // Could be enhanced
+                created_at: donor.created_at,
+            };
+            
+            duplicate_infos.push(duplicate_info);
+        }
+        
+        Ok(duplicate_infos)
+    }
+
+    // === PERFORMANCE OPTIMIZATION ===
+    async fn get_index_optimization_suggestions(
+        &self,
+        auth: &AuthContext,
+    ) -> ServiceResult<Vec<String>> {
+        auth.authorize(Permission::ViewDonors)?;
+        let suggestions = self.repo.get_index_optimization_suggestions().await.map_err(ServiceError::Domain)?;
+        Ok(suggestions)
+    }
+
+    async fn create_donor_with_documents_enhanced(
+        &self,
+        new_donor: NewDonor,
+        documents: Vec<(Vec<u8>, String, Option<String>)>,
+        document_type_id: Uuid,
+        auth: &AuthContext,
+    ) -> ServiceResult<(DonorResponse, Vec<Result<MediaDocumentResponse, ServiceError>>)> {
+        // 1. Check Permissions
+        auth.authorize(Permission::CreateDonors)?;
+        
+        if !documents.is_empty() {
+            auth.authorize(Permission::UploadDocuments)?;
+        }
+
+        // 2. Enhanced validation
+        new_donor.validate().map_err(ServiceError::Domain)?;
+        self.validate_donor_business_rules(&new_donor, None).await?;
+        
+        // 3. Begin transaction for donor creation
+        let mut tx = self.pool.begin().await
+            .map_err(|e| ServiceError::Domain(DomainError::Database(DbError::from(e))))?;
+        
+        // 4. Create the donor first (within transaction)
+        let created_donor = match self.repo.create_with_tx(&new_donor, auth, &mut tx).await {
+            Ok(donor) => donor,
+            Err(e) => {
+                let _ = tx.rollback().await; // Rollback on error
+                return Err(ServiceError::Domain(e));
+            }
+        };
+        
+        // 5. Commit transaction to ensure donor is created before attaching docs
+        if let Err(e) = tx.commit().await {
+             return Err(ServiceError::Domain(DomainError::Database(DbError::from(e))));
+        }
+        
+        // 6. Now upload documents (outside transaction)
+        let document_results = if !documents.is_empty() {
+            // Enhanced validation for each document
+            for (ref file_data, ref filename, ref linked_field) in &documents {
+                self.validate_document_upload(file_data, filename, linked_field).await?;
+            }
+            
+            self.upload_documents_for_entity(
+                created_donor.id,
+                "donors",
+                documents,
+                document_type_id,
+                                 new_donor.sync_priority.as_ref()
+                     .and_then(|p| SyncPriority::from_str(p).ok())
+                     .unwrap_or(SyncPriority::Normal),
+                None,
+                auth,
+            ).await
+        } else {
+            Vec::new()
+        };
+        
+        // 7. Convert to Response DTO and return with document results
+        let response = self.enrich_response(DonorResponse::from(created_donor), None, auth).await?;
+        Ok((response, document_results))
     }
 }

@@ -489,10 +489,39 @@ struct ActivitiesView: View {
     }
     
     private func performExportFromSelection(includeBlobs: Bool = false, format: ExportFormat = .default) {
-        // Export implementation would go here when backend supports it
-        // For now, show error
-        crudManager.errorMessage = "Export functionality not yet implemented for activities"
-        crudManager.showErrorAlert = true
+        guard !selectionManager.selectedItems.isEmpty else { return }
+        
+        print("🔄 Starting export from selection mode for \(selectionManager.selectedCount) items, includeBlobs: \(includeBlobs), format: \(format.displayName)")
+        
+        Task {
+            guard let currentUser = authManager.currentUser else {
+                await MainActor.run {
+                    crudManager.errorMessage = "User not authenticated."
+                    crudManager.showErrorAlert = true
+                }
+                return
+            }
+            
+            let selectedIdsArray = Array(selectionManager.selectedItems)
+            
+            await exportManager.exportSelectedItems(
+                    ids: selectedIdsArray,
+                    includeBlobs: includeBlobs,
+                    format: format,
+                authToken: currentUser.token,
+                onClearSelection: {
+                    // This will be called by the export manager when export completes
+                    self.selectionManager.clearSelection()
+                    self.showExportOptions = false
+                },
+                onCompletion: { success in
+                    // Handle completion if needed
+                    if !success {
+                        print("❌ Export completed with errors")
+                    }
+                }
+            )
+        }
     }
 }
 
@@ -1514,20 +1543,16 @@ class ActivityExportService: DomainExportService {
         targetPath: String,
         token: String
     ) async throws -> ExportJobResponse {
-        // TODO: Implement when backend export functionality is added
-        throw NSError(
-            domain: "ActivityExport",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Export functionality not yet implemented for activities"]
+        return try await ActivityService.shared.exportActivitiesByIds(
+            ids: ids,
+            includeBlobs: includeBlobs,
+            format: format,
+            targetPath: targetPath,
+            token: token
         )
     }
     
     func getExportStatus(jobId: String) async throws -> ExportJobResponse {
-        // TODO: Implement when backend export functionality is added
-        throw NSError(
-            domain: "ActivityExport",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Export status check not yet implemented for activities"]
-        )
+        return try await ActivityService.shared.getExportStatus(jobId: jobId)
     }
 }

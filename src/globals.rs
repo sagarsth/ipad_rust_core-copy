@@ -612,7 +612,7 @@ async fn initialize_internal(
 
     // Repositories
     let user_repo: Arc<dyn UserRepository> = Arc::new(SqliteUserRepository::new(pool.clone(), change_log_repo.clone()));
-    let donor_repo: Arc<dyn DonorRepository> = Arc::new(SqliteDonorRepository::new(pool.clone()));
+    let donor_repo: Arc<dyn DonorRepository> = Arc::new(SqliteDonorRepository::new(pool.clone(), change_log_repo.clone()));
     let media_document_repo: Arc<dyn MediaDocumentRepository> = Arc::new(SqliteMediaDocumentRepository::new(pool.clone(), change_log_repo.clone()));
     let document_type_repo: Arc<dyn DocumentTypeRepository> = Arc::new(SqliteDocumentTypeRepository::new(pool.clone(), change_log_repo.clone()));
     let project_repo: Arc<dyn ProjectRepository> = Arc::new(SqliteProjectRepository::new(pool.clone(), change_log_repo.clone()));

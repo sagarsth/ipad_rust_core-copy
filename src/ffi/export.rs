@@ -724,6 +724,112 @@ pub unsafe extern "C" fn export_activities_all(
     })
 }
 
+/// Create export for activities by specific IDs
+/// 
+/// # Arguments
+/// * `export_options_json` - JSON containing export options and IDs
+/// * `token` - Access token for authentication
+/// 
+/// # Returns
+/// JSON containing export job summary with job ID and status
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn export_activities_by_ids(
+    export_options_json: *const c_char,
+    token: *const c_char,
+    result: *mut *mut c_char,
+) -> c_int {
+    handle_status_result(|| unsafe {
+        if export_options_json.is_null() || token.is_null() || result.is_null() {
+            return Err(FFIError::invalid_argument("Null pointer(s) provided"));
+        }
+        
+        let json_str = CStr::from_ptr(export_options_json).to_str()
+            .map_err(|_| FFIError::invalid_argument("Invalid export options JSON string"))?;
+        
+        let token_str = CStr::from_ptr(token).to_str()
+            .map_err(|_| FFIError::invalid_argument("Invalid token string"))?;
+        
+        #[derive(Deserialize)]
+        struct ExportByIdsOptions {
+            ids: Vec<String>,
+            include_blobs: Option<bool>,
+            target_path: Option<String>,
+            format: Option<ExportFormat>,
+        }
+        
+        let options: ExportByIdsOptions = parse_json_payload(json_str)?;
+        log::info!("[ACTIVITY_EXPORT_FFI] Parsed export options: include_blobs={}, target_path={:?}, format={:?}", 
+                   options.include_blobs.unwrap_or(false), options.target_path, options.format);
+        
+        let auth_context = create_auth_context_from_token(token_str)?;
+        log::info!("[ACTIVITY_EXPORT_FFI] Created auth context for user: {}", auth_context.user_id);
+        
+        // Parse IDs to UUIDs with debugging
+        log::info!("[ACTIVITY_EXPORT_FFI] Received activity IDs for export: {:?}", options.ids);
+        let ids: Result<Vec<Uuid>, _> = options.ids.iter()
+            .enumerate()
+            .map(|(idx, id_str)| {
+                log::info!("[ACTIVITY_EXPORT_FFI] Attempting to parse activity UUID {}: '{}'", idx, id_str);
+                let result = Uuid::parse_str(id_str);
+                if let Err(ref e) = result {
+                    log::error!("[ACTIVITY_EXPORT_FFI] Failed to parse activity UUID '{}': {}", id_str, e);
+                } else {
+                    log::info!("[ACTIVITY_EXPORT_FFI] Successfully parsed activity UUID {}: {}", idx, result.as_ref().unwrap());
+                }
+                result
+            })
+            .collect();
+        let ids = ids.map_err(|e| {
+            log::error!("[ACTIVITY_EXPORT_FFI] UUID parsing failed: {}", e);
+            FFIError::invalid_argument(&format!("Invalid UUID format in activity IDs: {}", e))
+        })?;
+        
+        let filters = vec![EntityFilter::ActivitiesByIds { ids: ids.clone() }];
+        let include_blobs = options.include_blobs.unwrap_or(false);
+        let target_path = options.target_path.map(PathBuf::from);
+        
+        log::info!("[ACTIVITY_EXPORT_FFI] Creating filter: ActivitiesByIds with {} IDs", ids.len());
+        log::info!("[ACTIVITY_EXPORT_FFI] Export settings: include_blobs={}, target_path={:?}", include_blobs, target_path);
+        
+        let export_request = ExportRequest {
+            filters,
+            include_blobs,
+            target_path,
+            format: options.format.or_else(|| Some(ExportFormat::Csv { 
+                delimiter: b',', 
+                quote_char: b'"', 
+                escape_char: None, 
+                compress: false 
+            })),
+            use_compression: false,
+            use_background: false,
+        };
+        
+        log::info!("[ACTIVITY_EXPORT_FFI] Created export request with format: {:?}", export_request.format);
+
+        
+        // Use V2 service for proper CSV/Parquet streaming with iOS optimizations
+        log::info!("[ACTIVITY_EXPORT_FFI] Building export service V2");
+        let export_service_v2 = build_export_service_v2()?;
+        
+        log::info!("[ACTIVITY_EXPORT_FFI] Calling export_streaming on service V2");
+        let summary = block_on_async(export_service_v2.export_streaming(export_request, &auth_context))
+            .map_err(|e| {
+                log::error!("[ACTIVITY_EXPORT_FFI] Export streaming failed: {}", e);
+                FFIError::internal(format!("Activity export creation failed: {}", e))
+            })?;
+        
+        log::info!("[ACTIVITY_EXPORT_FFI] Export streaming completed successfully, job_id: {}", summary.job.id);
+        
+        let response = format_export_job_response(summary);
+        log::info!("[ACTIVITY_EXPORT_FFI] Formatted export job response");
+        
+        *result = create_json_response(response)?;
+        log::info!("[ACTIVITY_EXPORT_FFI] Created JSON response and returning success");
+        Ok(())
+    })
+}
+
 /// Create export for all donors
 /// 
 /// # Arguments

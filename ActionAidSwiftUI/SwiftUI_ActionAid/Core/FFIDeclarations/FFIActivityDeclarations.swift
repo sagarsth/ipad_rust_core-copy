@@ -81,6 +81,14 @@ func activity_find_stale(_ payload: UnsafePointer<CChar>, _ result: UnsafeMutabl
 @_silgen_name("activity_get_progress_analysis")
 func activity_get_progress_analysis(_ payload: UnsafePointer<CChar>, _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt
 
+// MARK: - Export Operations
+
+@_silgen_name("export_activities_by_ids")
+func export_activities_by_ids(_ options: UnsafePointer<CChar>, _ token: UnsafePointer<CChar>, _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt
+
+@_silgen_name("export_activities_all")
+func export_activities_all(_ options: UnsafePointer<CChar>, _ token: UnsafePointer<CChar>, _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt
+
 // MARK: - Memory Management
 
 @_silgen_name("activity_free")

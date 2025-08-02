@@ -486,6 +486,20 @@ struct ActivityExportOptions: Codable {
     }
 }
 
+struct ActivityExportByIdsOptions: Codable {
+    let ids: [String]
+    let includeBlobs: Bool?
+    let targetPath: String?
+    let format: ExportFormat
+    
+    enum CodingKeys: String, CodingKey {
+        case ids
+        case includeBlobs = "include_blobs"
+        case targetPath = "target_path"
+        case format
+    }
+}
+
 // MARK: - Bulk Update Response
 
 struct BulkUpdateStatusResponse: Codable {

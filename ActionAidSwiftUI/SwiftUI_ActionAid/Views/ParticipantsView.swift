@@ -2042,21 +2042,17 @@ class ParticipantExportService: DomainExportService {
         targetPath: String,
         token: String
     ) async throws -> ExportJobResponse {
-        // TODO: Implement when backend export functionality is added
-        throw NSError(
-            domain: "ParticipantExport",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Export functionality not yet implemented for participants"]
+        return try await ParticipantService.shared.exportParticipantsByIds(
+            ids: ids,
+            includeBlobs: includeBlobs,
+            format: format,
+            targetPath: targetPath,
+            token: token
         )
     }
     
     func getExportStatus(jobId: String) async throws -> ExportJobResponse {
-        // TODO: Implement when backend export functionality is added  
-        throw NSError(
-            domain: "ParticipantExport",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Export status check not yet implemented for participants"]
-        )
+        return try await ParticipantService.shared.getExportStatus(jobId: jobId)
     }
 }
 

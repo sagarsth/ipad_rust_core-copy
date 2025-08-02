@@ -173,7 +173,15 @@ impl CsvRecord for crate::domains::export::repository_v2::ParticipantExport {
             "updated_by_device_id",
             "deleted_at",
             "deleted_by_user_id",
-            "deleted_by_device_id"
+            "deleted_by_device_id",
+            "workshop_count",
+            "completed_workshop_count",
+            "upcoming_workshop_count",
+            "livelihood_count",
+            "active_livelihood_count",
+            "document_count",
+            "created_by_username",
+            "updated_by_username"
         ]
     }
     
@@ -195,7 +203,15 @@ impl CsvRecord for crate::domains::export::repository_v2::ParticipantExport {
             csv_optional_uuid_to_string(&self.updated_by_device_id),
             self.deleted_at.as_ref().map(|dt| csv_datetime_to_string(dt)).unwrap_or_default(),
             csv_optional_uuid_to_string(&self.deleted_by_user_id),
-            csv_optional_uuid_to_string(&self.deleted_by_device_id)
+            csv_optional_uuid_to_string(&self.deleted_by_device_id),
+            self.workshop_count.map(|c| c.to_string()).unwrap_or_default(),
+            self.completed_workshop_count.map(|c| c.to_string()).unwrap_or_default(),
+            self.upcoming_workshop_count.map(|c| c.to_string()).unwrap_or_default(),
+            self.livelihood_count.map(|c| c.to_string()).unwrap_or_default(),
+            self.active_livelihood_count.map(|c| c.to_string()).unwrap_or_default(),
+            self.document_count.map(|c| c.to_string()).unwrap_or_default(),
+            self.created_by_username.clone().unwrap_or_default(),
+            self.updated_by_username.clone().unwrap_or_default()
         ]
     }
 }
@@ -219,7 +235,13 @@ impl CsvRecord for crate::domains::export::repository_v2::ActivityExport {
             "updated_by_device_id",
             "deleted_at",
             "deleted_by_user_id",
-            "deleted_by_device_id"
+            "deleted_by_device_id",
+            "project_name",
+            "status_name",
+            "progress_percentage",
+            "document_count",
+            "created_by_username",
+            "updated_by_username"
         ]
     }
     
@@ -242,6 +264,12 @@ impl CsvRecord for crate::domains::export::repository_v2::ActivityExport {
             self.deleted_at.as_ref().map(|d| csv_datetime_to_string(d)).unwrap_or_default(),
             csv_optional_uuid_to_string(&self.deleted_by_user_id),
             csv_optional_uuid_to_string(&self.deleted_by_device_id),
+            self.project_name.clone().unwrap_or_default(),
+            self.status_name.clone().unwrap_or_default(),
+            self.progress_percentage.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+            self.document_count.map(|c| c.to_string()).unwrap_or_default(),
+            self.created_by_username.clone().unwrap_or_default(),
+            self.updated_by_username.clone().unwrap_or_default()
         ]
     }
 }

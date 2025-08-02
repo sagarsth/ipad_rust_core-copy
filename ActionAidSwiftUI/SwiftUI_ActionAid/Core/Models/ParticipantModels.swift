@@ -88,6 +88,8 @@ struct ParticipantResponse: Codable, Identifiable {
     let workshops: [WorkshopSummary]?
     let livelihoods: [LivelihoodSummary]?
     let documentCountsByType: [String: Int64]?
+    let createdByUsername: String?
+    let updatedByUsername: String?
     
     enum CodingKeys: String, CodingKey {
         case id, name, gender, disability, location, documents, workshops, livelihoods
@@ -102,6 +104,8 @@ struct ParticipantResponse: Codable, Identifiable {
         case completedWorkshopCount = "completed_workshop_count"
         case upcomingWorkshopCount = "upcoming_workshop_count"
         case documentCountsByType = "document_counts_by_type"
+        case createdByUsername = "created_by_username"
+        case updatedByUsername = "updated_by_username"
     }
     
     // Helper computed properties
@@ -701,6 +705,22 @@ struct DuplicateDocumentInfo: Codable, Identifiable {
     var isProfilePhoto: Bool {
         guard let field = linkedField else { return false }
         return field.contains("profile") || field.contains("photo")
+    }
+}
+
+// MARK: - Export Models
+
+struct ParticipantExportByIdsOptions: Codable {
+    let ids: [String]
+    let includeBlobs: Bool?
+    let targetPath: String?
+    let format: ExportFormat
+    
+    enum CodingKeys: String, CodingKey {
+        case ids
+        case includeBlobs = "include_blobs"
+        case targetPath = "target_path"
+        case format
     }
 }
 

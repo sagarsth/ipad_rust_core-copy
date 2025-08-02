@@ -444,15 +444,19 @@ impl SqliteStreamingRepository {
     ) -> ServiceResult<Vec<ParticipantExport>> {
         log::debug!("[PARTICIPANT_STREAM] Starting participant stream with cursor: {:?}, limit: {}", cursor, limit);
         
+        // Simplified query first - get basic data working, then add enrichments
         let mut query = sqlx::QueryBuilder::new(
             "SELECT id, name, gender, disability, disability_type, age_group, location, sync_priority, \
              created_at, updated_at, created_by_user_id, created_by_device_id, \
-             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
-             FROM participants"
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id, \
+             0 as workshop_count, 0 as completed_workshop_count, 0 as upcoming_workshop_count, \
+             0 as livelihood_count, 0 as active_livelihood_count, 0 as document_count, \
+             NULL as created_by_username, NULL as updated_by_username \
+             FROM participants WHERE deleted_at IS NULL"
         );
         
         if let Some(cursor_id) = cursor {
-            query.push(" WHERE id > ");
+            query.push(" AND id > ");
             query.push_bind(cursor_id.to_string());
         }
         
@@ -460,7 +464,7 @@ impl SqliteStreamingRepository {
         query.push_bind(limit as i64);
         
         let built_query = query.build();
-        log::debug!("[PARTICIPANT_STREAM] Executing query: {}", built_query.sql());
+        log::debug!("[PARTICIPANT_STREAM] Executing simplified query: {}", built_query.sql());
         
         let rows = built_query.fetch_all(&self.pool).await
             .map_err(|e| {
@@ -499,8 +503,11 @@ impl SqliteStreamingRepository {
         let mut query = sqlx::QueryBuilder::new(
             "SELECT id, name, gender, disability, disability_type, age_group, location, sync_priority, \
              created_at, updated_at, created_by_user_id, created_by_device_id, \
-             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
-             FROM participants WHERE id IN ("
+             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id, \
+             0 as workshop_count, 0 as completed_workshop_count, 0 as upcoming_workshop_count, \
+             0 as livelihood_count, 0 as active_livelihood_count, 0 as document_count, \
+             NULL as created_by_username, NULL as updated_by_username \
+             FROM participants WHERE deleted_at IS NULL AND id IN ("
         );
         
         let mut separated = query.separated(", ");
@@ -548,23 +555,44 @@ impl SqliteStreamingRepository {
     ) -> ServiceResult<Vec<ActivityExport>> {
         log::debug!("[ACTIVITY_STREAM] Starting activity stream with cursor: {:?}, limit: {}", cursor, limit);
         
+        // Enhanced query with LEFT JOINs to fetch enriched data
         let mut query = sqlx::QueryBuilder::new(
-            "SELECT id, project_id, description, kpi, target_value, actual_value, status_id, sync_priority, \
-             created_at, updated_at, created_by_user_id, created_by_device_id, \
-             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
-             FROM activities"
+            "SELECT a.id, a.project_id, a.description, a.kpi, a.target_value, a.actual_value, a.status_id, a.sync_priority, \
+             a.created_at, a.updated_at, a.created_by_user_id, a.created_by_device_id, \
+             a.updated_by_user_id, a.updated_by_device_id, a.deleted_at, a.deleted_by_user_id, a.deleted_by_device_id, \
+             p.name as project_name, \
+             CASE a.status_id \
+                WHEN 1 THEN 'Not Started' \
+                WHEN 2 THEN 'In Progress' \
+                WHEN 3 THEN 'Completed' \
+                WHEN 4 THEN 'On Hold' \
+                ELSE 'Unknown' \
+             END as status_name, \
+             CASE \
+                WHEN a.target_value > 0 THEN (a.actual_value * 100.0 / a.target_value) \
+                ELSE NULL \
+             END as progress_percentage, \
+             COUNT(DISTINCT md.id) as document_count, \
+             cu.name as created_by_username, \
+             uu.name as updated_by_username \
+             FROM activities a \
+             LEFT JOIN projects p ON p.id = a.project_id AND p.deleted_at IS NULL \
+             LEFT JOIN media_documents md ON md.related_id = a.id AND md.related_table = 'activities' AND md.deleted_at IS NULL \
+             LEFT JOIN users cu ON cu.id = a.created_by_user_id \
+             LEFT JOIN users uu ON uu.id = a.updated_by_user_id \
+             WHERE a.deleted_at IS NULL"
         );
         
         if let Some(cursor_id) = cursor {
-            query.push(" WHERE id > ");
+            query.push(" AND a.id > ");
             query.push_bind(cursor_id.to_string());
         }
         
-        query.push(" ORDER BY id LIMIT ");
+        query.push(" GROUP BY a.id ORDER BY a.id LIMIT ");
         query.push_bind(limit as i64);
         
         let built_query = query.build();
-        log::debug!("[ACTIVITY_STREAM] Executing query: {}", built_query.sql());
+        log::debug!("[ACTIVITY_STREAM] Executing enriched query: {}", built_query.sql());
         
         let rows = built_query.fetch_all(&self.pool).await
             .map_err(|e| {
@@ -583,7 +611,7 @@ impl SqliteStreamingRepository {
             }
         }
         
-        log::debug!("[ACTIVITY_STREAM] Successfully loaded {} activities", activities.len());
+        log::debug!("[ACTIVITY_STREAM] Successfully loaded {} enriched activities", activities.len());
         Ok(activities)
     }
     
@@ -601,10 +629,30 @@ impl SqliteStreamingRepository {
         log::debug!("[ACTIVITY_STREAM_BY_IDS] Starting stream with {} IDs, cursor: {:?}, limit: {}", ids.len(), cursor, limit);
         
         let mut query = sqlx::QueryBuilder::new(
-            "SELECT id, project_id, description, kpi, target_value, actual_value, status_id, sync_priority, \
-             created_at, updated_at, created_by_user_id, created_by_device_id, \
-             updated_by_user_id, updated_by_device_id, deleted_at, deleted_by_user_id, deleted_by_device_id \
-             FROM activities WHERE id IN ("
+            "SELECT a.id, a.project_id, a.description, a.kpi, a.target_value, a.actual_value, a.status_id, a.sync_priority, \
+             a.created_at, a.updated_at, a.created_by_user_id, a.created_by_device_id, \
+             a.updated_by_user_id, a.updated_by_device_id, a.deleted_at, a.deleted_by_user_id, a.deleted_by_device_id, \
+             p.name as project_name, \
+             CASE a.status_id \
+                WHEN 1 THEN 'Not Started' \
+                WHEN 2 THEN 'In Progress' \
+                WHEN 3 THEN 'Completed' \
+                WHEN 4 THEN 'On Hold' \
+                ELSE 'Unknown' \
+             END as status_name, \
+             CASE \
+                WHEN a.target_value > 0 THEN (a.actual_value * 100.0 / a.target_value) \
+                ELSE NULL \
+             END as progress_percentage, \
+             COUNT(DISTINCT md.id) as document_count, \
+             cu.name as created_by_username, \
+             uu.name as updated_by_username \
+             FROM activities a \
+             LEFT JOIN projects p ON p.id = a.project_id AND p.deleted_at IS NULL \
+             LEFT JOIN media_documents md ON md.related_id = a.id AND md.related_table = 'activities' AND md.deleted_at IS NULL \
+             LEFT JOIN users cu ON cu.id = a.created_by_user_id \
+             LEFT JOIN users uu ON uu.id = a.updated_by_user_id \
+             WHERE a.deleted_at IS NULL AND a.id IN ("
         );
         
         let mut separated = query.separated(", ");
@@ -614,15 +662,15 @@ impl SqliteStreamingRepository {
         separated.push_unseparated(")");
         
         if let Some(cursor_id) = cursor {
-            query.push(" AND id > ");
+            query.push(" AND a.id > ");
             query.push_bind(cursor_id.to_string());
         }
         
-        query.push(" ORDER BY id LIMIT ");
+        query.push(" GROUP BY a.id ORDER BY a.id LIMIT ");
         query.push_bind(limit as i64);
         
         let built_query = query.build();
-        log::debug!("[ACTIVITY_STREAM_BY_IDS] Executing query: {}", built_query.sql());
+        log::debug!("[ACTIVITY_STREAM_BY_IDS] Executing enriched query: {}", built_query.sql());
         
         let rows = built_query.fetch_all(&self.pool).await
             .map_err(|e| {
@@ -1706,6 +1754,16 @@ pub struct ParticipantExport {
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
     pub deleted_by_device_id: Option<Uuid>,
+    
+    // Enriched fields to match UI expectations
+    pub workshop_count: Option<i64>,
+    pub completed_workshop_count: Option<i64>,
+    pub upcoming_workshop_count: Option<i64>,
+    pub livelihood_count: Option<i64>,
+    pub active_livelihood_count: Option<i64>,
+    pub document_count: Option<i64>,
+    pub created_by_username: Option<String>,
+    pub updated_by_username: Option<String>,
 }
 
 impl ExportEntity for ParticipantExport {
@@ -1761,9 +1819,37 @@ impl ExportEntity for ParticipantExport {
                 .map(|s| Uuid::parse_str(&s))
                 .transpose()
                 .map_err(|e| ServiceError::ValidationError(format!("Invalid deleted_by_device_id UUID: {}", e)))?,
+            
+            // Enriched fields from aggregation query
+            workshop_count: {
+                let count: i64 = row.get("workshop_count");
+                if count > 0 { Some(count) } else { None }
+            },
+            completed_workshop_count: {
+                let count: i64 = row.get("completed_workshop_count");
+                if count > 0 { Some(count) } else { None }
+            },
+            upcoming_workshop_count: {
+                let count: i64 = row.get("upcoming_workshop_count");
+                if count > 0 { Some(count) } else { None }
+            },
+            livelihood_count: {
+                let count: i64 = row.get("livelihood_count");
+                if count > 0 { Some(count) } else { None }
+            },
+            active_livelihood_count: {
+                let count: i64 = row.get("active_livelihood_count");
+                if count > 0 { Some(count) } else { None }
+            },
+            document_count: {
+                let count: i64 = row.get("document_count");
+                if count > 0 { Some(count) } else { None }
+            },
+            created_by_username: row.get("created_by_username"),
+            updated_by_username: row.get("updated_by_username"),
         };
         
-        log::debug!("[PARTICIPANT_EXPORT] Successfully converted participant: {} ({})", result.name, result.id);
+        log::debug!("[PARTICIPANT_EXPORT] Successfully converted enriched participant: {} ({})", result.name, result.id);
         Ok(result)
     }
     
@@ -1796,6 +1882,14 @@ pub struct ActivityExport {
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub deleted_by_user_id: Option<Uuid>,
     pub deleted_by_device_id: Option<Uuid>,
+    
+    // Enriched fields to match UI expectations
+    pub project_name: Option<String>,
+    pub status_name: Option<String>,
+    pub progress_percentage: Option<f64>,
+    pub document_count: Option<i64>,
+    pub created_by_username: Option<String>,
+    pub updated_by_username: Option<String>,
 }
 
 impl ActivityExport {
@@ -1866,9 +1960,20 @@ impl ExportEntity for ActivityExport {
                 .map(|s| Uuid::parse_str(&s))
                 .transpose()
                 .map_err(|e| ServiceError::ValidationError(format!("Invalid deleted_by_device_id UUID: {}", e)))?,
+            
+            // Enriched fields from aggregation query
+            project_name: row.get("project_name"),
+            status_name: row.get("status_name"),
+            progress_percentage: row.get("progress_percentage"),
+            document_count: {
+                let count: i64 = row.get("document_count");
+                if count > 0 { Some(count) } else { None }
+            },
+            created_by_username: row.get("created_by_username"),
+            updated_by_username: row.get("updated_by_username"),
         };
         
-        log::debug!("[ACTIVITY_EXPORT] Successfully converted activity: {} ({})", 
+        log::debug!("[ACTIVITY_EXPORT] Successfully converted enriched activity: {} ({})", 
             result.description.as_deref().unwrap_or("No description"), result.id);
         Ok(result)
     }

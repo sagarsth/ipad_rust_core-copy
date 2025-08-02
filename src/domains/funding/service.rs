@@ -306,11 +306,14 @@ impl ProjectFundingServiceImpl {
             if include_donor && response.donor.is_none() {
                 match self.donor_repo.find_by_id(response.donor_id).await {
                     Ok(donor) => {
+                        let completeness = donor.data_completeness();
                         response.donor = Some(DonorSummary {
                             id: donor.id,
                             name: donor.name,
                             type_: donor.type_,
                             country: donor.country,
+                            data_completeness: Some(completeness),
+                            engagement_score: None,
                         });
                     },
                     Err(_) => {
@@ -912,11 +915,14 @@ impl ProjectFundingService for ProjectFundingServiceImpl {
 
         // 2. Verify donor exists and get summary
         let donor = self.donor_repo.find_by_id(donor_id).await?;
+        let completeness = donor.data_completeness();
         let donor_summary = DonorSummary {
             id: donor.id,
-            name: donor.name.clone(), // Clone name here
-            type_: donor.type_, // Clone Option<String>
-            country: donor.country, // Clone Option<String>
+            name: donor.name.clone(),
+            type_: donor.type_,
+            country: donor.country,
+            data_completeness: Some(completeness),
+            engagement_score: None,
         };
 
         // 3. Get detailed funding statistics from repo

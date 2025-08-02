@@ -121,6 +121,14 @@ func participant_get_with_document_timeline(_ payload: UnsafePointer<CChar>, _ r
 @_silgen_name("participant_check_duplicates")
 func participant_check_duplicates(_ payload: UnsafePointer<CChar>, _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt
 
+// MARK: - Export Operations
+
+@_silgen_name("export_participants_by_ids")
+func export_participants_by_ids(_ options: UnsafePointer<CChar>, _ token: UnsafePointer<CChar>, _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt
+
+@_silgen_name("export_participants_all")
+func export_participants_all(_ options: UnsafePointer<CChar>, _ token: UnsafePointer<CChar>, _ result: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>) -> CInt
+
 // MARK: - Memory Management
 
 @_silgen_name("participant_free")

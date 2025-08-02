@@ -174,7 +174,7 @@ int32_t donor_get_with_document_timeline(const char*, char**);
 void donor_free(char*);
 
 // ============================================================================
-// EXPORT FUNCTIONS (29 functions)
+// EXPORT FUNCTIONS (30 functions)
 // ============================================================================
 
 int32_t export_create_export(const char*, const char*, char**);
@@ -186,6 +186,7 @@ int32_t export_projects_all(const char*, const char*, char**);
 int32_t export_participants_by_ids(const char*, const char*, char**);
 int32_t export_participants_all(const char*, const char*, char**);
 int32_t export_activities_all(const char*, const char*, char**);
+int32_t export_activities_by_ids(const char*, const char*, char**);
 int32_t export_donors_all(const char*, const char*, char**);
 int32_t export_funding_all(const char*, const char*, char**);
 int32_t export_livelihoods_all(const char*, const char*, char**);
